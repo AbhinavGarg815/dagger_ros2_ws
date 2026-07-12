@@ -1,0 +1,176 @@
+/**:
+  ros__parameters:
+    model_namespace: "dagger"
+    use_sim_time: false
+    points_topic: "/rslidar_points"
+    imu_topic: "imu/data"
+
+lidar2base_publisher:
+  ros__parameters:
+    enable_lidar2base_publisher: false
+    x: 0.2925
+    y: 0.0
+    z: 1.3
+    roll: 0.0
+    pitch: 0.0
+    yaw: 0.0
+    frame_id: "base_link"
+    child_frame_id: "velodyne"
+
+map2robotmap_publisher:
+  ros__parameters:
+    enable_map2robotmap_publisher: true
+    x: 0.0
+    y: 0.0
+    z: 0.0
+    roll: 0.0
+    pitch: 0.0
+    yaw: 0.0
+    frame_id: "map"
+    child_frame_id: "map"
+
+prefiltering_component:
+  ros__parameters:
+    enable_prefiltering: true
+    base_link_frame: "base_link"
+    downsample_method: "VOXELGRID"
+    downsample_resolution: 0.15
+    downsample_min_points_per_voxel: 1
+    outlier_removal_method: "RADIUS"
+    statistical_mean_k: 30
+    statistical_stddev: 1.2
+    radius_radius: 0.5
+    radius_min_neighbors: 2
+    enable_distance_filter: true
+    distance_near_thresh: 1.0
+    distance_far_thresh: 40.0
+    enable_deskewing: false
+    scan_period: 0.1
+
+scan_matching_odometry_component:
+  ros__parameters:
+    enable_scan_matching_odometry: true
+    enable_odom_to_file: false
+    odom_frame_id: "odom"
+    keyframe_delta_translation: 1.0
+    keyframe_delta_angle: 0.5236
+    keyframe_delta_time: 10000.0
+    enable_transform_thresholding: false
+    max_acceptable_translation: 1.0
+    max_acceptable_angle: 1.0
+    max_consecutive_rejections: 5
+    enable_imu_frontend: false
+    enable_robot_odometry_init_guess: false
+    robot_odom_frame_id: "robot_odom"
+    downsample_method: "NONE"
+    downsample_resolution: 0.1
+    downsample_min_points_per_voxel: 1
+    registration_method: "SMALL_GICP"
+    reg_num_threads: 4
+    reg_transformation_epsilon: 0.1
+    reg_maximum_iterations: 64
+    reg_max_correspondence_distance: 2.0
+    reg_max_optimizer_iterations: 20
+    reg_use_reciprocal_correspondences: false
+    reg_correspondence_randomness: 20
+    reg_resolution: 1.0
+    reg_nn_search_method: "DIRECT7"
+
+floor_detection_component:
+  ros__parameters:
+    enable_floor_detection: false
+    tilt_deg: 0.0
+    sensor_height: 1.3
+    height_clip_range: 1.0
+    floor_pts_thresh: 512
+    floor_normal_thresh_deg: 10.0
+    enable_normal_filtering: true
+    normal_filter_thresh_deg: 20.0
+
+mrg_slam_component:
+  ros__parameters:
+    enable_mrg_slam: true
+    own_name: "dagger"
+    multi_robot_names: ["dagger"]
+    robot_remove_points_radius: 2.0
+    x: 0.0
+    y: 0.0
+    z: 0.0
+    roll: 0.0
+    pitch: 0.0
+    yaw: 0.0
+    init_pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    init_odom_topic: "NONE"
+    init_pose_topic: "NONE"
+    map_frame_id: "map"
+    odom_frame_id: "odom"
+    g2o_solver_type: "lm_var_cholmod"
+    g2o_solver_num_iterations: 512
+    g2o_verbose: false
+    enable_fill_first_cloud: false
+    fill_first_cloud_radius: 5.0
+    fill_first_cloud_simple: false
+    max_keyframes_per_update: 10000
+    keyframe_delta_trans: 1.0
+    keyframe_delta_angle: 0.5236
+    use_custom_inf_matrix_first_node: true
+    custom_inf_matrix_first_node_stddev: [0.75, 0.75, 0.75, 0.1, 0.1, 0.1]
+    candidate_max_xy_distance: 15.0
+    accum_distance_thresh_same_robot: 15.0
+    accum_distance_thresh_other_robot: 5.0
+    fitness_score_max_range: .inf
+    fitness_score_thresh: 1.25
+    use_planar_registration_guess: false
+    loop_closure_edge_robust_kernel: "Huber"
+    loop_closure_edge_robust_kernel_size: 1.0
+    enable_loop_closure_consistency_check: true
+    loop_closure_consistency_max_delta_trans: 0.3
+    loop_closure_consistency_max_delta_angle: 0.0523599
+    registration_method: "SMALL_GICP"
+    reg_num_threads: 4
+    reg_transformation_epsilon: 0.1
+    reg_maximum_iterations: 64
+    reg_max_correspondence_distance: 2.0
+    reg_max_optimizer_iterations: 20
+    reg_use_reciprocal_correspondences: false
+    reg_correspondence_randomness: 20
+    reg_resolution: 1.0
+    reg_nn_search_method: "DIRECT7"
+    enable_gps: false
+    gps_edge_robust_kernel: "NONE"
+    gps_edge_robust_kernel_size: 1.0
+    gps_edge_stddev_xy: 10.0
+    gps_edge_stddev_z: 1000.0
+    gps_use_enu: false
+    gps_enu_origin_from_msg: true
+    gps_enu_origin: [0.0, 0.0, 0.0]
+    enable_imu_orientation: false
+    imu_orientation_edge_robust_kernel: "NONE"
+    imu_orientation_edge_stddev: 1.0
+    enable_imu_acceleration: false
+    imu_acceleration_edge_robust_kernel: "NONE"
+    imu_acceleration_edge_stddev: 1.0
+    enable_floor_coeffs: false
+    floor_edge_robust_kernel: "NONE"
+    floor_edge_stddev: 10.0
+    odometry_edge_robust_kernel: "NONE"
+    odometry_edge_robust_kernel_size: 1.0
+    use_const_inf_matrix: false
+    const_stddev_x: 0.5
+    const_stddev_q: 0.1
+    var_gain_a: 2.0
+    min_stddev_x: 0.1
+    max_stddev_x: 0.75
+    min_stddev_q: 0.05
+    max_stddev_q: 0.2
+    graph_exchange_mode: "PATH_PROXIMITY"
+    graph_request_min_accum_dist: 2.0
+    graph_request_max_robot_dist: 50.0
+    graph_request_min_time_delay: 2.0
+    graph_update_interval: 3.0
+    map_cloud_update_interval: 5.0
+    map_cloud_resolution: 0.1
+    map_cloud_min_points_per_voxel: 1
+    map_cloud_distance_far_thresh: 10000.0
+    save_graph: false
+    result_dir: ""

@@ -1,0 +1,41 @@
+repositories:
+  rslidar_sdk:
+    type: git
+    url: https://github.com/RoboSense-LiDAR/rslidar_sdk.git
+    version: 78d2abb7f0c21f789a606d584475c631d5118dc3
+  rslidar_msg:
+    type: git
+    url: https://github.com/RoboSense-LiDAR/rslidar_msg.git
+    version: fe8a95cb242bd294cc3d5e3422f2093fb49a56ee
+  realsense-ros:
+    type: git
+    url: https://github.com/IntelRealSense/realsense-ros.git
+    version: 775b167c0dbcfe00a012e248c66a7c8379ef9fbb
+  kiss-icp:
+    type: git
+    url: https://github.com/PRBonn/kiss-icp
+    version: 1ffa7d7512f10bfc8b1185095011fa31184019e3
+  rf2o_laser_odometry:
+    type: git
+    url: https://github.com/MAPIRlab/rf2o_laser_odometry.git
+    version: b38c68e46387b98845ecbfeb6660292f967a00d3
+  mrg_slam:
+    type: git
+    url: https://github.com/aserbremen/mrg_slam
+    version: c614d636746e4bc6075147ff2c42c77e151137b2
+  mrg_slam_msgs:
+    type: git
+    url: https://github.com/aserbremen/mrg_slam_msgs
+    version: 232287e7d2ff813b9d4fe33fa8fa69b19bb7930a
+  small_gicp:
+    type: git
+    url: https://github.com/koide3/small_gicp.git
+    version: 57c1106daf83c2c79ee0c58a9c7ed0032298ff4e
+  fast_gicp:
+    type: git
+    url: https://github.com/SMRT-AIST/fast_gicp
+    version: 0e7ec1441c99f7be453db2ea216d5de029387417
+  ndt_omp:
+    type: git
+    url: https://github.com/aserbremen/ndt_omp
+    version: 8cc0e47d1691a7056755cdcc89ebf6fa91d93d02
