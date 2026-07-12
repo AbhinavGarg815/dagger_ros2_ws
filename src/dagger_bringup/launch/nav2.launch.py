@@ -12,15 +12,26 @@ def generate_launch_description():
     bringup_dir = get_package_share_directory("dagger_bringup")
 
     params_file = LaunchConfiguration("params_file")
+    extra_params = LaunchConfiguration("extra_params")
     use_sim_time = LaunchConfiguration("use_sim_time")
     autostart = LaunchConfiguration("autostart")
 
+    default_params = os.path.join(bringup_dir, "params", "nav2_dagger.yaml")
     params_file_arg = DeclareLaunchArgument(
         "params_file",
-        default_value=os.path.join(bringup_dir, "params", "nav2_dagger.yaml"),
+        default_value=default_params,
+    )
+    # Optional overlay applied AFTER params_file (later file wins per-parameter).
+    # Defaults to params_file itself (a harmless no-op re-load); the odom-only
+    # validation passes nav2_odom_test.yaml here to override global_frame.
+    extra_params_arg = DeclareLaunchArgument(
+        "extra_params",
+        default_value=default_params,
     )
     use_sim_time_arg = DeclareLaunchArgument("use_sim_time", default_value="false")
     autostart_arg = DeclareLaunchArgument("autostart", default_value="true")
+
+    nav2_params = [params_file, extra_params]
 
     pointcloud_to_laserscan = Node(
         package="pointcloud_to_laserscan",
@@ -35,7 +46,7 @@ def generate_launch_description():
             "target_frame": "base_footprint",
             "transform_tolerance": 0.1,
             "min_height": 0.15,
-            "max_height": 1.5,
+            "max_height": 0.90,
             "angle_min": -3.14159,
             "angle_max": 3.14159,
             "angle_increment": 0.0087,
@@ -53,7 +64,7 @@ def generate_launch_description():
         executable="controller_server",
         name="controller_server",
         output="screen",
-        parameters=[params_file],
+        parameters=nav2_params,
         remappings=[("cmd_vel", "/cmd_vel_nav")],
     )
 
@@ -62,7 +73,7 @@ def generate_launch_description():
         executable="planner_server",
         name="planner_server",
         output="screen",
-        parameters=[params_file],
+        parameters=nav2_params,
     )
 
     behavior_server = Node(
@@ -70,7 +81,7 @@ def generate_launch_description():
         executable="behavior_server",
         name="behavior_server",
         output="screen",
-        parameters=[params_file],
+        parameters=nav2_params,
         remappings=[("cmd_vel", "/cmd_vel_nav")],
     )
 
@@ -79,7 +90,7 @@ def generate_launch_description():
         executable="bt_navigator",
         name="bt_navigator",
         output="screen",
-        parameters=[params_file],
+        parameters=nav2_params,
     )
 
     lifecycle_manager = Node(
@@ -99,14 +110,18 @@ def generate_launch_description():
         }],
     )
 
-    safety = IncludeLaunchDescription(
+    # Direct RC-override command path (MANUAL mode). Replaces the old GUIDED
+    # velocity path (safety.launch.py) because ArduPilot GUIDED can't turn this
+    # tracked/mixer vehicle; direct steering+throttle via RC override does.
+    rc_control = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
-            os.path.join(bringup_dir, "launch", "safety.launch.py")
+            os.path.join(bringup_dir, "launch", "rc_control.launch.py")
         )
     )
 
     return LaunchDescription([
         params_file_arg,
+        extra_params_arg,
         use_sim_time_arg,
         autostart_arg,
         pointcloud_to_laserscan,
@@ -115,5 +130,5 @@ def generate_launch_description():
         behavior_server,
         bt_navigator,
         lifecycle_manager,
-        safety,
+        rc_control,
     ])

@@ -1,0 +1,17 @@
+# Overlay for the isolated odom-only turn-fix validation (Step 2).
+# Layered on top of nav2_dagger.yaml, it drops the map frame so Nav2 runs
+# purely in the EKF `odom` frame WITHOUT mrg_slam. This isolates whether the
+# fast EKF odom->base_footprint fixes the 180-deg in-place turn, independent of
+# any map->odom localization. Remove this overlay for real map-relative nav.
+bt_navigator:
+  ros__parameters:
+    global_frame: odom
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      global_frame: odom
+
+behavior_server:
+  ros__parameters:
+    global_frame: odom

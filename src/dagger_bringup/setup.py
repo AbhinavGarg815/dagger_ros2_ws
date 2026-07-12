@@ -24,6 +24,7 @@ setup(
     entry_points={
         "console_scripts": [
             "cmd_vel_safety = dagger_bringup.cmd_vel_safety:main",
+            "cmd_vel_to_rc = dagger_bringup.cmd_vel_to_rc:main",
             "system_ready = dagger_bringup.system_ready:main",
             "gps_relay = dagger_bringup.gps_relay:main",
             "self_filter = dagger_bringup.self_filter:main",

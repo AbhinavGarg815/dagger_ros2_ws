@@ -17,12 +17,19 @@ class CmdVelSafety(Node):
         self.declare_parameter("estop_topic", "/estop")
         self.declare_parameter("publish_rate", 20.0)
         self.declare_parameter("command_timeout", 0.5)
+        # The Dagger tracked chassis turns opposite to the ROS/REP-103 yaw
+        # convention (commanded +angular.z / CCW makes it spin CW). Confirmed by
+        # a controlled pivot sweep + visual. Negate yaw at this single FCU
+        # boundary so teleop and Nav2 both turn correctly. Set false if the sign
+        # is ever corrected on the ArduPilot skid-steer side.
+        self.declare_parameter("invert_yaw", True)
 
         self.input_topic = self.get_parameter("input_topic").value
         self.output_topic = self.get_parameter("output_topic").value
         self.estop_topic = self.get_parameter("estop_topic").value
         self.publish_rate = float(self.get_parameter("publish_rate").value)
         self.command_timeout = float(self.get_parameter("command_timeout").value)
+        self.invert_yaw = bool(self.get_parameter("invert_yaw").value)
 
         self.last_cmd = Twist()
         self.last_cmd_time = self.get_clock().now()
@@ -36,7 +43,8 @@ class CmdVelSafety(Node):
 
         self.get_logger().info(
             f"cmd_vel_safety active: {self.input_topic} -> {self.output_topic} "
-            f"(estop={self.estop_topic}, timeout={self.command_timeout}s)"
+            f"(estop={self.estop_topic}, timeout={self.command_timeout}s, "
+            f"invert_yaw={self.invert_yaw})"
         )
 
     def cmd_callback(self, msg):
@@ -59,7 +67,16 @@ class CmdVelSafety(Node):
 
         elapsed = (self.get_clock().now() - self.last_cmd_time).nanoseconds / 1e9
         if elapsed <= self.command_timeout:
-            out = self.last_cmd
+            # Copy into a fresh Twist (never mutate self.last_cmd, or the yaw
+            # negation would flip every timer tick).
+            out.linear.x = self.last_cmd.linear.x
+            out.linear.y = self.last_cmd.linear.y
+            out.linear.z = self.last_cmd.linear.z
+            out.angular.x = self.last_cmd.angular.x
+            out.angular.y = self.last_cmd.angular.y
+            out.angular.z = self.last_cmd.angular.z
+            if self.invert_yaw:
+                out.angular.z = -out.angular.z
 
         self.pub.publish(out)
 

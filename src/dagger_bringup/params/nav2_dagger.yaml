@@ -3,7 +3,7 @@ bt_navigator:
     use_sim_time: false
     global_frame: map
     robot_base_frame: base_footprint
-    odom_topic: /dagger/scan_matching_odometry/odom
+    odom_topic: /odometry/filtered
     bt_loop_duration: 10
     default_server_timeout: 20
     navigators: ["navigate_to_pose", "navigate_through_poses"]
@@ -16,7 +16,7 @@ controller_server:
   ros__parameters:
     use_sim_time: false
     controller_frequency: 10.0
-    odom_topic: /dagger/scan_matching_odometry/odom
+    odom_topic: /odometry/filtered
     min_x_velocity_threshold: 0.001
     min_y_velocity_threshold: 0.5
     min_theta_velocity_threshold: 0.001
@@ -32,15 +32,28 @@ controller_server:
       stateful: true
       plugin: "nav2_controller::SimpleGoalChecker"
       xy_goal_tolerance: 0.3
-      yaw_goal_tolerance: 0.25
+      yaw_goal_tolerance: 0.4
     FollowPath:
-      plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+      plugin: "nav2_rotation_shim_controller::RotationShimController"
+      primary_controller: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+      # Drive is now direct RC-override in MANUAL (cmd_vel_to_rc); the vehicle
+      # pivots cleanly at ~0.5 rad/s (validated by teleop). The shim owns the
+      # in-place turn to the path heading. Tuned to STOP THE HUNT: a MODERATE
+      # rotate speed (less momentum) + GENTLE accel (so it can't slam into a
+      # reverse when it nears the target) + a wider yaw tolerance. The old
+      # 1.0 rad/s + accel 10 was for a GUIDED accel-deadlock that no longer
+      # exists on the direct-drive path.
+      angular_dist_threshold: 0.30
+      forward_sampling_distance: 0.5
+      rotate_to_heading_angular_vel: 0.5
+      max_angular_accel: 2.0
+      simulate_ahead_time: 1.0
+      rotate_to_heading_once: false
       desired_linear_vel: 0.5
       lookahead_dist: 0.6
       min_lookahead_dist: 0.3
       max_lookahead_dist: 0.9
       lookahead_time: 1.5
-      rotate_to_heading_angular_vel: 0.8
       transform_tolerance: 0.5
       use_velocity_scaled_lookahead_dist: false
       min_approach_linear_velocity: 0.05
@@ -54,7 +67,6 @@ controller_server:
       use_rotate_to_heading: true
       allow_reversing: false
       rotate_to_heading_min_angle: 0.785
-      max_angular_accel: 3.2
       max_robot_pose_search_dist: 10.0
 
 local_costmap:
@@ -63,7 +75,7 @@ local_costmap:
       use_sim_time: false
       update_frequency: 3.0
       publish_frequency: 1.0
-      global_frame: dagger/odom
+      global_frame: odom
       robot_base_frame: base_footprint
       transform_tolerance: 0.6
       rolling_window: true
@@ -165,7 +177,7 @@ behavior_server:
       plugin: "nav2_behaviors/BackUp"
     wait:
       plugin: "nav2_behaviors/Wait"
-    local_frame: dagger/odom
+    local_frame: odom
     global_frame: map
     robot_base_frame: base_footprint
     transform_tolerance: 0.2
