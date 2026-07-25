@@ -22,7 +22,7 @@ class CmdVelSafety(Node):
         # a controlled pivot sweep + visual. Negate yaw at this single FCU
         # boundary so teleop and Nav2 both turn correctly. Set false if the sign
         # is ever corrected on the ArduPilot skid-steer side.
-        self.declare_parameter("invert_yaw", True)
+        self.declare_parameter("invert_yaw", False)
 
         self.input_topic = self.get_parameter("input_topic").value
         self.output_topic = self.get_parameter("output_topic").value

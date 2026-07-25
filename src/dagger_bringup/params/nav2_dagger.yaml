@@ -45,8 +45,12 @@ controller_server:
       # exists on the direct-drive path.
       angular_dist_threshold: 0.30
       forward_sampling_distance: 0.5
-      rotate_to_heading_angular_vel: 0.5
-      max_angular_accel: 2.0
+      # Heavy ~350kg tracked vehicle: needs a strong, fast in-place turn to
+      # break track stiction. 0.5/2.0 crawled through ineffective low rates and
+      # stalled; 1.5 rad/s (near FCU ATC_STR_RAT_MAX ~2.1) + high accel snaps
+      # past stiction. Tuned live on-vehicle 2026-07 then persisted here.
+      rotate_to_heading_angular_vel: 0.6
+      max_angular_accel: 3.0
       simulate_ahead_time: 1.0
       rotate_to_heading_once: false
       desired_linear_vel: 0.5

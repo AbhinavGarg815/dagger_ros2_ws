@@ -15,7 +15,7 @@ def generate_launch_description():
     rsp = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(
-                get_package_share_directory("dagger_slam"), "launch", "rsp.launch.py"
+                get_package_share_directory("dagger_description"), "launch", "rsp.launch.py"
             )
         )
     )

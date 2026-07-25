@@ -110,12 +110,15 @@ def generate_launch_description():
         }],
     )
 
-    # Direct RC-override command path (MANUAL mode). Replaces the old GUIDED
-    # velocity path (safety.launch.py) because ArduPilot GUIDED can't turn this
-    # tracked/mixer vehicle; direct steering+throttle via RC override does.
-    rc_control = IncludeLaunchDescription(
+    # GUIDED setpoint-velocity command path: safety.launch.py -> cmd_vel_safety
+    # -> /mavros/setpoint_velocity/cmd_vel_unstamped. GUIDED now pivots correctly
+    # after the skid-steer + STM32 demixer fix; requires the mavros plugin param
+    # mav_frame=BODY_NED so the twist is interpreted in the body frame (as Nav2
+    # emits it). The rc_control MANUAL path was the fallback while GUIDED could
+    # not turn this tracked vehicle.
+    command_path = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
-            os.path.join(bringup_dir, "launch", "rc_control.launch.py")
+            os.path.join(bringup_dir, "launch", "safety.launch.py")
         )
     )
 
@@ -130,5 +133,5 @@ def generate_launch_description():
         behavior_server,
         bt_navigator,
         lifecycle_manager,
-        rc_control,
+        command_path,
     ])
