@@ -18,6 +18,7 @@ def generate_launch_description():
     base_frame = LaunchConfiguration("base_frame")
     lidar_odom_frame = LaunchConfiguration("lidar_odom_frame")
     use_ekf = LaunchConfiguration("use_ekf")
+    odom_source = LaunchConfiguration("odom_source")
     extnav_yaw = LaunchConfiguration("extnav_yaw")
     extnav_manual_offset_deg = LaunchConfiguration("extnav_manual_offset_deg")
 
@@ -27,6 +28,12 @@ def generate_launch_description():
     base_frame_arg = DeclareLaunchArgument("base_frame", default_value="base_footprint")
     lidar_odom_frame_arg = DeclareLaunchArgument("lidar_odom_frame", default_value="odom")
     use_ekf_arg = DeclareLaunchArgument("use_ekf", default_value="false")
+    # odom_source: 'fcu' = ArduPilot EK3 pose (GPS+dual-antenna heading+IMU) via
+    # fcu_odom_relay -> rotation-robust, no KISS jumps (default now).
+    # 'kiss' = legacy KISS-ICP + robot_localization EKF (jumps during rotation).
+    odom_source_arg = DeclareLaunchArgument("odom_source", default_value="fcu")
+    use_kiss = PythonExpression(["'", odom_source, "' == 'kiss'"])
+    use_fcu = PythonExpression(["'", odom_source, "' == 'fcu'"])
     # ExtNav yaw relay: feed our drift-free EKF yaw to ArduPilot as VISION yaw so
     # GUIDED works compassless (needs FCU EK3_SRC1_YAW=6). Off by default.
     extnav_yaw_arg = DeclareLaunchArgument("extnav_yaw", default_value="false")
@@ -62,6 +69,7 @@ def generate_launch_description():
                 "orientation_covariance": 0.1,
             },
         ],
+        condition=IfCondition(use_kiss),
     )
 
     ekf_local_node = Node(
@@ -70,7 +78,26 @@ def generate_launch_description():
         name="ekf_local",
         output="screen",
         parameters=[ekf_local_config],
-        condition=IfCondition(use_ekf),
+        condition=IfCondition(PythonExpression(
+            ["'", odom_source, "' == 'kiss' and '", use_ekf, "' == 'true'"])),
+    )
+
+    # ArduPilot EK3 pose -> /odometry/filtered + odom->base_footprint TF (GPS-based,
+    # rotation-robust). Replaces KISS+EKF when odom_source:=fcu (the default).
+    fcu_odom_relay_node = Node(
+        package="dagger_bringup",
+        executable="fcu_odom_relay",
+        name="fcu_odom_relay",
+        output="screen",
+        parameters=[{
+            "input_topic": "/mavros/local_position/odom",
+            "output_topic": "/odometry/filtered",
+            "odom_frame": "odom",
+            "base_frame": "base_footprint",
+            "flatten_z": True,
+            "publish_tf": True,
+        }],
+        condition=IfCondition(use_fcu),
     )
 
     extnav_yaw_relay = Node(
@@ -94,9 +121,11 @@ def generate_launch_description():
         base_frame_arg,
         lidar_odom_frame_arg,
         use_ekf_arg,
+        odom_source_arg,
         extnav_yaw_arg,
         extnav_manual_offset_arg,
         kiss_icp_node,
         ekf_local_node,
+        fcu_odom_relay_node,
         extnav_yaw_relay,
     ])

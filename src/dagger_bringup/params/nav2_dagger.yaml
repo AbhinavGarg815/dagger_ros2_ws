@@ -43,7 +43,14 @@ controller_server:
       # reverse when it nears the target) + a wider yaw tolerance. The old
       # 1.0 rad/s + accel 10 was for a GUIDED accel-deadlock that no longer
       # exists on the direct-drive path.
-      angular_dist_threshold: 0.30
+      # High threshold: the shim only does an in-place pivot for LARGE initial
+      # misalignments (>45 deg); otherwise RPP handles turns as ARCS while
+      # translating. Critical because KISS-ICP position JUMPS during in-place
+      # rotation (16-beam scan-match degrades) -> a low threshold re-triggered
+      # in-place rotation mid-drive -> odom jumps -> Nav2 hunt/wobble. Pure
+      # in-place turn-arounds use the /spin action (gyro yaw, no KISS position).
+      # (2026-09-11: reverted from 0.10 which caused the hunt.)
+      angular_dist_threshold: 0.785
       forward_sampling_distance: 0.5
       # Heavy ~350kg tracked vehicle: needs a strong, fast in-place turn to
       # break track stiction. 0.5/2.0 crawled through ineffective low rates and

@@ -29,6 +29,7 @@ setup(
             "gps_relay = dagger_bringup.gps_relay:main",
             "self_filter = dagger_bringup.self_filter:main",
             "extnav_yaw_relay = dagger_bringup.extnav_yaw_relay:main",
+            "fcu_odom_relay = dagger_bringup.fcu_odom_relay:main",
         ],
     },
 )
