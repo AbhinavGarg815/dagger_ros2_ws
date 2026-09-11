@@ -10,7 +10,12 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     fcu_url = LaunchConfiguration("fcu_url")
-    fcu_url_arg = DeclareLaunchArgument("fcu_url", default_value="/dev/ttyACM0:57600")
+    # Stable by-id path (if00 = Cube MAVLink port) — survives USB re-enumeration.
+    # ttyACM numbering shifts when GNSS/radio hardware changes; by-id does not.
+    fcu_url_arg = DeclareLaunchArgument(
+        "fcu_url",
+        default_value="/dev/serial/by-id/usb-CubePilot_CubeOrange+_44002F000E51333233343437-if00:57600",
+    )
 
     rsp = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(

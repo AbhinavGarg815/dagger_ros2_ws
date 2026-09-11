@@ -17,18 +17,36 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration
 
 
 def generate_launch_description():
     bringup_dir = get_package_share_directory("dagger_bringup")
 
+    # ExtNav yaw relay ON by default here: feed our clean EKF yaw to ArduPilot so
+    # GUIDED turns work compassless (needs FCU EK3_SRC1_YAW=6). Auto earth-aligns
+    # from GPS course during the first straight drive; override with a fixed offset
+    # via extnav_manual_offset_deg:=<deg>.
+    extnav_yaw = LaunchConfiguration("extnav_yaw")
+    extnav_manual_offset_deg = LaunchConfiguration("extnav_manual_offset_deg")
+    # OFF by default: dual-antenna C-RTK 2HP now gives true GPS yaw (EK3_SRC1_YAW=2),
+    # so the ExtNav relay is superseded. Kept as an opt-in fallback (extnav_yaw:=true).
+    extnav_yaw_arg = DeclareLaunchArgument("extnav_yaw", default_value="false")
+    extnav_manual_offset_arg = DeclareLaunchArgument(
+        "extnav_manual_offset_deg", default_value="nan"
+    )
+
     localization = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(bringup_dir, "launch", "localization.launch.py")
         ),
-        launch_arguments={"use_ekf": "true"}.items(),
+        launch_arguments={
+            "use_ekf": "true",
+            "extnav_yaw": extnav_yaw,
+            "extnav_manual_offset_deg": extnav_manual_offset_deg,
+        }.items(),
     )
 
     nav2 = IncludeLaunchDescription(
@@ -42,4 +60,9 @@ def generate_launch_description():
         }.items(),
     )
 
-    return LaunchDescription([localization, nav2])
+    return LaunchDescription([
+        extnav_yaw_arg,
+        extnav_manual_offset_arg,
+        localization,
+        nav2,
+    ])

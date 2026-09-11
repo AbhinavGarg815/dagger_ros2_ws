@@ -110,12 +110,13 @@ def generate_launch_description():
         }],
     )
 
-    # GUIDED setpoint-velocity command path: safety.launch.py -> cmd_vel_safety
-    # -> /mavros/setpoint_velocity/cmd_vel_unstamped. GUIDED now pivots correctly
-    # after the skid-steer + STM32 demixer fix; requires the mavros plugin param
-    # mav_frame=BODY_NED so the twist is interpreted in the body frame (as Nav2
-    # emits it). The rc_control MANUAL path was the fallback while GUIDED could
-    # not turn this tracked vehicle.
+    # GUIDED setpoint-velocity command path (NO RC override): safety.launch.py ->
+    # cmd_vel_safety -> /mavros/setpoint_velocity/cmd_vel_unstamped. Requires the
+    # mavros plugin param mav_frame=BODY_NED so the twist is interpreted in the
+    # body frame (as Nav2 emits it). NOTE: GUIDED uses ArduPilot's EKF yaw, which
+    # is compassless GSF and drifts at rest / in-place -> to make in-place turns
+    # work we feed our clean SLAM/EKF yaw to the FCU as ExternalNav (see
+    # localization) rather than using RC override.
     command_path = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(bringup_dir, "launch", "safety.launch.py")

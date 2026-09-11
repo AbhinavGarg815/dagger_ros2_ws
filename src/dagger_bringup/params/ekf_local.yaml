@@ -5,6 +5,12 @@ ekf_local:
     two_d_mode: true
     transform_time_offset: 0.0
     transform_timeout: 0.0
+    # Predict the state to the CURRENT time before publishing so odom->base_footprint
+    # is stamped "now", not at the last (10 Hz LiDAR) measurement. Without this the
+    # Nav2 controller requests the pose slightly ahead of the latest TF and hits
+    # "Extrapolation into the future" -> no pose -> stale/erratic cmd_vel -> the
+    # rover moved unexpectedly during the turn. (2026-09-11)
+    predict_to_current_time: true
     publish_tf: true
 
     map_frame: map
@@ -26,7 +32,13 @@ ekf_local:
     odom0_relative: false
     odom0_queue_size: 10
 
-    imu0: /mavros/imu/data
+    # Use imu/data_raw (raw sensor gyro): at rest gz==0.0, clean/calibrated.
+    # imu/data's angular_velocity comes from ArduPilot's ATTITUDE msg and carries
+    # a steady ~0.108 rad/s (6.2 deg/s) Z bias while the FCU AHRS is unconverged
+    # (stationary/indoor) -> integrated into odom heading -> 6 deg/s yaw drift at
+    # rest -> Nav2 can never hold a target heading. We fuse ONLY vyaw, so the raw
+    # gyro (orientation flagged absent via cov[0]=-1) is the correct clean source.
+    imu0: /mavros/imu/data_raw
     imu0_config: [false, false, false,
                   false, false, false,
                   false, false, false,

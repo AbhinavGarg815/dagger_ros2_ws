@@ -18,6 +18,8 @@ def generate_launch_description():
     base_frame = LaunchConfiguration("base_frame")
     lidar_odom_frame = LaunchConfiguration("lidar_odom_frame")
     use_ekf = LaunchConfiguration("use_ekf")
+    extnav_yaw = LaunchConfiguration("extnav_yaw")
+    extnav_manual_offset_deg = LaunchConfiguration("extnav_manual_offset_deg")
 
     pointcloud_topic_arg = DeclareLaunchArgument(
         "pointcloud_topic", default_value="/rslidar_points"
@@ -25,6 +27,13 @@ def generate_launch_description():
     base_frame_arg = DeclareLaunchArgument("base_frame", default_value="base_footprint")
     lidar_odom_frame_arg = DeclareLaunchArgument("lidar_odom_frame", default_value="odom")
     use_ekf_arg = DeclareLaunchArgument("use_ekf", default_value="false")
+    # ExtNav yaw relay: feed our drift-free EKF yaw to ArduPilot as VISION yaw so
+    # GUIDED works compassless (needs FCU EK3_SRC1_YAW=6). Off by default.
+    extnav_yaw_arg = DeclareLaunchArgument("extnav_yaw", default_value="false")
+    extnav_manual_offset_arg = DeclareLaunchArgument(
+        "extnav_manual_offset_deg", default_value="nan",
+        description="Force earth-align offset (deg); 'nan' = auto-align from GPS course",
+    )
 
     # KISS-ICP publishes odom->base_footprint TF only when the EKF is NOT running.
     # With use_ekf:=true the EKF owns odom->base_footprint and KISS only emits the
@@ -64,11 +73,30 @@ def generate_launch_description():
         condition=IfCondition(use_ekf),
     )
 
+    extnav_yaw_relay = Node(
+        package="dagger_bringup",
+        executable="extnav_yaw_relay",
+        name="extnav_yaw_relay",
+        output="screen",
+        parameters=[{
+            "odom_topic": "/odometry/filtered",
+            "gps_vel_topic": "/mavros/global_position/raw/gps_vel",
+            "output_topic": "/mavros/vision_pose/pose",
+            "manual_offset_deg": ParameterValue(
+                extnav_manual_offset_deg, value_type=float),
+            "auto_align": True,
+        }],
+        condition=IfCondition(extnav_yaw),
+    )
+
     return LaunchDescription([
         pointcloud_topic_arg,
         base_frame_arg,
         lidar_odom_frame_arg,
         use_ekf_arg,
+        extnav_yaw_arg,
+        extnav_manual_offset_arg,
         kiss_icp_node,
         ekf_local_node,
+        extnav_yaw_relay,
     ])

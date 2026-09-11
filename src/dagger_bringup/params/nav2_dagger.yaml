@@ -49,8 +49,8 @@ controller_server:
       # break track stiction. 0.5/2.0 crawled through ineffective low rates and
       # stalled; 1.5 rad/s (near FCU ATC_STR_RAT_MAX ~2.1) + high accel snaps
       # past stiction. Tuned live on-vehicle 2026-07 then persisted here.
-      rotate_to_heading_angular_vel: 0.6
-      max_angular_accel: 3.0
+      rotate_to_heading_angular_vel: 0.3
+      max_angular_accel: 1.2
       simulate_ahead_time: 1.0
       rotate_to_heading_once: false
       desired_linear_vel: 0.5
@@ -58,7 +58,7 @@ controller_server:
       min_lookahead_dist: 0.3
       max_lookahead_dist: 0.9
       lookahead_time: 1.5
-      transform_tolerance: 0.5
+      transform_tolerance: 1.0
       use_velocity_scaled_lookahead_dist: false
       min_approach_linear_velocity: 0.05
       approach_velocity_scaling_dist: 0.6
@@ -184,8 +184,11 @@ behavior_server:
     local_frame: odom
     global_frame: map
     robot_base_frame: base_footprint
-    transform_tolerance: 0.2
+    transform_tolerance: 0.5
     simulate_ahead_time: 2.0
-    max_rotational_vel: 1.0
-    min_rotational_vel: 0.4
-    rotational_acc_lim: 3.2
+    # Heavy ~350kg tracked rover: moderate top speed to limit momentum overshoot,
+    # low floor so it can ease into the target (but >stiction breakaway ~0.3),
+    # gentle accel. In-place 180 turn-around test (2026-09-11).
+    max_rotational_vel: 0.6
+    min_rotational_vel: 0.3
+    rotational_acc_lim: 1.5
