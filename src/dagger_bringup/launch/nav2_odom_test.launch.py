@@ -37,6 +37,10 @@ def generate_launch_description():
     extnav_manual_offset_arg = DeclareLaunchArgument(
         "extnav_manual_offset_deg", default_value="nan"
     )
+    # fcu | fused | kiss -- see localization.launch.py. DEFAULT fused = EK3 velocity +
+    # raw gyro EKF (no GPS position in odom); validated 2026-09-14 (legs A/C).
+    odom_source = LaunchConfiguration("odom_source")
+    odom_source_arg = DeclareLaunchArgument("odom_source", default_value="fused")
 
     localization = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -44,6 +48,7 @@ def generate_launch_description():
         ),
         launch_arguments={
             "use_ekf": "true",
+            "odom_source": odom_source,
             "extnav_yaw": extnav_yaw,
             "extnav_manual_offset_deg": extnav_manual_offset_deg,
         }.items(),
@@ -63,6 +68,7 @@ def generate_launch_description():
     return LaunchDescription([
         extnav_yaw_arg,
         extnav_manual_offset_arg,
+        odom_source_arg,
         localization,
         nav2,
     ])

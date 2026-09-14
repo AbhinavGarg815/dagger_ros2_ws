@@ -1,0 +1,49 @@
+# Local (odom-frame) EKF for odom_source:=fused  (2026-09-14)
+#
+# Why: ArduPilot's EK3 POSITION is GPS-anchored and, without RTK, WALKS -- measured
+# 1-3 m/min at rest and 1.7 m sideways during a 20 s Nav2 drive (the pose slid
+# right, so Nav2 steered the rover LEFT to "correct" it). EK3's VELOCITY (GPS
+# Doppler + IMU) and the raw gyro, however, were clean in the same bag. REP-105:
+# odom must be continuous and never jump, so here we build odom ONLY from
+# rates -- no absolute position, no absolute yaw:
+#   odom0 = EK3 body velocity (vx, vy) via fcu_odom_relay (/fcu/odom, covariance injected)
+#   imu0  = raw Cube gyro yaw rate (/mavros/imu/data_raw; 0.000 rad/s at rest)
+# Drift is ~1-3 % of distance travelled + gyro bias, and it never jumps. GPS
+# position/heading belong in a separate map->odom layer (not in this file).
+# Planned next input: KISS-ICP LiDAR odometry (differential x/y) as odom1.
+ekf_local:
+  ros__parameters:
+    frequency: 20.0
+    sensor_timeout: 0.25
+    two_d_mode: true
+    transform_time_offset: 0.0
+    transform_timeout: 0.0
+    # Stamp odom->base_footprint "now" (avoids Nav2 extrapolation errors).
+    predict_to_current_time: true
+    publish_tf: true
+
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_footprint
+    world_frame: odom
+
+    odom0: /fcu/odom
+    odom0_config: [false, false, false,
+                   false, false, false,
+                   true,  true,  false,
+                   false, false, false,
+                   false, false, false]
+    odom0_differential: false
+    odom0_relative: false
+    odom0_queue_size: 10
+
+    imu0: /mavros/imu/data_raw
+    imu0_config: [false, false, false,
+                  false, false, false,
+                  false, false, false,
+                  false, false, true,
+                  false, false, false]
+    imu0_differential: false
+    imu0_relative: false
+    imu0_remove_gravitational_acceleration: true
+    imu0_queue_size: 10

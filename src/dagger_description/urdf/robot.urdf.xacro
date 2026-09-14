@@ -308,8 +308,11 @@
   <joint
     name="lidar_joint"
     type="fixed">
+    <!-- z 1.1 -> 0.92 (2026-09-14): LiDAR measured 1.12 m above ground; base_joint
+         already puts base_link 0.2 m up, so 1.1 double-counted it (1.30 m total)
+         and flat ground read +0.19 m -> ground ring became costmap obstacles. -->
     <origin
-      xyz="0.2925 0 1.1"
+      xyz="0.2925 0 0.92"
       rpy="0 0 1.5708" />
     <parent
       link="base_link" />

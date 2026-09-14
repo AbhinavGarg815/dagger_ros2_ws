@@ -45,8 +45,18 @@ def generate_launch_description():
         parameters=[{
             "target_frame": "base_footprint",
             "transform_tolerance": 0.1,
-            "min_height": 0.15,
-            "max_height": 0.90,
+            # 0.15 -> 0.35 (2026-09-14): flat GROUND read as +0.19 m in base_footprint
+            # (URDF LiDAR height 1.30 m vs ~1.1 m measured from the -15 deg beam's
+            # ground hit) -> the lowest-beam ground ring at ~4-5 m became a lethal
+            # wall -> Theta* detoured 14 m around a straight 6 m goal. Also margin
+            # for outdoor slope/pitch (2 deg at 5 m = 0.17 m). Stopgap until the
+            # URDF height is measured + proper ground segmentation replaces this.
+            "min_height": 0.35,
+            # 0.90 -> 0.75 (2026-09-14): with the corrected 1.12 m LiDAR height the
+            # rover's own mast/mount returns sit at z 0.81-1.12 (r 0.72-0.91 m); at
+            # 0.90 they marked a lethal ring INSIDE the footprint -> Spin aborted
+            # "Collision Ahead" on the rover itself. Band is now 0.35-0.75 m.
+            "max_height": 0.75,
             "angle_min": -3.14159,
             "angle_max": 3.14159,
             "angle_increment": 0.0087,

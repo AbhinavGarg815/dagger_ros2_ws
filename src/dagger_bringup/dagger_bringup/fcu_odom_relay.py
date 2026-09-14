@@ -18,6 +18,8 @@ Stream rate: /mavros/local_position/odom defaults to 2 Hz (SR0_POSITION); raise
 LOCAL_POSITION_NED (msg 32) to ~20 Hz via MAV_CMD_SET_MESSAGE_INTERVAL (not persistent
 -- request on each bring-up).
 """
+import math
+
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
@@ -37,12 +39,23 @@ class FcuOdomRelay(Node):
         self.declare_parameter("base_frame", "base_footprint")
         self.declare_parameter("flatten_z", True)   # 2D ground rover
         self.declare_parameter("publish_tf", True)
+        # mavros publishes local_position/odom with ALL-ZERO covariance, which
+        # robot_localization would treat as a perfect measurement. When set (>0),
+        # these variances are written into the twist covariance diagonal
+        # [vx, vy, vyaw] so the relay can feed an EKF (odom_source:=fused).
+        self.declare_parameter("twist_variance", [0.0, 0.0, 0.0])
+        # Zero-velocity deadband (m/s): EK3 reports ~5 mm/s bias + 5 mm/s noise at
+        # rest (GPS Doppler), which an EKF integrates into ~0.3 m/min of creep.
+        # |v| below this -> published as exactly 0. 0 = off. Drive speeds are >=0.1.
+        self.declare_parameter("zero_velocity_deadband", 0.0)
 
         g = self.get_parameter
         self.odom_frame = g("odom_frame").value
         self.base_frame = g("base_frame").value
         self.flatten_z = bool(g("flatten_z").value)
         self.publish_tf = bool(g("publish_tf").value)
+        self.twist_var = [float(v) for v in g("twist_variance").value]
+        self.zv_deadband = float(g("zero_velocity_deadband").value)
 
         # mavros publishes local_position with BEST_EFFORT sensor QoS.
         be = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -65,6 +78,14 @@ class FcuOdomRelay(Node):
         out.twist = msg.twist
         if self.flatten_z:
             out.pose.pose.position.z = 0.0
+        lin = out.twist.twist.linear
+        if self.zv_deadband > 0.0 and math.hypot(lin.x, lin.y) < self.zv_deadband:
+            lin.x = lin.y = 0.0
+        if any(self.twist_var):
+            cov = list(out.twist.covariance)
+            for idx, var in zip((0, 7, 35), self.twist_var):  # vx, vy, vyaw
+                cov[idx] = var
+            out.twist.covariance = cov
         self.pub.publish(out)
 
         if self.br is not None:

@@ -13,6 +13,7 @@ def generate_launch_description():
     pkg = get_package_share_directory("dagger_bringup")
     kiss_config = os.path.join(pkg, "params", "kiss_icp.yaml")
     ekf_local_config = os.path.join(pkg, "params", "ekf_local.yaml")
+    ekf_fused_config = os.path.join(pkg, "params", "ekf_fused.yaml")
 
     pointcloud_topic = LaunchConfiguration("pointcloud_topic")
     base_frame = LaunchConfiguration("base_frame")
@@ -28,12 +29,15 @@ def generate_launch_description():
     base_frame_arg = DeclareLaunchArgument("base_frame", default_value="base_footprint")
     lidar_odom_frame_arg = DeclareLaunchArgument("lidar_odom_frame", default_value="odom")
     use_ekf_arg = DeclareLaunchArgument("use_ekf", default_value="false")
-    # odom_source: 'fcu' = ArduPilot EK3 pose (GPS+dual-antenna heading+IMU) via
-    # fcu_odom_relay -> rotation-robust, no KISS jumps (default now).
+    # odom_source: 'fused' (DEFAULT since 2026-09-14) | 'fcu' = ArduPilot EK3 pose via
+    # fcu_odom_relay (GPS-anchored: walks 1-3 m/min without RTK -> not for Nav2).
     # 'kiss' = legacy KISS-ICP + robot_localization EKF (jumps during rotation).
-    odom_source_arg = DeclareLaunchArgument("odom_source", default_value="fcu")
+    # 'fused' = robot_localization EKF on EK3 VELOCITY + raw gyro only (no GPS
+    # position/yaw) -> continuous odom that never jumps (params/ekf_fused.yaml).
+    odom_source_arg = DeclareLaunchArgument("odom_source", default_value="fused")
     use_kiss = PythonExpression(["'", odom_source, "' == 'kiss'"])
     use_fcu = PythonExpression(["'", odom_source, "' == 'fcu'"])
+    use_fused = PythonExpression(["'", odom_source, "' == 'fused'"])
     # ExtNav yaw relay: feed our drift-free EKF yaw to ArduPilot as VISION yaw so
     # GUIDED works compassless (needs FCU EK3_SRC1_YAW=6). Off by default.
     extnav_yaw_arg = DeclareLaunchArgument("extnav_yaw", default_value="false")
@@ -83,7 +87,7 @@ def generate_launch_description():
     )
 
     # ArduPilot EK3 pose -> /odometry/filtered + odom->base_footprint TF (GPS-based,
-    # rotation-robust). Replaces KISS+EKF when odom_source:=fcu (the default).
+    # rotation-robust). Used when odom_source:=fcu (legacy; walks without RTK).
     fcu_odom_relay_node = Node(
         package="dagger_bringup",
         executable="fcu_odom_relay",
@@ -98,6 +102,37 @@ def generate_launch_description():
             "publish_tf": True,
         }],
         condition=IfCondition(use_fcu),
+    )
+
+    # odom_source:=fused -- the relay only re-labels EK3 odom (+ realistic twist
+    # covariance) onto /fcu/odom, NO TF; ekf_local fuses its velocity + raw gyro
+    # and alone owns /odometry/filtered + odom->base_footprint.
+    fcu_twist_relay_node = Node(
+        package="dagger_bringup",
+        executable="fcu_odom_relay",
+        name="fcu_odom_relay",
+        output="screen",
+        parameters=[{
+            "input_topic": "/mavros/local_position/odom",
+            "output_topic": "/fcu/odom",
+            "odom_frame": "odom",
+            "base_frame": "base_footprint",
+            "flatten_z": True,
+            "publish_tf": False,
+            "twist_variance": [0.01, 0.01, 0.01],
+            "zero_velocity_deadband": 0.02,
+        }],
+        condition=IfCondition(use_fused),
+    )
+
+    ekf_fused_node = Node(
+        package="robot_localization",
+        executable="ekf_node",
+        name="ekf_local",
+        output="screen",
+        parameters=[ekf_fused_config],
+        remappings=[("odometry/filtered", "/odometry/filtered")],
+        condition=IfCondition(use_fused),
     )
 
     extnav_yaw_relay = Node(
@@ -127,5 +162,7 @@ def generate_launch_description():
         kiss_icp_node,
         ekf_local_node,
         fcu_odom_relay_node,
+        fcu_twist_relay_node,
+        ekf_fused_node,
         extnav_yaw_relay,
     ])
