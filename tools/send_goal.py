@@ -45,7 +45,11 @@ class Sender(Node):
     def ps(self, x, y, yaw):
         p = PoseStamped()
         p.header.frame_id = self.frame
-        p.header.stamp = self.get_clock().now().to_msg()
+        # Stamp 0 = "use the latest transform". A send-time stamp breaks GPS mode:
+        # the planner (map frame) re-transforms these odom-frame goals at 1 Hz AT
+        # THIS STAMP, which ages out of the ~10 s TF buffer -> "extrapolation into
+        # the past" -> path lost after ~11 s -> abort (2026-09-14).
+        p.header.stamp.sec, p.header.stamp.nanosec = 0, 0
         p.pose.position.x, p.pose.position.y = x, y
         (p.pose.orientation.x, p.pose.orientation.y,
          p.pose.orientation.z, p.pose.orientation.w) = q_yaw(yaw)

@@ -31,6 +31,9 @@ setup(
             "self_filter = dagger_bringup.self_filter:main",
             "extnav_yaw_relay = dagger_bringup.extnav_yaw_relay:main",
             "fcu_odom_relay = dagger_bringup.fcu_odom_relay:main",
+            "gps_map_odom = dagger_bringup.gps_map_odom:main",
+            "gps_heading_imu = dagger_bringup.gps_heading_imu:main",
+            "scan_watchdog = dagger_bringup.scan_watchdog:main",
         ],
     },
 )

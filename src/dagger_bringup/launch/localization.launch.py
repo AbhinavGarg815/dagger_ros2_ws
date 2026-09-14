@@ -125,6 +125,15 @@ def generate_launch_description():
         condition=IfCondition(use_fused),
     )
 
+    # Dual-antenna GNSS heading -> Imu(yaw) for ekf_local (fused mode only).
+    gps_heading_node = Node(
+        package="dagger_bringup",
+        executable="gps_heading_imu",
+        name="gps_heading_imu",
+        output="screen",
+        condition=IfCondition(use_fused),
+    )
+
     ekf_fused_node = Node(
         package="robot_localization",
         executable="ekf_node",
@@ -163,6 +172,7 @@ def generate_launch_description():
         ekf_local_node,
         fcu_odom_relay_node,
         fcu_twist_relay_node,
+        gps_heading_node,
         ekf_fused_node,
         extnav_yaw_relay,
     ])

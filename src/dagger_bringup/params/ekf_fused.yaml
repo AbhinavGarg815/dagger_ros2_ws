@@ -5,11 +5,13 @@
 # right, so Nav2 steered the rover LEFT to "correct" it). EK3's VELOCITY (GPS
 # Doppler + IMU) and the raw gyro, however, were clean in the same bag. REP-105:
 # odom must be continuous and never jump, so here we build odom ONLY from
-# rates -- no absolute position, no absolute yaw:
+# rates + absolute GNSS heading -- no absolute position:
 #   odom0 = EK3 body velocity (vx, vy) via fcu_odom_relay (/fcu/odom, covariance injected)
 #   imu0  = raw Cube gyro yaw rate (/mavros/imu/data_raw; 0.000 rad/s at rest)
 # Drift is ~1-3 % of distance travelled + gyro bias, and it never jumps. GPS
-# position/heading belong in a separate map->odom layer (not in this file).
+# POSITION belongs in the separate map->odom layer (gps_map_odom), not here.
+#   imu1  = dual-antenna GNSS heading (absolute yaw), gated to non-turning moments by
+#           gps_heading_imu -> odom yaw = true ENU heading, gyro drift removed. (2026-09-14)
 # Planned next input: KISS-ICP LiDAR odometry (differential x/y) as odom1.
 ekf_local:
   ros__parameters:
@@ -47,3 +49,14 @@ ekf_local:
     imu0_relative: false
     imu0_remove_gravitational_acceleration: true
     imu0_queue_size: 10
+
+    imu1: /gps/heading_imu
+    imu1_config: [false, false, false,
+                  false, false, true,
+                  false, false, false,
+                  false, false, false,
+                  false, false, false]
+    imu1_differential: false
+    imu1_relative: false
+    imu1_remove_gravitational_acceleration: false
+    imu1_queue_size: 5

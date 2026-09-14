@@ -31,8 +31,9 @@ from rcl_interfaces.srv import SetParameters
 from rcl_interfaces.msg import Parameter, ParameterValue, ParameterType
 from lifecycle_msgs.srv import GetState
 
-# (msg_id, Hz) -- LOCAL_POSITION_NED, ATTITUDE, RAW_IMU, SERVO_OUTPUT_RAW
-STREAMS = [(32, 20.0), (30, 10.0), (27, 10.0), (36, 25.0)]
+# (msg_id, Hz) -- LOCAL_POSITION_NED, ATTITUDE, RAW_IMU, SERVO_OUTPUT_RAW, GPS_RAW_INT
+# (GPS_RAW_INT carries the dual-antenna heading fused by gps_heading_imu)
+STREAMS = [(32, 20.0), (30, 10.0), (27, 10.0), (36, 25.0), (24, 5.0)]
 
 # topic, type, min_rate_hz, raw (skip deserialization for big msgs)
 TOPICS = [
@@ -41,7 +42,8 @@ TOPICS = [
     ("/mavros/imu/data", Imu, 8.0, False),
     ("/mavros/imu/data_raw", Imu, 8.0, False),
     ("/mavros/rc/out", RCOut, 20.0, False),
-    ("/mavros/gpsstatus/gps1/raw", GPSRAW, 1.0, False),
+    ("/mavros/gpsstatus/gps1/raw", GPSRAW, 4.0, False),
+    ("/gps/heading_imu", Imu, 0.0, False),
     ("/mavros/global_position/compass_hdg", Float64, 1.0, False),
     ("/mavros/state", State, 0.5, False),
     ("/rslidar_points", PointCloud2, 8.0, True),

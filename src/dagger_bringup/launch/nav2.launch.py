@@ -38,6 +38,9 @@ def generate_launch_description():
         executable="pointcloud_to_laserscan_node",
         name="pointcloud_to_laserscan",
         output="screen",
+        # Restarted by scan_watchdog if it wedges (lazy-subscribe flap bug, Humble).
+        respawn=True,
+        respawn_delay=1.0,
         remappings=[
             ("cloud_in", "/rslidar_points"),
             ("scan", "/scan"),
@@ -95,6 +98,15 @@ def generate_launch_description():
         remappings=[("cmd_vel", "/cmd_vel_nav")],
     )
 
+    # Permanent /scan subscriber (prevents the p2l lazy-subscribe flap) + restarts
+    # p2l if /scan goes silent while clouds still arrive.
+    scan_watchdog = Node(
+        package="dagger_bringup",
+        executable="scan_watchdog",
+        name="scan_watchdog",
+        output="screen",
+    )
+
     bt_navigator = Node(
         package="nav2_bt_navigator",
         executable="bt_navigator",
@@ -145,6 +157,7 @@ def generate_launch_description():
         use_sim_time_arg,
         autostart_arg,
         pointcloud_to_laserscan,
+        scan_watchdog,
         controller_server,
         planner_server,
         behavior_server,
