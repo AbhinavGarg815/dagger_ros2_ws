@@ -52,6 +52,17 @@ controller_server:
       # in-place turn-arounds use the /spin action (gyro yaw, no KISS position).
       # (2026-09-11: reverted from 0.10 which caused the hunt.)
       angular_dist_threshold: 0.785
+      # 2026-09-14 (bag pf_wp_lanechange_3): closed_loop=true rate-limits the
+      # rotate command from the MEASURED yaw rate, which is 0 until the tracks
+      # break stiction -> cmd stuck at 0 + accel*dt = 0.12 rad/s (< ~0.3 breakaway)
+      # -> 14 s stall. false = ramp from the last COMMAND instead.
+      closed_loop: false
+      # Hysteresis: engage the in-place turn above 45 deg, keep turning to 17 deg
+      # before handing back to RPP (was 0.785 = no hysteresis -> handoff chatter).
+      angular_disengage_threshold: 0.3
+      # Final goal-heading turn via the shim (open-loop ramp) instead of RPP's
+      # rotate-to-heading, which has the same measured-rate deadlock.
+      rotate_to_goal_heading: true
       forward_sampling_distance: 0.5
       # Heavy ~350kg tracked vehicle: needs a strong, fast in-place turn to
       # break track stiction. 0.5/2.0 crawled through ineffective low rates and

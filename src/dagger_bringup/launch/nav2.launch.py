@@ -100,7 +100,13 @@ def generate_launch_description():
         executable="bt_navigator",
         name="bt_navigator",
         output="screen",
-        parameters=nav2_params,
+        # Dagger trees: default Nav2 trees minus the Spin/BackUp motion recoveries.
+        parameters=nav2_params + [{
+            "default_nav_to_pose_bt_xml": os.path.join(
+                bringup_dir, "behavior_trees", "dagger_navigate_to_pose.xml"),
+            "default_nav_through_poses_bt_xml": os.path.join(
+                bringup_dir, "behavior_trees", "dagger_navigate_through_poses.xml"),
+        }],
     )
 
     lifecycle_manager = Node(

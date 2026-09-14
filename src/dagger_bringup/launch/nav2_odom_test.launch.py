@@ -20,6 +20,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
 
 
 def generate_launch_description():
@@ -65,7 +66,20 @@ def generate_launch_description():
         }.items(),
     )
 
+    # Identity map->odom PLACEHOLDER (2026-09-14). Nav2 here plans in odom, but some
+    # BT nodes (RemovePassedGoals in NavigateThroughPoses) look the robot up in
+    # 'map' by default -> TF error -> goal abort. This stands in for the future
+    # GPS map->odom layer, which will replace it (same REP-105 frame tree).
+    map_odom_placeholder = Node(
+        package="tf2_ros",
+        executable="static_transform_publisher",
+        name="map_odom_placeholder",
+        arguments=["--frame-id", "map", "--child-frame-id", "odom"],
+        output="screen",
+    )
+
     return LaunchDescription([
+        map_odom_placeholder,
         extnav_yaw_arg,
         extnav_manual_offset_arg,
         odom_source_arg,
