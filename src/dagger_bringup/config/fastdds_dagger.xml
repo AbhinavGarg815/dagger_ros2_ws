@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  Fast-DDS profile for Dagger (2026-09-16).
+
+  WHY: /rslidar_points clouds are ~0.8 MB. Fast-DDS's DEFAULT shared-memory
+  segment is 512 KB, so every cloud is fragmented and the segment fills as soon
+  as a couple of subscribers are slightly behind; the leftovers spill to UDP
+  loopback, where the default 212 KB kernel receive buffer drops them. Measured
+  on 2026-09-14: cloud rate decayed 10 -> 2.7 Hz as subscribers were added,
+  clouds arriving up to 1.2 s late, ~8 M lifetime UDP RcvbufErrors.
+
+  Segment sized for ~20 outstanding clouds; UDP buffers raised for whatever
+  still goes that way (needs net.core.rmem_max >= 16 MB, see tools/setup_host.sh).
+
+  Use: export FASTRTPS_DEFAULT_PROFILES_FILE=<this file> (set in ~/.bashrc).
+-->
+<dds xmlns="http://www.eprosima.com">
+  <profiles>
+    <transport_descriptors>
+      <transport_descriptor>
+        <transport_id>dagger_shm</transport_id>
+        <type>SHM</type>
+        <segment_size>67108864</segment_size>        <!-- 64 MB -->
+        <maxMessageSize>4194304</maxMessageSize>     <!-- 4 MB: a whole cloud, unfragmented -->
+        <port_queue_capacity>1024</port_queue_capacity>
+      </transport_descriptor>
+      <transport_descriptor>
+        <transport_id>dagger_udp</transport_id>
+        <type>UDPv4</type>
+        <sendBufferSize>16777216</sendBufferSize>
+        <receiveBufferSize>16777216</receiveBufferSize>
+      </transport_descriptor>
+    </transport_descriptors>
+
+    <participant profile_name="dagger_default" is_default_profile="true">
+      <rtps>
+        <userTransports>
+          <transport_id>dagger_shm</transport_id>
+          <transport_id>dagger_udp</transport_id>
+        </userTransports>
+        <useBuiltinTransports>false</useBuiltinTransports>
+      </rtps>
+    </participant>
+  </profiles>
+</dds>

@@ -141,10 +141,10 @@ def generate_launch_description():
     # GUIDED setpoint-velocity command path (NO RC override): safety.launch.py ->
     # cmd_vel_safety -> /mavros/setpoint_velocity/cmd_vel_unstamped. Requires the
     # mavros plugin param mav_frame=BODY_NED so the twist is interpreted in the
-    # body frame (as Nav2 emits it). NOTE: GUIDED uses ArduPilot's EKF yaw, which
-    # is compassless GSF and drifts at rest / in-place -> to make in-place turns
-    # work we feed our clean SLAM/EKF yaw to the FCU as ExternalNav (see
-    # localization) rather than using RC override.
+    # body frame (as Nav2 emits it). NOTE: ArduPilot's EKF yaw now comes from the
+    # dual-antenna C-RTK 2HP (EK3_SRC1_YAW=2), so the old compassless-GSF drift and
+    # the ExternalNav yaw relay that worked around it are history (relay kept
+    # arg-gated off in localization.launch.py).
     command_path = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(bringup_dir, "launch", "safety.launch.py")
