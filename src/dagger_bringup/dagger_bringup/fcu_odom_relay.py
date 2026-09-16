@@ -48,6 +48,15 @@ class FcuOdomRelay(Node):
         # rest (GPS Doppler), which an EKF integrates into ~0.3 m/min of creep.
         # |v| below this -> published as exactly 0. 0 = off. Drive speeds are >=0.1.
         self.declare_parameter("zero_velocity_deadband", 0.0)
+        # Pivot gate (rad/s): while the rover spins in place, EK3's body velocity is
+        # dominated by the GNSS-antenna lever arm (the antenna circles the pivot
+        # centre) -> up to 0.9 m of FAKE translation per 180 deg spin. That smears
+        # every obstacle already in the costmap, the planner then routes backwards
+        # out of the "boxed in" pose, the shim pivots again -> runaway (2026-09-16,
+        # bag pf_lane_radius_fix: 633 deg of spin, odom wandered ~1 m while parked).
+        # A tracked vehicle pivoting on the spot translates ~0, so above this yaw
+        # rate we publish zero linear velocity and let the gyro carry the heading.
+        self.declare_parameter("pivot_yaw_rate_gate", 0.0)
 
         g = self.get_parameter
         self.odom_frame = g("odom_frame").value
@@ -56,6 +65,7 @@ class FcuOdomRelay(Node):
         self.publish_tf = bool(g("publish_tf").value)
         self.twist_var = [float(v) for v in g("twist_variance").value]
         self.zv_deadband = float(g("zero_velocity_deadband").value)
+        self.pivot_gate = float(g("pivot_yaw_rate_gate").value)
 
         # mavros publishes local_position with BEST_EFFORT sensor QoS.
         be = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -80,6 +90,8 @@ class FcuOdomRelay(Node):
             out.pose.pose.position.z = 0.0
         lin = out.twist.twist.linear
         if self.zv_deadband > 0.0 and math.hypot(lin.x, lin.y) < self.zv_deadband:
+            lin.x = lin.y = 0.0
+        if self.pivot_gate > 0.0 and abs(out.twist.twist.angular.z) > self.pivot_gate:
             lin.x = lin.y = 0.0
         if any(self.twist_var):
             cov = list(out.twist.covariance)

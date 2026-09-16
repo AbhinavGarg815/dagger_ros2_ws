@@ -38,28 +38,22 @@ controller_server:
     FollowPath:
       plugin: "nav2_rotation_shim_controller::RotationShimController"
       primary_controller: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
-      # Drive is now direct RC-override in MANUAL (cmd_vel_to_rc); the vehicle
-      # pivots cleanly at ~0.5 rad/s (validated by teleop). The shim owns the
-      # in-place turn to the path heading. Tuned to STOP THE HUNT: a MODERATE
-      # rotate speed (less momentum) + GENTLE accel (so it can't slam into a
-      # reverse when it nears the target) + a wider yaw tolerance. The old
-      # 1.0 rad/s + accel 10 was for a GUIDED accel-deadlock that no longer
-      # exists on the direct-drive path.
-      # High threshold: the shim only does an in-place pivot for LARGE initial
-      # misalignments (>45 deg); otherwise RPP handles turns as ARCS while
-      # translating. Critical because KISS-ICP position JUMPS during in-place
-      # rotation (16-beam scan-match degrades) -> a low threshold re-triggered
-      # in-place rotation mid-drive -> odom jumps -> Nav2 hunt/wobble. Pure
-      # in-place turn-arounds use the /spin action (gyro yaw, no KISS position).
-      # (2026-09-11: reverted from 0.10 which caused the hunt.)
-      angular_dist_threshold: 0.785
+      # In-place pivots are the failure mode on this rover: each one injects up to
+      # ~0.9 m of FAKE odom translation (GNSS lever arm, gated in fcu_odom_relay
+      # since 2026-09-16) and any residual smears the costmap. So the shim pivots
+      # only for a large misalignment and everything else is driven out as an arc;
+      # deliberate turn-arounds use the /spin action instead.
+      # 0.785 -> 1.2 rad (69 deg): in-place pivots mid-route are what start the
+      # smear->replan->pivot runaway, so only pivot for a really large
+      # misalignment; smaller errors are driven out as arcs. (2026-09-16)
+      angular_dist_threshold: 1.2
       # 2026-09-14 (bag pf_wp_lanechange_3): closed_loop=true rate-limits the
       # rotate command from the MEASURED yaw rate, which is 0 until the tracks
       # break stiction -> cmd stuck at 0 + accel*dt = 0.12 rad/s (< ~0.3 breakaway)
       # -> 14 s stall. false = ramp from the last COMMAND instead.
       closed_loop: false
-      # Hysteresis: engage the in-place turn above 45 deg, keep turning to 17 deg
-      # before handing back to RPP (was 0.785 = no hysteresis -> handoff chatter).
+      # Hysteresis: engage the in-place turn above angular_dist_threshold (69 deg),
+      # keep turning down to 17 deg before handing back to RPP (0.785 = none -> chatter).
       angular_disengage_threshold: 0.3
       # Final goal-heading turn via the shim (open-loop ramp) instead of RPP's
       # rotate-to-heading, which has the same measured-rate deadlock.
@@ -95,7 +89,7 @@ controller_server:
       regulated_linear_scaling_min_speed: 0.25
       use_rotate_to_heading: true
       allow_reversing: false
-      rotate_to_heading_min_angle: 0.785
+      rotate_to_heading_min_angle: 1.2   # match angular_dist_threshold (2026-09-16)
       max_robot_pose_search_dist: 10.0
 
 local_costmap:

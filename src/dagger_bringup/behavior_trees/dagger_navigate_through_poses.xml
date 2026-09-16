@@ -13,7 +13,13 @@
         <RateController hz="1.0">
           <RecoveryNode number_of_retries="1" name="ComputePathThroughPoses">
             <ReactiveSequence>
-              <RemovePassedGoals input_goals="{goals}" output_goals="{goals}" radius="0.7"/>
+              <!-- radius 0.7 -> 2.0 (2026-09-16): a waypoint is only dropped once the rover
+                   passes within this distance. At 0.7 m a 350 kg rover that drifts wider
+                   keeps the passed waypoint, so the planner routes BACK to it: the path
+                   doubles back, its first 0.5 m points backwards, the rotation shim tries
+                   to face backwards and the direction flips every replan -> 104 command
+                   reversals in 245 s (bag pf_lane_10hz_3). 2.0 m > our lane-change offsets. -->
+              <RemovePassedGoals input_goals="{goals}" output_goals="{goals}" radius="2.0"/>
               <ComputePathThroughPoses goals="{goals}" path="{path}" planner_id="GridBased"/>
             </ReactiveSequence>
             <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
