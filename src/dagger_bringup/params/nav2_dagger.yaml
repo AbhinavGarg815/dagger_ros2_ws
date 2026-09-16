@@ -31,9 +31,12 @@ controller_server:
     general_goal_checker:
       stateful: true
       plugin: "nav2_controller::SimpleGoalChecker"
-      # 0.25 m: fused odom (EK3 velocity + gyro) is smooth; the 0.5 m used while odom
-      # carried GPS position noise made the rover stop ~0.45 m short. (2026-09-14)
-      xy_goal_tolerance: 0.25
+      # 0.25 -> 0.4 m (2026-09-16): pure pursuit steers as 1/distance^2, so chasing
+      # the last 0.25 m turned a harmless 0.2-0.3 m lateral offset into a 57 deg
+      # heading swing in the final metre (bag pf_lane_final), then ~3 s rotating
+      # back. 0.4 m ends the goal before that blowup; it is a quarter of the
+      # rover's own length and well inside our tracking accuracy (0.07 m RMS).
+      xy_goal_tolerance: 0.4
       yaw_goal_tolerance: 0.4
     FollowPath:
       plugin: "nav2_rotation_shim_controller::RotationShimController"
@@ -84,8 +87,10 @@ controller_server:
       lookahead_time: 1.5
       transform_tolerance: 1.0
       use_velocity_scaled_lookahead_dist: false
-      min_approach_linear_velocity: 0.15
-      approach_velocity_scaling_dist: 1.0
+      # Gentler run-in: omega = v * curvature, so a slower, earlier-decelerating
+      # approach also shrinks the end-of-goal swing. (2026-09-16)
+      min_approach_linear_velocity: 0.10
+      approach_velocity_scaling_dist: 1.5
       use_collision_detection: true
       max_allowed_time_to_collision_up_to_carrot: 1.0
       use_regulated_linear_velocity_scaling: true
