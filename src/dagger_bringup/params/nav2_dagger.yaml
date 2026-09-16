@@ -58,7 +58,12 @@ controller_server:
       # Final goal-heading turn via the shim (open-loop ramp) instead of RPP's
       # rotate-to-heading, which has the same measured-rate deadlock.
       rotate_to_goal_heading: true
-      forward_sampling_distance: 0.5
+      # 0.5 -> 2.0 m (2026-09-16): this is where the shim samples the path to decide
+      # which way to face. Theta* ignores the rover's heading, so when it detours the
+      # path can leave the current pose BACKWARDS for ~1 m before curving to the goal:
+      # at 0.5 m the shim read -147 deg and pivoted ~180 deg (bag pf_lane_pivotgate),
+      # while the same path read +28 deg at 2 m. Sample at the lookahead distance.
+      forward_sampling_distance: 2.0
       # Heavy ~350kg tracked vehicle: needs a strong, fast in-place turn to
       # break track stiction. 0.5/2.0 crawled through ineffective low rates and
       # stalled; 1.5 rad/s (near FCU ATC_STR_RAT_MAX ~2.1) + high accel snaps
