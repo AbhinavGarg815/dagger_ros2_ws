@@ -122,6 +122,7 @@ def generate_launch_description():
             "twist_variance": [0.01, 0.01, 0.01],
             "zero_velocity_deadband": 0.02,
             "pivot_yaw_rate_gate": 0.25,
+            "zero_lateral_velocity": True,
         }],
         condition=IfCondition(use_fused),
     )

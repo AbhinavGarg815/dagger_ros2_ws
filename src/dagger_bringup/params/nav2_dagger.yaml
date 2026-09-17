@@ -37,7 +37,9 @@ controller_server:
       # back. 0.4 m ends the goal before that blowup; it is a quarter of the
       # rover's own length and well inside our tracking accuracy (0.07 m RMS).
       xy_goal_tolerance: 0.4
-      yaw_goal_tolerance: 0.4
+      # 0.4 -> 0.2 rad (2026-09-17): a 180 deg goal heading stopped 17 deg short --
+      # the shim ends the final turn as soon as it enters the tolerance window.
+      yaw_goal_tolerance: 0.2
     FollowPath:
       plugin: "nav2_rotation_shim_controller::RotationShimController"
       primary_controller: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"

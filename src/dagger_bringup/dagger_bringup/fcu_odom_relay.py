@@ -57,6 +57,13 @@ class FcuOdomRelay(Node):
         # A tracked vehicle pivoting on the spot translates ~0, so above this yaw
         # rate we publish zero linear velocity and let the gyro carry the heading.
         self.declare_parameter("pivot_yaw_rate_gate", 0.0)
+        # Non-holonomic constraint: a tracked rover cannot move sideways, but EK3's body
+        # vy is not ~0 -- it read up to -0.17 m/s against +0.22 m/s forward (an apparent
+        # 37 deg crab) while accelerating from rest with the gyro at 0 (2026-09-17, bag
+        # pf_foxglove_turnaround_2). The fused odom slid 1 m right of the line and Nav2
+        # steered a real left curve to "fix" it. True = publish vy as exactly 0, so the
+        # EKF receives vy=0 as a measurement (a hard lateral constraint).
+        self.declare_parameter("zero_lateral_velocity", False)
 
         g = self.get_parameter
         self.odom_frame = g("odom_frame").value
@@ -66,6 +73,7 @@ class FcuOdomRelay(Node):
         self.twist_var = [float(v) for v in g("twist_variance").value]
         self.zv_deadband = float(g("zero_velocity_deadband").value)
         self.pivot_gate = float(g("pivot_yaw_rate_gate").value)
+        self.zero_lateral = bool(g("zero_lateral_velocity").value)
 
         # mavros publishes local_position with BEST_EFFORT sensor QoS.
         be = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -93,6 +101,8 @@ class FcuOdomRelay(Node):
             lin.x = lin.y = 0.0
         if self.pivot_gate > 0.0 and abs(out.twist.twist.angular.z) > self.pivot_gate:
             lin.x = lin.y = 0.0
+        if self.zero_lateral:
+            lin.y = 0.0
         if any(self.twist_var):
             cov = list(out.twist.covariance)
             for idx, var in zip((0, 7, 35), self.twist_var):  # vx, vy, vyaw
