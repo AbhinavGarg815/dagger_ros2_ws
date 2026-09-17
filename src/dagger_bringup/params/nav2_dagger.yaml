@@ -130,15 +130,22 @@ local_costmap:
           clearing: true
           marking: true
           data_type: "LaserScan"
+          # /scan uses +inf for "no return within 30 m" (~200 of 723 beams in the
+          # open). Nav2's default inf_is_valid=false SKIPS those rays, so open
+          # directions never clear stale obstacles (ghosts). (2026-09-17)
+          inf_is_valid: true
           raytrace_max_range: 30.0
           raytrace_min_range: 0.0
           obstacle_max_range: 25.0
           obstacle_min_range: 0.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 3.0
-        # >= circumscribed radius (1.01 m) so the planner keeps real corner clearance.
-        inflation_radius: 1.0
+        # 2026-09-17: 1.0 m / 3.0 painted walls ~1 m thick in a 3-4 m lane (user: "too much
+        # obstacle area"). Steeper decay + 0.8 m keeps the hard no-go zone (inscribed
+        # 0.58 m from the footprint) but frees the soft margin. Corner clearance is
+        # still enforced by RPP's footprint collision check (use_collision_detection).
+        cost_scaling_factor: 6.0
+        inflation_radius: 0.8
       always_send_full_costmap: true
 
 global_costmap:
@@ -170,15 +177,22 @@ global_costmap:
           clearing: true
           marking: true
           data_type: "LaserScan"
+          # /scan uses +inf for "no return within 30 m" (~200 of 723 beams in the
+          # open). Nav2's default inf_is_valid=false SKIPS those rays, so open
+          # directions never clear stale obstacles (ghosts). (2026-09-17)
+          inf_is_valid: true
           raytrace_max_range: 30.0
           raytrace_min_range: 0.0
           obstacle_max_range: 25.0
           obstacle_min_range: 0.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 3.0
-        # >= circumscribed radius (1.01 m) so the planner keeps real corner clearance.
-        inflation_radius: 1.0
+        # 2026-09-17: 1.0 m / 3.0 painted walls ~1 m thick in a 3-4 m lane (user: "too much
+        # obstacle area"). Steeper decay + 0.8 m keeps the hard no-go zone (inscribed
+        # 0.58 m from the footprint) but frees the soft margin. Corner clearance is
+        # still enforced by RPP's footprint collision check (use_collision_detection).
+        cost_scaling_factor: 6.0
+        inflation_radius: 0.8
       always_send_full_costmap: true
 
 planner_server:
