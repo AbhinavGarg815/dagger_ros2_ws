@@ -27,7 +27,7 @@ from sensor_msgs.msg import Imu, PointCloud2, LaserScan
 from std_msgs.msg import Float64
 from mavros_msgs.msg import GPSRAW, State, RCOut
 from mavros_msgs.srv import CommandLong
-from rcl_interfaces.srv import SetParameters
+from rcl_interfaces.srv import GetParameters, SetParameters
 from rcl_interfaces.msg import Parameter, ParameterValue, ParameterType
 from lifecycle_msgs.srv import GetState
 
@@ -95,14 +95,25 @@ class Preflight(Node):
 
     def configure(self):
         ok = True
-        cli = self.create_client(SetParameters, "/mavros/setpoint_velocity/set_parameters")
-        req = SetParameters.Request()
-        req.parameters = [Parameter(name="mav_frame", value=ParameterValue(
-            type=ParameterType.PARAMETER_STRING, string_value="BODY_NED"))]
-        r = self.call(cli, req)
-        good = bool(r and r.results and r.results[0].successful)
+        # SAFETY-CRITICAL: with mav_frame=LOCAL_NED the FCU reads Nav2's body-frame
+        # twist in the EARTH frame and drives the wrong way. The set call can time out
+        # right after a daemon/mavros restart (seen 2026-09-17: stayed LOCAL_NED), so
+        # retry and VERIFY by reading the value back instead of trusting the set.
+        set_cli = self.create_client(SetParameters, "/mavros/setpoint_velocity/set_parameters")
+        get_cli = self.create_client(GetParameters, "/mavros/setpoint_velocity/get_parameters")
+        frame = None
+        for _ in range(4):
+            req = SetParameters.Request()
+            req.parameters = [Parameter(name="mav_frame", value=ParameterValue(
+                type=ParameterType.PARAMETER_STRING, string_value="BODY_NED"))]
+            self.call(set_cli, req, timeout=5.0)
+            r = self.call(get_cli, GetParameters.Request(names=["mav_frame"]), timeout=5.0)
+            frame = r.values[0].string_value if r and r.values else None
+            if frame == "BODY_NED":
+                break
+        good = frame == "BODY_NED"
         ok &= good
-        print(f"  [{'OK' if good else 'FAIL'}] setpoint_velocity mav_frame=BODY_NED")
+        print(f"  [{'OK' if good else 'FAIL'}] setpoint_velocity mav_frame={frame} (verified by read-back)")
         cmd = self.create_client(CommandLong, "/mavros/cmd/command")
         for msg_id, hz in STREAMS:
             req = CommandLong.Request(command=511, param1=float(msg_id), param2=1e6 / hz)
