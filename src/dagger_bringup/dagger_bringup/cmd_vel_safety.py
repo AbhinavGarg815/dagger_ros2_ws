@@ -2,8 +2,10 @@
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 from geometry_msgs.msg import Twist
+from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool
 
 
@@ -23,6 +25,12 @@ class CmdVelSafety(Node):
         # boundary so teleop and Nav2 both turn correctly. Set false if the sign
         # is ever corrected on the ArduPilot skid-steer side.
         self.declare_parameter("invert_yaw", False)
+        # Sensor freshness gate: when set, output is forced to zero unless a
+        # LaserScan arrived on this topic within fresh_timeout s. Humble's
+        # collision_monitor treats a stale source as "no obstacles" and passes
+        # commands through, so the guard lives here at the FCU boundary. Empty = off.
+        self.declare_parameter("fresh_topic", "")
+        self.declare_parameter("fresh_timeout", 0.5)
 
         self.input_topic = self.get_parameter("input_topic").value
         self.output_topic = self.get_parameter("output_topic").value
@@ -30,22 +38,42 @@ class CmdVelSafety(Node):
         self.publish_rate = float(self.get_parameter("publish_rate").value)
         self.command_timeout = float(self.get_parameter("command_timeout").value)
         self.invert_yaw = bool(self.get_parameter("invert_yaw").value)
+        self.fresh_topic = self.get_parameter("fresh_topic").value
+        self.fresh_timeout = float(self.get_parameter("fresh_timeout").value)
 
         self.last_cmd = Twist()
         self.last_cmd_time = self.get_clock().now()
         self.estop_active = False
+        self.last_fresh_time = None
+        self.stale_logged = False
 
         self.pub = self.create_publisher(Twist, self.output_topic, 10)
         self.create_subscription(Twist, self.input_topic, self.cmd_callback, 10)
         self.create_subscription(Bool, self.estop_topic, self.estop_callback, 10)
+        if self.fresh_topic:
+            be = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
+                            history=HistoryPolicy.KEEP_LAST, depth=1)
+            self.create_subscription(LaserScan, self.fresh_topic, self.fresh_callback, be,
+                                     raw=True)
 
         self.timer = self.create_timer(1.0 / self.publish_rate, self.publish_command)
 
         self.get_logger().info(
             f"cmd_vel_safety active: {self.input_topic} -> {self.output_topic} "
             f"(estop={self.estop_topic}, timeout={self.command_timeout}s, "
-            f"invert_yaw={self.invert_yaw})"
+            f"invert_yaw={self.invert_yaw}, fresh_topic={self.fresh_topic or 'off'})"
         )
+
+    def fresh_callback(self, _):
+        self.last_fresh_time = self.get_clock().now()
+
+    def sensor_stale(self):
+        if not self.fresh_topic:
+            return False
+        if self.last_fresh_time is None:
+            return True
+        age = (self.get_clock().now() - self.last_fresh_time).nanoseconds / 1e9
+        return age > self.fresh_timeout
 
     def cmd_callback(self, msg):
         self.last_cmd = msg
@@ -66,7 +94,17 @@ class CmdVelSafety(Node):
             return
 
         elapsed = (self.get_clock().now() - self.last_cmd_time).nanoseconds / 1e9
-        if elapsed <= self.command_timeout:
+        fresh_cmd = elapsed <= self.command_timeout
+        if self.sensor_stale():
+            if fresh_cmd and not self.stale_logged:
+                self.get_logger().error(
+                    f"{self.fresh_topic} stale (> {self.fresh_timeout}s): forcing zero velocity")
+                self.stale_logged = True
+            self.pub.publish(out)
+            return
+        self.stale_logged = False
+
+        if fresh_cmd:
             # Copy into a fresh Twist (never mutate self.last_cmd, or the yaw
             # negation would flip every timer tick).
             out.linear.x = self.last_cmd.linear.x

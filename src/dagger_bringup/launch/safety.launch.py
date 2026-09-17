@@ -17,6 +17,10 @@ def generate_launch_description():
         "output_topic",
         default_value="/mavros/setpoint_velocity/cmd_vel_unstamped",
     )
+    # Sensor freshness gate for cmd_vel_safety (zero output while this LaserScan is
+    # stale). nav2.launch.py sets /scan_safety; empty = off (e.g. teleop-only use).
+    fresh_topic = LaunchConfiguration("fresh_topic")
+    fresh_topic_arg = DeclareLaunchArgument("fresh_topic", default_value="")
 
     twist_mux = Node(
         package="twist_mux",
@@ -38,7 +42,9 @@ def generate_launch_description():
             "estop_topic": "/estop",
             "publish_rate": 20.0,
             "command_timeout": 0.5,
+            "fresh_topic": fresh_topic,
+            "fresh_timeout": 0.5,
         }],
     )
 
-    return LaunchDescription([output_topic_arg, twist_mux, cmd_vel_safety])
+    return LaunchDescription([output_topic_arg, fresh_topic_arg, twist_mux, cmd_vel_safety])

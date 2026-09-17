@@ -78,7 +78,8 @@ def generate_launch_description():
         name="controller_server",
         output="screen",
         parameters=nav2_params,
-        remappings=[("cmd_vel", "/cmd_vel_nav")],
+        # -> collision_monitor -> /cmd_vel_nav
+        remappings=[("cmd_vel", "/cmd_vel_nav_raw")],
     )
 
     planner_server = Node(
@@ -95,7 +96,8 @@ def generate_launch_description():
         name="behavior_server",
         output="screen",
         parameters=nav2_params,
-        remappings=[("cmd_vel", "/cmd_vel_nav")],
+        # -> collision_monitor -> /cmd_vel_nav
+        remappings=[("cmd_vel", "/cmd_vel_nav_raw")],
     )
 
     # Permanent /scan subscriber (prevents the p2l lazy-subscribe flap) + restarts
@@ -105,6 +107,61 @@ def generate_launch_description():
         executable="scan_watchdog",
         name="scan_watchdog",
         output="screen",
+        # match THIS p2l instance only (p2l_safety runs the same executable)
+        parameters=[{"process_pattern": "__node:=pointcloud_to_laserscan( |$)"}],
+    )
+
+    # ---- Collision monitor: independent last gate on the Nav2 command path ----
+    # Dedicated scan for the safety layer, separate from the costmap /scan: taller
+    # band (0.30-1.60 m, a person is seen right up to the bumper) and range_min
+    # 1.0 m in base_footprint to drop the mast/mount self-returns (r <= 0.96 m).
+    p2l_safety = Node(
+        package="pointcloud_to_laserscan",
+        executable="pointcloud_to_laserscan_node",
+        name="p2l_safety",
+        output="screen",
+        respawn=True,
+        respawn_delay=1.0,
+        remappings=[("cloud_in", "/rslidar_points"), ("scan", "/scan_safety")],
+        parameters=[{
+            "target_frame": "base_footprint",
+            "transform_tolerance": 0.1,
+            "min_height": 0.30,
+            "max_height": 1.60,
+            "angle_min": -3.14159,
+            "angle_max": 3.14159,
+            "angle_increment": 0.0087,
+            "scan_time": 0.1,
+            "range_min": 1.0,
+            "range_max": 10.0,
+            "use_inf": True,
+            "inf_epsilon": 1.0,
+            "use_sim_time": use_sim_time,
+        }],
+    )
+
+    scan_safety_watchdog = Node(
+        package="dagger_bringup",
+        executable="scan_watchdog",
+        name="scan_safety_watchdog",
+        output="screen",
+        parameters=[{
+            "scan_topic": "/scan_safety",
+            "process_pattern": "__node:=p2l_safety( |$)",
+        }],
+    )
+
+    # /cmd_vel_nav_raw -> stop / slowdown / approach -> /cmd_vel_nav (twist_mux).
+    # Lifecycle-managed with Nav2: if it cannot activate, Nav2 does not come up.
+    collision_monitor = Node(
+        package="nav2_collision_monitor",
+        executable="collision_monitor",
+        name="collision_monitor",
+        output="screen",
+        parameters=[
+            os.path.join(bringup_dir, "params", "collision_monitor.yaml"),
+            {"use_sim_time": use_sim_time},
+        ],
     )
 
     bt_navigator = Node(
@@ -134,6 +191,7 @@ def generate_launch_description():
                 "planner_server",
                 "behavior_server",
                 "bt_navigator",
+                "collision_monitor",
             ],
         }],
     )
@@ -148,7 +206,10 @@ def generate_launch_description():
     command_path = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(bringup_dir, "launch", "safety.launch.py")
-        )
+        ),
+        # cmd_vel_safety zeroes output if /scan_safety goes stale (Humble's
+        # collision_monitor would otherwise treat a dead source as "all clear").
+        launch_arguments={"fresh_topic": "/scan_safety"}.items(),
     )
 
     return LaunchDescription([
@@ -158,6 +219,9 @@ def generate_launch_description():
         autostart_arg,
         pointcloud_to_laserscan,
         scan_watchdog,
+        p2l_safety,
+        scan_safety_watchdog,
+        collision_monitor,
         controller_server,
         planner_server,
         behavior_server,

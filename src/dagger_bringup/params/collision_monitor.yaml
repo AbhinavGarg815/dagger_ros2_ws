@@ -1,0 +1,83 @@
+# Dagger collision monitor (nav2_collision_monitor, Humble 1.1.x).
+#
+# Last software gate on the Nav2 command path, independent of the planner,
+# controller and costmaps:
+#   controller/behavior_server -> /cmd_vel_nav_raw -> collision_monitor
+#   -> /cmd_vel_nav -> twist_mux -> cmd_vel_safety -> mavros
+# Teleop (/cmd_vel_teleop) is NOT gated -- the RC transmitter is the manual override.
+#
+# Geometry (base_footprint = hull centre; hull +-0.85 x +-0.58 m; LiDAR at x 0.29,
+# z 1.12). Source = /scan_safety, a dedicated pointcloud_to_laserscan instance
+# (band 0.30-1.60 m, range_min 1.0 m to drop the mast self-returns at r <= 0.96 m).
+#
+# LIDAR NEAR-FIELD BLIND ZONE -- this monitor cannot see what the LiDAR cannot see.
+# The lowest beam (-15 deg) from 1.12 m only reaches height h beyond
+# (1.12 - h) / tan(15 deg) from the sensor. Shortest detectable obstacle:
+#   at the bumper (x 0.85)  -> ~0.97 m tall     (a standing person: yes; a box: no)
+#   end of stop zone (1.45) -> ~0.81 m tall
+#   end of slow zone (2.60) -> ~0.50 m tall
+# Low obstacles are seen further out, then drop out of view as the rover closes
+# in; this monitor does not latch, so they only slow the rover while visible.
+# Low obstacles need ground segmentation / the D435 near field (open item).
+#
+# In Humble a STALE source silently counts as "no obstacles" (getData() has no
+# failure path), so cmd_vel_safety independently zeroes all output when
+# /scan_safety is older than 0.5 s (fresh_topic in safety.launch.py).
+
+collision_monitor:
+  ros__parameters:
+    use_sim_time: false
+    base_frame_id: "base_footprint"
+    odom_frame_id: "odom"
+    cmd_vel_in_topic: "/cmd_vel_nav_raw"
+    cmd_vel_out_topic: "/cmd_vel_nav"
+    transform_tolerance: 0.5
+    source_timeout: 0.5
+    base_shift_correction: true
+    stop_pub_timeout: 2.0
+    polygons: ["PolygonStop", "PolygonSlow", "FootprintApproach"]
+
+    # 0.6 m ahead of the bumper, a little wider than the hull. At 0.4 m/s the
+    # chain latency (~0.3 s) + braking of a 350 kg tracked hull is ~0.3-0.4 m.
+    # Also blocks in-place rotation while something is this close ahead.
+    PolygonStop:
+      type: "polygon"
+      points: [1.45, 0.70, 1.45, -0.70, 0.85, -0.70, 0.85, 0.70]
+      action_type: "stop"
+      max_points: 3          # trigger needs MORE than this many scan points inside
+      visualize: true
+      polygon_pub_topic: "/collision_monitor/stop_zone"
+      enabled: true
+
+    # 1.75 m ahead of the bumper, narrower than the 1.1 m lane walls.
+    PolygonSlow:
+      type: "polygon"
+      points: [2.60, 0.85, 2.60, -0.85, 0.85, -0.85, 0.85, 0.85]
+      action_type: "slowdown"
+      max_points: 3
+      slowdown_ratio: 0.4
+      visualize: true
+      polygon_pub_topic: "/collision_monitor/slow_zone"
+      enabled: true
+
+    # Direction-aware: simulates the CURRENT command (incl. pivots and arcs) and
+    # scales it so the hull cannot reach a point within 1.5 s.
+    # Protects the sides/corners during turns, which the forward boxes do not.
+    # Humble's approach polygon always takes its shape from a footprint topic
+    # (default local_costmap/published_footprint); set explicitly = the costmap hull.
+    FootprintApproach:
+      type: "polygon"
+      footprint_topic: "/local_costmap/published_footprint"
+      action_type: "approach"
+      time_before_collision: 1.5
+      simulation_time_step: 0.1
+      max_points: 3
+      visualize: true
+      polygon_pub_topic: "/collision_monitor/footprint"
+      enabled: true
+
+    observation_sources: ["scan"]
+    scan:
+      type: "scan"
+      topic: "/scan_safety"
+      enabled: true
