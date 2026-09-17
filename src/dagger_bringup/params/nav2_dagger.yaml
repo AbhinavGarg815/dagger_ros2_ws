@@ -82,9 +82,14 @@ controller_server:
       # pure pursuit w = 2*v*e/L^2, so L 0.6 -> 2.0 cuts the correction gain ~11x.
       # At 0.6 m the turn cmd hunted (4 reversals/20 s, 0.55 rad/s spike at the
       # goal); at 2.0 m: 1 reversal, CTE 0.042 m RMS, goal err 0.12 m.
+      # 2.0 -> 1.5 m (2026-09-17), safe now that odom is non-holonomic and the shim
+      # samples at 2 m. Same 6 m straight + 180 goal both ways: heading max 10.5 ->
+      # 7.1 deg, final turn -1.5 -> 0.0 deg, no weave. Lateral RMS unchanged (0.10 m):
+      # that residual is a track imbalance (right track needs +43 us PWM to go
+      # straight), not controller gain.
       desired_linear_vel: 0.4
-      lookahead_dist: 2.0
-      min_lookahead_dist: 1.5
+      lookahead_dist: 1.5
+      min_lookahead_dist: 1.2
       max_lookahead_dist: 3.0
       lookahead_time: 1.5
       transform_tolerance: 1.0
