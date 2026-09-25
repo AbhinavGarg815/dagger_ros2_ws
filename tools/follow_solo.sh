@@ -4,7 +4,10 @@
 #   bash tools/follow_solo.sh <bag_name> HH:MM:SS [HH:MM:SS ...]
 #   e.g. bash tools/follow_solo.sh follow_walk_1 14:05:00 14:07:00
 #
-# At each clock slot it runs tools/follow_solo_gate.py. The gate passes only when
+# At each clock slot it polls tools/follow_solo_gate.py for POLL_S seconds (60 by
+# default), printing each verdict, so you can step back or forward until it
+# passes instead of having to hit the window on the first try.
+# The gate passes only when
 # the rover is armed in GUIDED AND you are standing 2.7-3.3 m in front of it --
 # inside the controller's deadband, so the moment follow is enabled it commands
 # ZERO and only starts moving when you walk away. No slot passes, nothing is
@@ -20,6 +23,7 @@
 set -u
 name=$1; shift
 DURATION_S=${DURATION_S:-60}
+POLL_S=${POLL_S:-60}
 cd "$(dirname "$0")/.."
 
 disable_follow() {
@@ -30,7 +34,19 @@ trap 'disable_follow; kill -INT ${rec:-0} ${stat:-0} 2>/dev/null; exit 130' INT 
 
 for slot in "$@"; do
   while [ "$(date +%H:%M:%S)" \< "$slot" ]; do sleep 0.2; done
-  g=$(python3 tools/follow_solo_gate.py 2>/dev/null | grep GATE); echo "slot $slot: $g"
+  # Retry for POLL_S rather than judging one instant: the operator is standing in
+  # front of the rover and cannot see this terminal, so the gate has to let them
+  # walk themselves into the window. Every safety condition is unchanged -- this
+  # only decides WHEN they are checked.
+  g=""
+  poll_end=$(( $(date +%s) + POLL_S ))
+  while [ "$(date +%s)" -lt "$poll_end" ]; do
+    g=$(python3 tools/follow_solo_gate.py 2>/dev/null | grep GATE)
+    echo "  $g"
+    echo "$g" | grep -q PASS && break
+    sleep 2
+  done
+  echo "slot $slot: $g"
   if echo "$g" | grep -q PASS; then
     bash tools/pf_record.sh "$name" > "/tmp/follow_rec_$name.log" 2>&1 &
     rec=$!

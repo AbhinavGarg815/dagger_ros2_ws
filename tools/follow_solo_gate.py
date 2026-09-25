@@ -40,15 +40,23 @@ def main():
                           lambda m: s.__setitem__("tg", (time.time(), m)), qos_profile_sensor_data)
     n.create_subscription(LaserScan, "/scan_safety",
                           lambda m: s.__setitem__("sc", (time.time(), m)), qos_profile_sensor_data)
+    # /mavros/state publishes at only 1 Hz and mavros discovery can take a
+    # couple of seconds, so a flat 3 s window sometimes catches NOTHING and the
+    # gate reports "not armed+GUIDED (mode=?, armed=?)" on a rover that is armed
+    # and in GUIDED. Wait specifically for a state message, then sample the rest.
+    end = time.time() + 10.0
+    while time.time() < end and "st" not in s:
+        rclpy.spin_once(n, timeout_sec=0.05)
     end = time.time() + 3.0
     while time.time() < end:
         rclpy.spin_once(n, timeout_sec=0.05)
 
     fail = []
     st = s.get("st")
-    if not st or not st.armed or st.mode != "GUIDED":
-        fail.append(f"not armed+GUIDED (mode={st.mode if st else '?'}, "
-                    f"armed={st.armed if st else '?'})")
+    if not st:
+        fail.append("no /mavros/state after 10 s -- mavros discovery, not the FCU")
+    elif not st.armed or st.mode != "GUIDED":
+        fail.append(f"not armed+GUIDED (mode={st.mode}, armed={st.armed})")
 
     tg = s.get("tg")
     if not tg or time.time() - tg[0] > 0.8:
