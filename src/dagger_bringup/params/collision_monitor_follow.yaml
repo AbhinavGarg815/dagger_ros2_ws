@@ -1,0 +1,92 @@
+# Dagger collision monitor -- FOLLOW path (nav2_collision_monitor, Humble 1.1.x).
+#
+# Second instance of the monitor that guards the Nav2 path (collision_monitor.yaml).
+# The follow controller does NOT go through Nav2, so without this it would reach
+# twist_mux -- and the motors -- with no stop or slow zone at all:
+#   follow_controller -> /cmd_vel_follow_raw -> collision_monitor_follow
+#   -> /cmd_vel_follow -> twist_mux (priority 30) -> cmd_vel_safety -> mavros
+#
+# Zones, source and geometry are deliberately IDENTICAL to the Nav2 monitor, so
+# the rover behaves the same way near a person whichever path is driving. See
+# collision_monitor.yaml for the derivation of the polygon dimensions and for the
+# LiDAR near-field blind zone (at the bumper only obstacles taller than ~0.97 m
+# are visible; a standing adult yes, a crouching one no).
+#
+# TWO THINGS THIS DOES NOT COVER:
+#
+# 1. REVERSE. A stop trigger zeroes the whole command, including any attempt to
+#    back away. The follow controller therefore never commands reverse: if the
+#    target closes inside the stop zone the rover simply holds still until they
+#    move away. Backing a 350 kg hull with no rear sensing is the worse option.
+#
+# 2. FootprintApproach needs T2. In Humble an "approach" polygon ALWAYS takes its
+#    shape from a footprint topic -- Polygon::getParameters() returns before it
+#    ever reads "points" -- and if that topic is silent the polygon stays empty
+#    and never triggers, with NO warning logged. /local_costmap/published_footprint
+#    comes from Nav2's local costmap, so follow mode requires T2 (nav2_gps) to be
+#    running. Verify /collision_monitor_follow/footprint is actually publishing
+#    before driving; the stop and slow polygons are static and do not depend on it.
+#
+# Staleness of /scan_safety is handled downstream and in common with Nav2:
+# cmd_vel_safety zeroes ALL output when the scan is older than 0.5 s, because
+# Humble's monitor treats a dead source as "no obstacles".
+
+collision_monitor_follow:
+  ros__parameters:
+    use_sim_time: false
+    base_frame_id: "base_footprint"
+    odom_frame_id: "odom"
+    cmd_vel_in_topic: "/cmd_vel_follow_raw"
+    cmd_vel_out_topic: "/cmd_vel_follow"
+    transform_tolerance: 0.5
+    source_timeout: 0.5
+    base_shift_correction: true
+    stop_pub_timeout: 2.0
+    polygons: ["PolygonStop", "PolygonSlow", "FootprintApproach"]
+
+    # 0.6 m ahead of the bumper. Well inside the ~3 m follow distance, so in
+    # normal following this never fires -- it is the last resort, not a control
+    # input. It fires when the target turns and walks back into the rover.
+    PolygonStop:
+      type: "polygon"
+      points: [1.45, 0.70, 1.45, -0.70, 0.85, -0.70, 0.85, 0.70]
+      action_type: "stop"
+      max_points: 3
+      visualize: true
+      polygon_pub_topic: "/collision_monitor_follow/stop_zone"
+      enabled: true
+
+    # 1.75 m ahead of the bumper. The follow controller holds ~3 m, so a target
+    # at the set distance sits OUTSIDE this zone; it only engages once the rover
+    # has already closed too far, where slowing is the wanted behaviour anyway.
+    PolygonSlow:
+      type: "polygon"
+      points: [2.60, 0.85, 2.60, -0.85, 0.85, -0.85, 0.85, 0.85]
+      action_type: "slowdown"
+      max_points: 3
+      slowdown_ratio: 0.4
+      visualize: true
+      polygon_pub_topic: "/collision_monitor_follow/slow_zone"
+      enabled: true
+
+    # Direction-aware: simulates the current command and scales it so the hull
+    # cannot reach an obstacle within 1.5 s. Covers the sides and corners while
+    # the rover turns to keep the target centred, which the forward boxes do not.
+    FootprintApproach:
+      type: "polygon"
+      footprint_topic: "/local_costmap/published_footprint"
+      action_type: "approach"
+      time_before_collision: 1.5
+      simulation_time_step: 0.1
+      max_points: 3
+      visualize: true
+      polygon_pub_topic: "/collision_monitor_follow/footprint"
+      enabled: true
+
+    # Shared with the Nav2 monitor: the p2l_safety instance launched by
+    # nav2.launch.py (band 0.30-1.60 m, range_min 1.0 m to drop mast self-returns).
+    observation_sources: ["scan"]
+    scan:
+      type: "scan"
+      topic: "/scan_safety"
+      enabled: true
