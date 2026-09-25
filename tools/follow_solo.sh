@@ -92,7 +92,29 @@ for slot in "$@"; do
       sleep 2; kill -KILL "$rec" 2>/dev/null
       exit 1
     fi
-    echo "$(date +%H:%M:%S) recording -> ~/dagger_bags/pf_${bag}"
+    # The folder existing is not enough. On 2026-09-25 (stop_test_173211) the
+    # recorder took ~30 s to discover mavros's publishers: every /mavros/* topic
+    # in the bag started six seconds AFTER the event under test, while
+    # /odometry/filtered had been recording all along. Wait until the recorder
+    # has actually subscribed to the FCU topics the analysis depends on.
+    need="/mavros/rc/out /mavros/rc/in /mavros/local_position/velocity_body /mavros/setpoint_velocity/cmd_vel_unstamped"
+    ok=0
+    for _ in $(seq 1 90); do
+      missing=0
+      for tp in $need; do
+        grep -q "Subscribed to topic '$tp'" "/tmp/follow_rec_$bag.log" 2>/dev/null || missing=1
+      done
+      [ "$missing" -eq 0 ] && { ok=1; break; }
+      kill -0 "$rec" 2>/dev/null || break
+      sleep 0.5
+    done
+    if [ "$ok" -ne 1 ]; then
+      echo "RECORDER NOT SUBSCRIBED to the FCU topics after 45 s -- not enabling follow."
+      grep -o "Subscribed to topic '[^']*'" "/tmp/follow_rec_$bag.log" | tail -5
+      kill -INT "$rec" "$stat" 2>/dev/null; sleep 2; kill -KILL "$rec" 2>/dev/null
+      exit 1
+    fi
+    echo "$(date +%H:%M:%S) recording -> ~/dagger_bags/pf_${bag} (FCU topics subscribed)"
     echo "$(date +%H:%M:%S) ENABLING FOLLOW for ${DURATION_S}s -- walk away slowly"
     set_follow true
     sleep "$DURATION_S"
