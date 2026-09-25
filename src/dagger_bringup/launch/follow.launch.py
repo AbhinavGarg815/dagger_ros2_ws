@@ -32,12 +32,18 @@ def generate_launch_description():
     autostart = LaunchConfiguration("autostart")
 
     use_detector = LaunchConfiguration("use_detector")
+    use_selector = LaunchConfiguration("use_selector")
+    selection_mode = LaunchConfiguration("selection_mode")
     engine_path = LaunchConfiguration("engine_path")
     debug_image = LaunchConfiguration("debug_image")
 
     use_sim_time_arg = DeclareLaunchArgument("use_sim_time", default_value="false")
     autostart_arg = DeclareLaunchArgument("autostart", default_value="true")
     use_detector_arg = DeclareLaunchArgument("use_detector", default_value="true")
+    use_selector_arg = DeclareLaunchArgument("use_selector", default_value="true")
+    # "centred" follows whoever is ahead; "nearest" grabs the closest person.
+    selection_mode_arg = DeclareLaunchArgument("selection_mode", default_value="centred")
+    follow_distance_arg = DeclareLaunchArgument("follow_distance", default_value="3.0")
     # Engines are built for one GPU + TensorRT version, so models/ is gitignored
     # and this points into the source tree rather than the install share dir.
     engine_path_arg = DeclareLaunchArgument(
@@ -92,13 +98,30 @@ def generate_launch_description():
         }],
     )
 
+    # Bearing from the camera, range from the LiDAR -> /follow/target.
+    target_selector = Node(
+        package="dagger_bringup",
+        executable="target_selector",
+        name="target_selector",
+        output="screen",
+        condition=IfCondition(use_selector),
+        parameters=[{
+            "selection_mode": selection_mode,
+            "use_sim_time": use_sim_time,
+        }],
+    )
+
     return LaunchDescription([
         use_sim_time_arg,
         autostart_arg,
         use_detector_arg,
+        use_selector_arg,
+        selection_mode_arg,
+        follow_distance_arg,
         engine_path_arg,
         debug_image_arg,
         collision_monitor_follow,
         lifecycle_manager,
         person_detector,
+        target_selector,
     ])
