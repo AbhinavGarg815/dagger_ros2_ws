@@ -11,5 +11,5 @@ exec ros2 bag record -s mcap -o "$out" \
   /plan /odometry/filtered /cmd_vel_nav /cmd_vel_nav_raw /scan_safety /mavros/setpoint_velocity/cmd_vel_unstamped \
   /follow/target /follow/track_id /follow/detections /follow/enable /cmd_vel_follow_raw /cmd_vel_follow \
   /mavros/imu/data /mavros/imu/data_raw /mavros/gpsstatus/gps1/raw /mavros/state \
-  /mavros/rc/out /mavros/local_position/velocity_body /lookahead_point \
+  /mavros/rc/out /mavros/rc/in /mavros/local_position/velocity_body /lookahead_point \
   /tf /tf_static /rosout /navigate_to_pose/_action/status
