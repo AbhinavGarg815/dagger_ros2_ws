@@ -65,8 +65,15 @@ class FollowController(Node):
         # On losing the target, turn toward where it was last seen for this long
         # before giving up. ROTATION ONLY, never forward: turning in place with
         # nothing in view is defensible, translating blindly is not.
-        self.declare_parameter("search_timeout", 3.0)
-        self.declare_parameter("search_angular", 0.25)
+        self.declare_parameter("search_timeout", 4.0)
+        # 0.25 rad/s does NOT turn this rover from a standstill. Measured on
+        # 2026-09-25: two searches commanded ~53 and ~45 deg of rotation and
+        # actually delivered +23.4 and -7.6 deg (44 % and 17 %). The second
+        # started from exactly zero linear velocity, which is the worst case for
+        # breaking track stiction on a 350 kg hull; the first still had 0.04 m/s
+        # of residual motion helping it. Raised to sweep the field of view in
+        # the time available -- see the steering-gain table in N6.
+        self.declare_parameter("search_angular", 0.45)
         # Only worth searching if the target was actually heading out of frame.
         # Vanishing dead ahead means occlusion or out of range, and turning would
         # point the camera AWAY from where they still are.

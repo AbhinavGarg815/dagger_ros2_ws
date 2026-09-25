@@ -86,11 +86,20 @@ def main():
                 # absent output here means idle -- checking `out is None` first
                 # mislabelled a holding-station rover as STOP.
                 gate = "idle"
-            elif out is None or abs(out.linear.x) < 1e-3 < abs(raw.linear.x):
+            elif out is None:
                 gate = "STOP"
             else:
-                r = out.linear.x / raw.linear.x
-                gate = "CLEAR" if r > 0.97 else ("SLOW" if abs(r - 0.4) < 0.05 else f"x{r:.2f}")
+                # Ratio on whichever axis was actually requested. A search is
+                # rotation-only, so dividing by raw.linear.x threw
+                # ZeroDivisionError and killed the log at exactly the moment the
+                # new search behaviour engaged -- the run this was built for.
+                if abs(raw.linear.x) >= 1e-3:
+                    r = out.linear.x / raw.linear.x
+                else:
+                    r = out.angular.z / raw.angular.z
+                gate = ("STOP" if abs(r) < 1e-3 else
+                        "CLEAR" if r > 0.97 else
+                        "SLOW" if abs(r - 0.4) < 0.05 else f"x{r:.2f}")
 
             # s["scan"] is 0.0 until the first scan lands; printing the age
             # then would print the epoch, which is noise in a saved log.
