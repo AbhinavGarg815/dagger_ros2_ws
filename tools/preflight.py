@@ -117,7 +117,14 @@ class Preflight(Node):
         cmd = self.create_client(CommandLong, "/mavros/cmd/command")
         for msg_id, hz in STREAMS:
             req = CommandLong.Request(command=511, param1=float(msg_id), param2=1e6 / hz)
-            r = self.call(cmd, req)
+            # 8 s, not the default 3 s: CommandLong round-trips over the 57600-baud
+            # FCU link take 3-4 s normally and longer while the FCU is busy (e.g.
+            # just after a rover reboot). At 3 s every call timed out and was
+            # reported FAIL while actually succeeding -- measured success=True
+            # result=0 in 4.20 s. A safety gate that cries wolf gets ignored.
+            r = self.call(cmd, req, timeout=8.0)
+            if not (r and r.success):
+                r = self.call(cmd, req, timeout=8.0)
             good = bool(r and r.success)
             ok &= good
             print(f"  [{'OK' if good else 'FAIL'}] SET_MESSAGE_INTERVAL msg {msg_id} -> {hz:g} Hz")
