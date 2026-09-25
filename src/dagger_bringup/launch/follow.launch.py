@@ -34,6 +34,8 @@ def generate_launch_description():
     use_detector = LaunchConfiguration("use_detector")
     use_selector = LaunchConfiguration("use_selector")
     selection_mode = LaunchConfiguration("selection_mode")
+    use_controller = LaunchConfiguration("use_controller")
+    follow_distance = LaunchConfiguration("follow_distance")
     engine_path = LaunchConfiguration("engine_path")
     debug_image = LaunchConfiguration("debug_image")
 
@@ -41,6 +43,7 @@ def generate_launch_description():
     autostart_arg = DeclareLaunchArgument("autostart", default_value="true")
     use_detector_arg = DeclareLaunchArgument("use_detector", default_value="true")
     use_selector_arg = DeclareLaunchArgument("use_selector", default_value="true")
+    use_controller_arg = DeclareLaunchArgument("use_controller", default_value="true")
     # "centred" follows whoever is ahead; "nearest" grabs the closest person.
     selection_mode_arg = DeclareLaunchArgument("selection_mode", default_value="centred")
     follow_distance_arg = DeclareLaunchArgument("follow_distance", default_value="3.0")
@@ -111,11 +114,27 @@ def generate_launch_description():
         }],
     )
 
+    # /follow/target -> /cmd_vel_follow_raw. Starts DISABLED: launching the
+    # follow stack must never be what makes the rover move. The operator enables
+    # it by publishing true on /follow/enable.
+    follow_controller = Node(
+        package="dagger_bringup",
+        executable="follow_controller",
+        name="follow_controller",
+        output="screen",
+        condition=IfCondition(use_controller),
+        parameters=[{
+            "follow_distance": follow_distance,
+            "use_sim_time": use_sim_time,
+        }],
+    )
+
     return LaunchDescription([
         use_sim_time_arg,
         autostart_arg,
         use_detector_arg,
         use_selector_arg,
+        use_controller_arg,
         selection_mode_arg,
         follow_distance_arg,
         engine_path_arg,
@@ -124,4 +143,5 @@ def generate_launch_description():
         lifecycle_manager,
         person_detector,
         target_selector,
+        follow_controller,
     ])
