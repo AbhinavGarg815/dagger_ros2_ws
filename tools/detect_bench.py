@@ -155,7 +155,7 @@ def main():
     for _ in range(10):                      # warm up: first runs pay lazy init
         det.detect(img)
 
-    t_pre, t_inf, t_post, t_all = [], [], [], []
+    t_pre, t_inf, t_post, t_all, t_full = [], [], [], [], []
     with Tegrastats() as tg:
         t0_all = time.perf_counter()
         for _ in range(a.iters):
@@ -171,6 +171,12 @@ def main():
             t_inf.append((t2 - t1) * 1e3)
             t_post.append((t3 - t2) * 1e3)
             t_all.append((t3 - s) * 1e3)
+            # The stages above leave out the class-score reduction and NMS, which
+            # the ROS node pays on every frame. Time the real call as well, or the
+            # benchmark quietly under-reports what follow-me actually costs.
+            s2 = time.perf_counter()
+            det.detect(img)
+            t_full.append((time.perf_counter() - s2) * 1e3)
         wall = time.perf_counter() - t0_all
 
     def stat(name, v):
@@ -178,11 +184,14 @@ def main():
         return (f"  {name:<12s} median {statistics.median(v):6.2f} ms   "
                 f"p95 {v[int(0.95 * len(v)) - 1]:6.2f} ms   max {v[-1]:6.2f} ms")
 
-    print(f"{a.iters} frames in {wall:.2f} s  ->  {a.iters / wall:.1f} FPS "
-          f"(LiDAR runs at 10 Hz; the follow loop does not need more)\n")
+    print(f"{a.iters} frames, stages + full detect() in {wall:.2f} s\n")
     for n, v in (("preprocess", t_pre), ("inference", t_inf),
-                 ("decode", t_post), ("TOTAL", t_all)):
+                 ("decode", t_post), ("stages sum", t_all),
+                 ("detect() ALL", t_full)):
         print(stat(n, v))
+    full = statistics.median(t_full)
+    print(f"\n  -> {1000 / full:.1f} FPS sustained on detect(); the follow loop "
+          f"runs at the LiDAR's 10 Hz, i.e. {full / 100.0 * 100:.0f} % of a 100 ms budget")
     print(f"\nload during the run (tegrastats):\n{tg.report()}")
     mode = subprocess.run(["nvpmodel", "-q"], capture_output=True, text=True).stdout
     print(f"\npower mode: {' '.join(mode.split()) or 'unknown'}")

@@ -35,6 +35,7 @@ setup(
             "gps_map_odom = dagger_bringup.gps_map_odom:main",
             "gps_heading_imu = dagger_bringup.gps_heading_imu:main",
             "scan_watchdog = dagger_bringup.scan_watchdog:main",
+            "person_detector = dagger_bringup.person_detector:main",
         ],
     },
 )

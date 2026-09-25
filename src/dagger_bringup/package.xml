@@ -23,7 +23,16 @@
   <exec_depend>joint_state_publisher</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
   <exec_depend>dagger_description</exec_depend>
-  <exec_depend>dagger_description</exec_depend>
+
+  <!-- Nav2 command path + the follow-path safety gate -->
+  <exec_depend>nav2_collision_monitor</exec_depend>
+  <exec_depend>nav2_lifecycle_manager</exec_depend>
+  <exec_depend>pointcloud_to_laserscan</exec_depend>
+
+  <!-- Follow-me: D435 colour stream and the person detector -->
+  <exec_depend>realsense2_camera</exec_depend>
+  <exec_depend>vision_msgs</exec_depend>
+  <exec_depend>cv_bridge</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

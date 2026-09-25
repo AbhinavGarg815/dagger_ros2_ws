@@ -12,7 +12,7 @@ It does DEPEND on T2 being up, for three things it does not own:
   * /local_costmap/published_footprint          -- the approach polygon's shape
 See collision_monitor_follow.yaml for why the third one fails SILENTLY if absent.
 
-Stage 1 contains the safety gate only. The detector, target selector and follow
+The detector runs here too, behind use_detector. The target selector and follow
 controller land here later, publishing /cmd_vel_follow_raw into this monitor.
 """
 import os
@@ -20,6 +20,7 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -30,8 +31,23 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration("use_sim_time")
     autostart = LaunchConfiguration("autostart")
 
+    use_detector = LaunchConfiguration("use_detector")
+    engine_path = LaunchConfiguration("engine_path")
+    debug_image = LaunchConfiguration("debug_image")
+
     use_sim_time_arg = DeclareLaunchArgument("use_sim_time", default_value="false")
     autostart_arg = DeclareLaunchArgument("autostart", default_value="true")
+    use_detector_arg = DeclareLaunchArgument("use_detector", default_value="true")
+    # Engines are built for one GPU + TensorRT version, so models/ is gitignored
+    # and this points into the source tree rather than the install share dir.
+    engine_path_arg = DeclareLaunchArgument(
+        "engine_path",
+        default_value="/home/jetson/ros2_ws/models/yolox_nano_fp16.engine",
+        description="TensorRT engine from tools/fetch_model.sh",
+    )
+    # Annotated frames for Foxglove. Off while driving -- Foxglove already
+    # starves the controller, and this adds an encode plus a publish per frame.
+    debug_image_arg = DeclareLaunchArgument("debug_image", default_value="false")
 
     # /cmd_vel_follow_raw -> stop / slowdown / approach -> /cmd_vel_follow.
     # Same zones and same /scan_safety as the Nav2 monitor, so the rover stops at
@@ -60,9 +76,29 @@ def generate_launch_description():
         }],
     )
 
+    # Colour frames -> /follow/detections. Throttled to 10 Hz to match the LiDAR;
+    # the detector itself measured 66.7 FPS, so the limit is deliberate headroom.
+    person_detector = Node(
+        package="dagger_bringup",
+        executable="person_detector",
+        name="person_detector",
+        output="screen",
+        condition=IfCondition(use_detector),
+        parameters=[{
+            "engine_path": engine_path,
+            "target_rate": 10.0,
+            "publish_debug_image": debug_image,
+            "use_sim_time": use_sim_time,
+        }],
+    )
+
     return LaunchDescription([
         use_sim_time_arg,
         autostart_arg,
+        use_detector_arg,
+        engine_path_arg,
+        debug_image_arg,
         collision_monitor_follow,
         lifecycle_manager,
+        person_detector,
     ])

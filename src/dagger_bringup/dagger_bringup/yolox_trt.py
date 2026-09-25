@@ -171,6 +171,15 @@ class YoloxTRT:
         pred = decode_outputs(np.asarray(raw, dtype=np.float32).reshape(-1, raw.shape[-1]),
                               self.input_hw)
 
+        # Gate on objectness BEFORE the per-class argmax. Class scores are <= 1,
+        # so score = obj * cls_score > conf implies obj > conf -- this discards
+        # nothing, it just avoids an argmax over 3549x80 when a handful of
+        # anchors survive. Worth ~17 ms a frame on this Orin.
+        cand = pred[:, 4] > self.conf_thres
+        if not cand.any():
+            return []
+        pred = pred[cand]
+
         obj = pred[:, 4]
         cls_scores = pred[:, 5:]
         cls_id = cls_scores.argmax(1)
