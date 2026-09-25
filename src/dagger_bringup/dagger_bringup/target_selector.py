@@ -39,6 +39,7 @@ import tf2_ros
 
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import CameraInfo, LaserScan
+from std_msgs.msg import Int32
 from vision_msgs.msg import Detection2DArray
 
 
@@ -72,6 +73,10 @@ class TargetSelector(Node):
         # A detection within this angle of the previous target is treated as the
         # same person, so the rover does not swap targets when someone walks past.
         self.declare_parameter("association_gate_deg", 20.0)
+        # Association also has to match in RANGE. Bearing alone let a person
+        # crossing at a similar angle but a very different distance steal the
+        # lock -- the range was already being computed and simply not used.
+        self.declare_parameter("association_range_gate", 1.5)
         # Scan points are matched inside the bbox's own angular width, scaled a
         # little since a box hugs the body while the legs spread wider.
         self.declare_parameter("angular_window_scale", 1.2)
@@ -90,6 +95,7 @@ class TargetSelector(Node):
         self.min_range = float(g("min_range"))
         self.max_range = float(g("max_range"))
         self.gate = math.radians(float(g("association_gate_deg")))
+        self.range_gate = float(g("association_range_gate"))
         self.win_scale = float(g("angular_window_scale"))
         self.win_min = math.radians(float(g("min_window_deg")))
         self.win_max = math.radians(float(g("max_window_deg")))
@@ -102,7 +108,11 @@ class TargetSelector(Node):
         self.scan = None
         self.scan_time = 0.0
         self.last_bearing = None
+        self.last_range = None
         self.last_target_time = 0.0
+        # Increments on every acquisition that is NOT a continuation of the
+        # previous one, so a silent swap between people becomes visible.
+        self.track_id = 0
         self.stats = {"msgs": 0, "published": 0, "no_range": 0, "no_det": 0, "tf_fallback": 0}
 
         self.tf_buffer = tf2_ros.Buffer()
@@ -111,6 +121,7 @@ class TargetSelector(Node):
         be = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
                         history=HistoryPolicy.KEEP_LAST, depth=1)
         self.pub = self.create_publisher(PoseStamped, g("target_topic"), 10)
+        self.track_pub = self.create_publisher(Int32, "/follow/track_id", 10)
         self.create_subscription(CameraInfo, g("camera_info_topic"), self.on_info, be)
         self.create_subscription(LaserScan, g("scan_topic"), self.on_scan, be)
         self.create_subscription(Detection2DArray, g("detections_topic"), self.on_dets, 10)
@@ -220,17 +231,34 @@ class TargetSelector(Node):
                     and time.monotonic() - self.last_target_time > self.lost_timeout):
                 self.get_logger().info("target lost")
                 self.last_bearing = None
+                self.last_range = None
             return
 
-        # Stay with whoever we were already following, if anyone matches.
+        # Stay with whoever we were already following, if anyone matches in BOTH
+        # bearing and range. Matching on bearing alone let someone crossing at a
+        # similar angle but a very different distance take over the lock.
         pick = None
         if self.last_bearing is not None:
             near = min(cands, key=lambda c: abs(wrap(c["bearing"] - self.last_bearing)))
-            if abs(wrap(near["bearing"] - self.last_bearing)) <= self.gate:
+            if (abs(wrap(near["bearing"] - self.last_bearing)) <= self.gate
+                    and abs(near["range"] - self.last_range) <= self.range_gate):
                 pick = near
         if pick is None:
             pick = (min(cands, key=lambda c: c["range"]) if self.mode == "nearest"
                     else min(cands, key=lambda c: abs(c["bearing"])))
+            self.track_id += 1
+            if self.last_bearing is not None:
+                # Not a continuation: the lock moved to a different person.
+                self.get_logger().warn(
+                    f"TARGET SWITCHED (track {self.track_id}): was "
+                    f"{math.degrees(self.last_bearing):+.1f} deg / {self.last_range:.2f} m, "
+                    f"now {math.degrees(pick['bearing']):+.1f} deg / {pick['range']:.2f} m "
+                    f"-- {len(cands)} people in frame")
+            else:
+                self.get_logger().info(
+                    f"target acquired (track {self.track_id}) at "
+                    f"{math.degrees(pick['bearing']):+.1f} deg / {pick['range']:.2f} m")
+        self.track_pub.publish(Int32(data=self.track_id))
 
         # Bearing to the located point from the ROVER, which is what steers it.
         b_base = math.atan2(pick["xy"][1], pick["xy"][0])
@@ -243,6 +271,7 @@ class TargetSelector(Node):
         self.pub.publish(out)
 
         self.last_bearing = pick["bearing"]
+        self.last_range = pick["range"]
         self.last_target_time = time.monotonic()
         self.stats["published"] += 1
 

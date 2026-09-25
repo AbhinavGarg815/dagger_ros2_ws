@@ -62,6 +62,15 @@ class FollowController(Node):
         # a tracked rover ends up pointing somewhere unintended.
         self.declare_parameter("turn_speed_scale", 0.6)
         self.declare_parameter("target_timeout", 0.6)
+        # On losing the target, turn toward where it was last seen for this long
+        # before giving up. ROTATION ONLY, never forward: turning in place with
+        # nothing in view is defensible, translating blindly is not.
+        self.declare_parameter("search_timeout", 3.0)
+        self.declare_parameter("search_angular", 0.25)
+        # Only worth searching if the target was actually heading out of frame.
+        # Vanishing dead ahead means occlusion or out of range, and turning would
+        # point the camera AWAY from where they still are.
+        self.declare_parameter("search_min_bearing_deg", 8.0)
         self.declare_parameter("publish_rate", 20.0)
 
         g = lambda n: self.get_parameter(n).value  # noqa: E731
@@ -76,6 +85,9 @@ class FollowController(Node):
         self.w_min = float(g("min_effective_angular"))
         self.turn_scale = float(g("turn_speed_scale"))
         self.timeout = float(g("target_timeout"))
+        self.search_timeout = float(g("search_timeout"))
+        self.search_w = float(g("search_angular"))
+        self.search_min_bearing = math.radians(float(g("search_min_bearing_deg")))
         self.rate = float(g("publish_rate"))
 
         self.enabled = False
@@ -87,6 +99,12 @@ class FollowController(Node):
         # go quiet so twist_mux releases the follow slot rather than us pinning
         # it at priority 30. Zero at startup = silent until something happens.
         self.stop_until = 0.0
+        self.search_until = 0.0
+        self.last_bearing = 0.0
+        # Auto-disable must mean "I lost the target I had", never "I have not
+        # been given one yet". Without this the controller switched itself off on
+        # the first tick after being enabled, before any target had arrived.
+        self.had_target = False
         self.last_state = None
 
         be = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -107,6 +125,8 @@ class FollowController(Node):
             return
         self.enabled = msg.data
         if self.enabled:
+            self.had_target = False
+            self.search_until = 0.0
             self.get_logger().warn("FOLLOW ENABLED -- the rover will now drive itself "
                                    "toward the tracked person")
         else:
@@ -124,31 +144,75 @@ class FollowController(Node):
     def on_target(self, msg):
         self.target = msg
         self.target_time = time.monotonic()
+        self.had_target = True
+        p = msg.pose.position
+        self.last_bearing = math.atan2(p.y, p.x)
 
     def state(self):
+        now = time.monotonic()
         if self.estop:
             return "estop"
         if not self.enabled:
             return "disabled"
-        if self.target is None or time.monotonic() - self.target_time > self.timeout:
-            return "no target"
-        return "following"
+        if self.target is not None and now - self.target_time <= self.timeout:
+            return "following"
+        if self.search_until and now < self.search_until:
+            return "searching"
+        return "no target"
 
     def tick(self):
+        now = time.monotonic()
+        have_target = (self.target is not None
+                       and now - self.target_time <= self.timeout)
+
+        # Decide, at the moment the target is lost, whether a search is worth it.
+        if self.enabled and not self.estop and not have_target \
+                and self.last_state == "following":
+            if abs(self.last_bearing) >= self.search_min_bearing:
+                self.search_until = now + self.search_timeout
+                self.get_logger().warn(
+                    f"target lost at {math.degrees(self.last_bearing):+.1f} deg -- "
+                    f"turning toward it for {self.search_timeout:.0f} s, no forward motion")
+            else:
+                self.search_until = 0.0
+                self.get_logger().warn(
+                    "target lost near dead ahead -- occlusion or out of range, not out "
+                    "of frame, so not turning")
+
         st = self.state()
         if st != self.last_state:
-            # Leaving "following" for any reason is a stop that should be said
-            # out loud on the wire, not just by falling silent.
             if self.last_state == "following":
-                self.stop_until = time.monotonic() + 1.0
-                self.get_logger().warn(f"{st} -- stopping")
+                self.stop_until = now + 1.0
+            elif self.last_state == "searching" and st == "following":
+                self.get_logger().info("target reacquired")
             self.last_state = st
+
+        if st == "searching":
+            # Rotate toward the last known bearing. Zero linear, always.
+            self.v_cmd = 0.0
+            cmd = Twist()
+            cmd.angular.z = math.copysign(self.search_w, self.last_bearing)
+            self.pub.publish(cmd)
+            return
+
+        if st == "no target" and self.enabled and self.had_target:
+            # Searching either failed or was not attempted: this is a real loss.
+            # Disable rather than sit armed and waiting -- the operator chose
+            # explicit re-enable so the rover never picks a target on its own.
+            self.enabled = False
+            self.had_target = False
+            self.search_until = 0.0
+            self.stop_until = now + 1.0
+            self.get_logger().error(
+                "target not recovered -- FOLLOW DISABLED. Re-enable explicitly with "
+                "/follow/enable true once you are back in front of the rover.")
 
         if st != "following":
             self.v_cmd = 0.0
-            if time.monotonic() < self.stop_until:
+            if now < self.stop_until:
                 self.pub.publish(Twist())
             return
+        self.search_until = 0.0
 
         p = self.target.pose.position
         rng = math.hypot(p.x, p.y)
