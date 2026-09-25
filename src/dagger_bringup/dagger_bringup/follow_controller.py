@@ -65,7 +65,13 @@ class FollowController(Node):
         # On losing the target, turn toward where it was last seen for this long
         # before giving up. ROTATION ONLY, never forward: turning in place with
         # nothing in view is defensible, translating blindly is not.
-        self.declare_parameter("search_timeout", 4.0)
+        # 6 s, not 4: with search_angular at 0.45 the rover sweeps ~17 deg/s, so
+        # 4 s covered 70 deg and still expired in the same SECOND the selector
+        # reacquired the target (2026-09-25 16:41:48) -- it disabled itself one
+        # tick short of succeeding. The tradeoff is real though: this is how long
+        # the rover may rotate on the spot with nothing in view, so it is a
+        # parameter rather than a larger constant.
+        self.declare_parameter("search_timeout", 6.0)
         # 0.25 rad/s does NOT turn this rover from a standstill. Measured on
         # 2026-09-25: two searches commanded ~53 and ~45 deg of rotation and
         # actually delivered +23.4 and -7.6 deg (44 % and 17 %). The second
