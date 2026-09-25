@@ -342,7 +342,16 @@
 
        The D435's own camera_link sits at the depth (left) imager rather than the
        physical lens centre, roughly 1-2 cm away. At 3 m that is under half a
-       degree, well inside what the bearing needs. -->
+       degree, well inside what the bearing needs.
+
+       ROLL IS PI: the camera is mounted UPSIDE DOWN (confirmed 2026-09-25 from a
+       live frame; the scene is only upright after a 180 degree rotation). This
+       is not cosmetic. With roll 0 the optical axes would be mirrored, so a
+       person on the rover's left would be computed as being on its right and
+       the follow controller would turn AWAY from them. The image itself is
+       rotated separately, inside the detector, because YOLOX is not rotation
+       invariant; that rotation is for inference only and detections are mapped
+       back to raw pixels so this transform stays the single source of truth. -->
   <link name="d435_link">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
@@ -359,7 +368,7 @@
     type="fixed">
     <origin
       xyz="0.2925 0 0.79"
-      rpy="0 0 0" />
+      rpy="3.14159265 0 0" />
     <parent
       link="base_link" />
     <child

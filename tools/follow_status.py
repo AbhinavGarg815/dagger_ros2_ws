@@ -88,10 +88,16 @@ def main():
                 r = out.linear.x / raw.linear.x
                 gate = "CLEAR" if r > 0.97 else ("SLOW" if abs(r - 0.4) < 0.05 else f"x{r:.2f}")
 
-            age = time.time() - s["scan"]
+            # s["scan"] is 0.0 until the first scan lands; printing the age
+            # then would print the epoch, which is noise in a saved log.
+            if s["scan"] == 0.0:
+                scan = "   -  no scan"
+            else:
+                age = time.time() - s["scan"]
+                scan = f"{age:4.2f}s{'  STALE' if age > 0.5 else ''}"
             en = {True: "ON ", False: "off", None: " ? "}[s["en"]]
             print(f"{time.strftime('%H:%M:%S')} {en} {ndet:3d}  {tgt} | {rs} | {os_} | "
-                  f"{gate:6s} {age:4.2f}s{'  STALE' if age > 0.5 else ''}", flush=True)
+                  f"{gate:6s} {scan}", flush=True)
     except KeyboardInterrupt:
         pass
     n.destroy_node()

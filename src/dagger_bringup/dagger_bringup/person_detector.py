@@ -47,6 +47,13 @@ class PersonDetector(Node):
         # 640x480 publish per frame, and Foxglove already starves the controller.
         self.declare_parameter("publish_debug_image", False)
         self.declare_parameter("debug_image_topic", "/follow/detections_image")
+        # YOLOX is not rotation invariant: on an upside-down mount a standing
+        # person appears lying down and is almost never detected (measured on
+        # this rover: 1 detection in 194 ticks). Rotate for INFERENCE ONLY, then
+        # map boxes back to raw pixel coordinates, so the camera_info intrinsics
+        # and the URDF transform stay the single source of truth for geometry.
+        # This must match the roll in dagger_description's d435_joint.
+        self.declare_parameter("image_rotation_deg", 0)
 
         g = lambda n: self.get_parameter(n).value  # noqa: E731
         engine = g("engine_path")
@@ -55,6 +62,9 @@ class PersonDetector(Node):
                 "engine_path is required -- build one with tools/fetch_model.sh")
         self.period = 1.0 / float(g("target_rate"))
         self.publish_debug = bool(g("publish_debug_image"))
+        self.rot_deg = int(g("image_rotation_deg")) % 360
+        if self.rot_deg not in (0, 90, 180, 270):
+            raise RuntimeError(f"image_rotation_deg must be 0/90/180/270, got {self.rot_deg}")
 
         self.detector = YoloxTRT(engine,
                                  conf_thres=float(g("conf_threshold")),
@@ -98,7 +108,8 @@ class PersonDetector(Node):
         # The driver streams rgb8; YOLOX was calibrated on cv2's BGR ordering.
         frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
         t0 = time.perf_counter()
-        dets = self.detector.detect(frame)
+        dets = self.detector.detect(self.rotate(frame))
+        dets = [self.unrotate(d, frame.shape[1], frame.shape[0]) for d in dets]
         self.infer_ms.append((time.perf_counter() - t0) * 1e3)
         self.n_frames += 1
 
@@ -128,6 +139,26 @@ class PersonDetector(Node):
             dbg = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
             dbg.header = msg.header
             self.debug_pub.publish(dbg)
+
+    def rotate(self, frame):
+        if self.rot_deg == 0:
+            return frame
+        import cv2
+        return cv2.rotate(frame, {90: cv2.ROTATE_90_CLOCKWISE,
+                                  180: cv2.ROTATE_180,
+                                  270: cv2.ROTATE_90_COUNTERCLOCKWISE}[self.rot_deg])
+
+    def unrotate(self, det, w, h):
+        """Map a box found in the rotated image back to raw pixel coordinates."""
+        x1, y1, x2, y2, score, cls = det
+        if self.rot_deg == 0:
+            return det
+        if self.rot_deg == 180:
+            return (w - x2, h - y2, w - x1, h - y1, score, cls)
+        # A 90/270 rotation swaps the axes: the rotated image is h wide and w tall.
+        if self.rot_deg == 90:      # raw -> rotated was (x, y) -> (h - 1 - y, x)
+            return (y1, h - x2, y2, h - x1, score, cls)
+        return (w - y2, x1, w - y1, x2, score, cls)
 
     def report(self):
         if not self.n_frames:

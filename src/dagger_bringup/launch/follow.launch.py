@@ -38,6 +38,7 @@ def generate_launch_description():
     follow_distance = LaunchConfiguration("follow_distance")
     engine_path = LaunchConfiguration("engine_path")
     debug_image = LaunchConfiguration("debug_image")
+    image_rotation = LaunchConfiguration("image_rotation_deg")
 
     use_sim_time_arg = DeclareLaunchArgument("use_sim_time", default_value="false")
     autostart_arg = DeclareLaunchArgument("autostart", default_value="true")
@@ -57,6 +58,11 @@ def generate_launch_description():
     # Annotated frames for Foxglove. Off while driving -- Foxglove already
     # starves the controller, and this adds an encode plus a publish per frame.
     debug_image_arg = DeclareLaunchArgument("debug_image", default_value="false")
+    # The D435 on this rover is mounted upside down, so the detector rotates
+    # frames 180 deg before inference (YOLOX is not rotation invariant). Keep
+    # this in step with the roll on dagger_description's d435_joint; the URDF
+    # fixes the GEOMETRY, this fixes what the network is shown.
+    image_rotation_arg = DeclareLaunchArgument("image_rotation_deg", default_value="180")
 
     # /cmd_vel_follow_raw -> stop / slowdown / approach -> /cmd_vel_follow.
     # Same zones and same /scan_safety as the Nav2 monitor, so the rover stops at
@@ -97,6 +103,7 @@ def generate_launch_description():
             "engine_path": engine_path,
             "target_rate": 10.0,
             "publish_debug_image": debug_image,
+            "image_rotation_deg": image_rotation,
             "use_sim_time": use_sim_time,
         }],
     )
@@ -139,6 +146,7 @@ def generate_launch_description():
         follow_distance_arg,
         engine_path_arg,
         debug_image_arg,
+        image_rotation_arg,
         collision_monitor_follow,
         lifecycle_manager,
         person_detector,
