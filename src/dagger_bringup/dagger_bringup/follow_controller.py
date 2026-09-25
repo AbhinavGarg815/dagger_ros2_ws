@@ -44,12 +44,20 @@ class FollowController(Node):
         self.declare_parameter("follow_distance", 3.0)
         # Inside this band of the set distance the rover simply holds station,
         # so a walking person's natural pace variation does not make it surge.
-        self.declare_parameter("distance_deadband", 0.35)
-        self.declare_parameter("kp_linear", 0.35)
+        self.declare_parameter("distance_deadband", 0.25)
+        # Expressed as the time to close the remaining gap rather than a bare
+        # gain, because that is how the behaviour is actually reasoned about:
+        # v = (error - deadband) / close_time. 1.5 s is roughly twice the old
+        # kp_linear 0.35, so it reaches the speed cap sooner instead of easing
+        # toward it while the person walks away.
+        self.declare_parameter("close_time", 1.5)
         # 0.4 m/s is where the FCU cruise is calibrated (CRUISE_SPEED 0.4 /
         # CRUISE_THROTTLE 45) and where the 0.14 m stop distance was measured.
         self.declare_parameter("max_linear", 0.4)
-        self.declare_parameter("accel_limit", 0.3)          # m/s^2 on the request
+        # 0.5 m/s^2: 0 -> 0.4 in 0.8 s rather than 1.33 s. Measured 2026-09-25,
+        # the person receded at a median 0.30 and p90 0.77 m/s, so time spent
+        # ramping is time spent falling behind.
+        self.declare_parameter("accel_limit", 0.5)          # m/s^2 on the request
         self.declare_parameter("kp_angular", 0.9)
         self.declare_parameter("max_angular", 0.5)
         self.declare_parameter("bearing_deadband_deg", 5.0)
@@ -89,7 +97,7 @@ class FollowController(Node):
         g = lambda n: self.get_parameter(n).value  # noqa: E731
         self.d0 = float(g("follow_distance"))
         self.dead = float(g("distance_deadband"))
-        self.kp_lin = float(g("kp_linear"))
+        self.close_time = max(0.1, float(g("close_time")))
         self.v_max = float(g("max_linear"))
         self.accel = float(g("accel_limit"))
         self.kp_ang = float(g("kp_angular"))
@@ -232,7 +240,8 @@ class FollowController(Node):
         bearing = math.atan2(p.y, p.x)
 
         err = rng - self.d0
-        v_want = 0.0 if abs(err) < self.dead else self.kp_lin * (err - math.copysign(self.dead, err))
+        v_want = (0.0 if abs(err) < self.dead
+                  else (err - math.copysign(self.dead, err)) / self.close_time)
         v_want = max(0.0, min(self.v_max, v_want))      # never reverse
 
         if abs(bearing) < self.b_dead:
