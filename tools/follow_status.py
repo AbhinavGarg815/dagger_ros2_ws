@@ -80,10 +80,14 @@ def main():
 
             if raw is None:
                 gate = "-"
+            elif abs(raw.linear.x) < 1e-3 and abs(raw.angular.z) < 1e-3:
+                # Nothing was asked for, so nothing was blocked. The monitor also
+                # ceases publishing after stop_pub_timeout of continuous zero, so
+                # absent output here means idle -- checking `out is None` first
+                # mislabelled a holding-station rover as STOP.
+                gate = "idle"
             elif out is None or abs(out.linear.x) < 1e-3 < abs(raw.linear.x):
                 gate = "STOP"
-            elif abs(raw.linear.x) < 1e-3:
-                gate = "idle"
             else:
                 r = out.linear.x / raw.linear.x
                 gate = "CLEAR" if r > 0.97 else ("SLOW" if abs(r - 0.4) < 0.05 else f"x{r:.2f}")

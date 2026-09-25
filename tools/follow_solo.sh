@@ -63,11 +63,24 @@ for slot in "$@"; do
   done
   echo "slot $slot: $g"
   if echo "$g" | grep -q PASS; then
-    bash tools/pf_record.sh "$name" > "/tmp/follow_rec_$name.log" 2>&1 &
+    # Unique per run: ros2 bag refuses to reuse an output folder, and on
+    # 2026-09-25 a no-op earlier run had already taken plain "$name" -- so the
+    # one run that actually drove recorded no bag at all, and the only record of
+    # it was the status log. Losing the odometry of a first drive is not
+    # recoverable, so a failed recorder now aborts BEFORE follow is enabled.
+    stamp=$(date +%H%M%S)
+    bag="${name}_${stamp}"
+    bash tools/pf_record.sh "$bag" > "/tmp/follow_rec_$bag.log" 2>&1 &
     rec=$!
-    python3 tools/follow_status.py -r 2 > "$HOME/dagger_bags/${name}_status.log" 2>&1 &
+    python3 tools/follow_status.py -r 2 > "$HOME/dagger_bags/pf_${bag}_status.log" 2>&1 &
     stat=$!
-    sleep 2
+    sleep 3
+    if [ ! -d "$HOME/dagger_bags/pf_${bag}" ]; then
+      echo "RECORDER FAILED -- not enabling follow. See /tmp/follow_rec_$bag.log:"
+      tail -3 "/tmp/follow_rec_$bag.log"
+      kill -INT "$stat" 2>/dev/null
+      exit 1
+    fi
     echo "$(date +%H:%M:%S) ENABLING FOLLOW for ${DURATION_S}s -- walk away slowly"
     set_follow true
     sleep "$DURATION_S"
@@ -75,7 +88,7 @@ for slot in "$@"; do
     sleep 3
     kill -INT "$stat" 2>/dev/null
     kill -INT "$rec" 2>/dev/null
-    echo "$(date +%H:%M:%S) done -- status log: ~/dagger_bags/${name}_status.log"
+    echo "$(date +%H:%M:%S) done -- bag ~/dagger_bags/pf_${bag}, status log ~/dagger_bags/pf_${bag}_status.log"
     exit 0
   fi
 done
