@@ -321,6 +321,52 @@
     <axis
       xyz="0 0 0" />
   </joint>
+  <!-- Intel RealSense D435, follow-me detector camera (added 2026-09-25).
+
+       Measured by the user: lens centre 0.99 m above ground, aimed dead ahead
+       with no pitch, mounted directly below the LiDAR. base_joint already lifts
+       base_link 0.2 m, so z here is 0.99 - 0.2 = 0.79 (the LiDAR's 1.12 m is
+       0.92 by the same arithmetic; the camera sits 0.13 m below it).
+
+       x is taken from the LiDAR's 0.2925 since the camera is mounted under it,
+       and y is 0. Of the three, y is the one that matters: a lateral error
+       becomes a bearing error directly (0.05 m off centre = 1 deg at 3 m),
+       while an error along x is almost purely radial and barely moves the
+       bearing at all.
+
+       The child link name must stay d435_link: the driver derives its own frame
+       prefix from the camera_name parameter (parameters.cpp:83) and publishes
+       d435_link -> d435_color_optical_frame itself, so this joint is what
+       connects that subtree to the robot. Without it a detection bearing cannot
+       be transformed into the LiDAR's frame at all.
+
+       The D435's own camera_link sits at the depth (left) imager rather than the
+       physical lens centre, roughly 1-2 cm away. At 3 m that is under half a
+       degree, well inside what the bearing needs. -->
+  <link name="d435_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <box size="0.025 0.090 0.025" />
+      </geometry>
+      <material name="">
+        <color rgba="0.1 0.1 0.1 1" />
+      </material>
+    </visual>
+  </link>
+  <joint
+    name="d435_joint"
+    type="fixed">
+    <origin
+      xyz="0.2925 0 0.79"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="d435_link" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
   <link
     name="imu_link">
     <inertial>
