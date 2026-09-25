@@ -16,6 +16,11 @@
 # On PASS: start the bag and the status log, enable follow, run for DURATION_S,
 # then disable and stop recording. Disabling also happens on Ctrl-C or any exit.
 #
+# GATE_MIN_RANGE / GATE_MAX_RANGE / GATE_MAX_BEARING_DEG override where you may
+# be standing when follow is switched on (default 2.0-6.0 m, within 20 deg).
+# Those bound the START only -- following itself runs 1.0-8.0 m at any bearing
+# inside the field of view.
+#
 # KEEP THE RC TRANSMITTER IN YOUR HAND. This is the first time this rover drives
 # itself at a person; the collision monitor stops it ~1.45 m out and the FCU
 # brakes in 0.14 m at 0.4 m/s, but the RC is the thing that does not depend on
@@ -26,9 +31,19 @@ DURATION_S=${DURATION_S:-60}
 POLL_S=${POLL_S:-60}
 cd "$(dirname "$0")/.."
 
+# NEVER use `ros2 topic pub --once` here. It creates a publisher, fires
+# immediately and tears down, so with a reliable subscriber the message is lost
+# before discovery completes -- measured 2026-09-25: --once did not arrive at
+# all, while -t 10 -r 5 arrived instantly. On the enable path a dropped message
+# means the run silently does nothing; on the disable path it would mean the
+# rover keeps following. Publish repeatedly, both directions.
+set_follow() {
+  timeout 15 ros2 topic pub -t 10 -r 5 /follow/enable std_msgs/Bool "{data: $1}" \
+    >/dev/null 2>&1
+}
 disable_follow() {
   echo "$(date +%H:%M:%S) disabling follow"
-  timeout 10 ros2 topic pub --once /follow/enable std_msgs/Bool "{data: false}" >/dev/null 2>&1
+  set_follow false
 }
 trap 'disable_follow; kill -INT ${rec:-0} ${stat:-0} 2>/dev/null; exit 130' INT TERM
 
@@ -54,7 +69,7 @@ for slot in "$@"; do
     stat=$!
     sleep 2
     echo "$(date +%H:%M:%S) ENABLING FOLLOW for ${DURATION_S}s -- walk away slowly"
-    timeout 10 ros2 topic pub --once /follow/enable std_msgs/Bool "{data: true}" >/dev/null
+    set_follow true
     sleep "$DURATION_S"
     disable_follow
     sleep 3

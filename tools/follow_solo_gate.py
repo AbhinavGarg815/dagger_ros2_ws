@@ -14,6 +14,7 @@ The distance check is the important one. Enabling follow while the person is at
 6 m would command 0.4 m/s immediately, with nobody near the laptop.
 """
 import math
+import os
 import sys
 import time
 
@@ -25,9 +26,18 @@ from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import LaserScan
 from mavros_msgs.msg import State
 
-# Controller defaults: follow_distance 3.0, distance_deadband 0.35.
-MIN_RANGE, MAX_RANGE = 2.70, 3.30
-MAX_BEARING_DEG = 10.0
+# These bound where the operator may be STANDING WHEN FOLLOW IS SWITCHED ON.
+# They are not limits on following: once enabled the controller tracks anywhere
+# from min_range 1.0 to max_range 8.0 m at any bearing inside the field of view.
+#
+# The first version demanded 2.7-3.3 m, i.e. inside the controller's deadband, so
+# that enabling commanded exactly zero. That was over-cautious: the controller
+# ramps at 0.3 m/s^2, so from 6 m it reaches 0.4 m/s over ~1.5 s and stops itself
+# at the 3 m set distance -- which is simply follow-me working, not a lurch. The
+# window now only excludes starts that would be startling rather than unsafe.
+MIN_RANGE = float(os.environ.get("GATE_MIN_RANGE", 2.0))
+MAX_RANGE = float(os.environ.get("GATE_MAX_RANGE", 6.0))
+MAX_BEARING_DEG = float(os.environ.get("GATE_MAX_BEARING_DEG", 20.0))
 
 
 def main():
@@ -65,8 +75,8 @@ def main():
         p = tg[1].pose.position
         rng, brg = math.hypot(p.x, p.y), math.degrees(math.atan2(p.y, p.x))
         if not (MIN_RANGE <= rng <= MAX_RANGE):
-            fail.append(f"target at {rng:.2f} m, need {MIN_RANGE}-{MAX_RANGE} m "
-                        f"(inside the deadband so it cannot lurch on enable)")
+            fail.append(f"target at {rng:.2f} m, need {MIN_RANGE:.1f}-{MAX_RANGE:.1f} m "
+                        f"to START (following itself is not limited to this)")
         if abs(brg) > MAX_BEARING_DEG:
             fail.append(f"target {brg:+.1f} deg off axis, need within "
                         f"+-{MAX_BEARING_DEG:.0f}")
