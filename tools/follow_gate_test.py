@@ -40,7 +40,14 @@ ZONES = {"PolygonStop": "/collision_monitor_follow/stop_zone",
          "FootprintApproach": "/collision_monitor_follow/footprint"}
 
 
-def classify(vx_in, vx_out, out_age):
+def classify(vx_in, vx_out, out_age, seen_output):
+    # Before the monitor has published anything the output is absent, not zero.
+    # Counting that as a stop lets the test pass on a startup artifact instead
+    # of on the stop zone actually firing -- which is exactly what happened on
+    # the first run (2026-09-25): 4/4 PASS while the closest approach was
+    # 1.96 m, well outside the 1.45 m stop polygon.
+    if not seen_output:
+        return "waiting"
     if out_age > 0.5:
         return "STOP(no output)"
     if abs(vx_out) < 1e-3:
@@ -96,6 +103,8 @@ def main():
     zero = Twist()
     seen = set()
     fp_max = 0
+    seen_output = False
+    nearest_ever = float("inf")
     t_end = time.time() + a.duration
     next_log = 0.0
     aborted = None
@@ -114,7 +123,8 @@ def main():
 
             out = s["out"]
             vx_out = out.linear.x if out else 0.0
-            gate = classify(a.vx, vx_out, now - s["out_t"])
+            seen_output = seen_output or out is not None
+            gate = classify(a.vx, vx_out, now - s["out_t"], seen_output)
             seen.add(gate.split("(")[0])
             fp_max = max(fp_max, zone_pts["FootprintApproach"] or 0)
 
@@ -126,6 +136,7 @@ def main():
                         ang = sc.angle_min + i * sc.angle_increment
                         if r * math.cos(ang) > 0.0 and abs(r * math.sin(ang)) <= 0.85:
                             near = min(near, r)
+            nearest_ever = min(nearest_ever, near)
             vtx = " ".join(f"{k.replace('Polygon', '').replace('Footprint', 'Fp')}="
                            f"{zone_pts[k] if zone_pts[k] is not None else '-'}" for k in ZONES)
             print(f"{time.strftime('%H:%M:%S')} {a.vx:6.2f} {vx_out:6.2f}  {gate:16s} "
@@ -145,13 +156,20 @@ def main():
     ok.append(("CLEAR passes the command through", "CLEAR" in seen))
     ok.append(("SLOW zone engaged (x0.4)", "SLOW" in seen))
     ok.append(("STOP zone engaged (0)", "STOP" in seen))
+    print(f"  closest approach seen: {nearest_ever:.2f} m "
+          f"(the stop polygon starts at 1.45 m from base_footprint, "
+          f"i.e. ~0.6 m in front of the bumper)")
     ok.append(("FootprintApproach has a shape", fp_max >= 3))
     for name, good in ok:
         print(f"  [{'PASS' if good else 'FAIL'}] {name}")
     if fp_max < 3:
         print("  -> FootprintApproach is EMPTY: /local_costmap/published_footprint never "
               "arrived. That gate is dead. Is T2 (nav2_gps) up?")
-    if not ("SLOW" in seen and "STOP" in seen):
+    if "STOP" not in seen and nearest_ever > 1.45:
+        print(f"  -> STOP never fired because nothing came closer than "
+              f"{nearest_ever:.2f} m. Walk in to about 0.5 m from the front of the "
+              f"rover -- the stop zone is much tighter than the slow zone.")
+    elif not ("SLOW" in seen and "STOP" in seen):
         print("  -> SLOW/STOP need someone to walk into the zones; standing, down the "
               "centre line, from beyond 3 m.")
     n.destroy_node()
