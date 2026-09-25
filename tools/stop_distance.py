@@ -21,6 +21,14 @@ for p in sys.argv[1:]:
     D=load(p); sp=D["/mavros/setpoint_velocity/cmd_vel_unstamped"]
     stops=[sp[i][0] for i in range(1,len(sp)) if sp[i-1][1].linear.x>0.1 and sp[i][1].linear.x<0.01]
     print(f"=== {p.split('/')[-1]}  zero-command events: {len(stops)}")
+    if not stops:
+        # A follow run decelerates on the controller's acceleration ramp, so the
+        # setpoint eases down instead of stepping and this never triggers. Only
+        # an ABRUPT zero -- collision-monitor stop, target loss, follow disable
+        # -- produces the signature, and that is the case worth measuring.
+        print("  no abrupt >0.1 -> <0.01 setpoint step in this bag (a ramped "
+              "deceleration does not produce one)")
+        continue
     t_stop=stops[0]
     # cruise before stop
     odv=[(t,m.twist.twist.linear.x) for t,m in D["/odometry/filtered"] if t_stop-3<t<t_stop]
@@ -31,6 +39,11 @@ for p in sys.argv[1:]:
     for t,m in D["/odometry/filtered"]:
         if t>t_stop and abs(m.twist.twist.linear.x)<0.02:
             t_rest=t; break
+    if t_rest is None:
+        print("  never reached rest inside the search window -- "
+              "the tracks were still powered; widen the window or "
+              "inspect the PWM trace directly")
+        continue
     o1=at(D,"/odometry/filtered",t_rest); 
     dist=math.hypot(o1.pose.pose.position.x-x0,o1.pose.pose.position.y-y0)
     st=at(D,"/mavros/state",t_rest)
