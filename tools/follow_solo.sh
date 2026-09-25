@@ -74,13 +74,25 @@ for slot in "$@"; do
     rec=$!
     python3 tools/follow_status.py -r 2 > "$HOME/dagger_bags/pf_${bag}_status.log" 2>&1 &
     stat=$!
-    sleep 3
-    if [ ! -d "$HOME/dagger_bags/pf_${bag}" ]; then
+    # Poll, do not sleep once: ros2 bag subscribes to 17 topics before it
+    # creates the folder, which took longer than a flat 3 s wait and aborted two
+    # runs whose recorders were in fact starting normally (and were then left
+    # running as orphans). Give it 25 s, and check the process is still alive so
+    # a genuine failure is caught immediately rather than waited out.
+    ok=0
+    for _ in $(seq 1 50); do
+      if [ -d "$HOME/dagger_bags/pf_${bag}" ]; then ok=1; break; fi
+      kill -0 "$rec" 2>/dev/null || break
+      sleep 0.5
+    done
+    if [ "$ok" -ne 1 ]; then
       echo "RECORDER FAILED -- not enabling follow. See /tmp/follow_rec_$bag.log:"
       tail -3 "/tmp/follow_rec_$bag.log"
-      kill -INT "$stat" 2>/dev/null
+      kill -INT "$rec" 2>/dev/null; kill -INT "$stat" 2>/dev/null
+      sleep 2; kill -KILL "$rec" 2>/dev/null
       exit 1
     fi
+    echo "$(date +%H:%M:%S) recording -> ~/dagger_bags/pf_${bag}"
     echo "$(date +%H:%M:%S) ENABLING FOLLOW for ${DURATION_S}s -- walk away slowly"
     set_follow true
     sleep "$DURATION_S"
