@@ -42,10 +42,18 @@ def generate_launch_description():
     # of seconds, so it is opt-in rather than the default.
     initial_reset_arg = DeclareLaunchArgument("initial_reset", default_value="false")
 
+    # namespace MUST be set to "/" explicitly. The driver publishes on PRIVATE
+    # topics (~/color/image_raw) AND realsense_node_factory.cpp:35 constructs the
+    # node with a hardcoded "/camera" default namespace, so the topic ends up at
+    # <namespace>/<node name>/color/image_raw:
+    #     namespace unset,   name d435 -> /camera/d435/color/image_raw
+    #     namespace "d435",  name d435 -> /d435/d435/color/image_raw
+    #     namespace "/",     name d435 -> /d435/color/image_raw   <- what we want
+    # (this is also why the stock rs_launch.py produces /camera/camera/...).
     d435 = Node(
         package="realsense2_camera",
         executable="realsense2_camera_node",
-        namespace="d435",
+        namespace="/",
         name="d435",
         output="screen",
         parameters=[{
