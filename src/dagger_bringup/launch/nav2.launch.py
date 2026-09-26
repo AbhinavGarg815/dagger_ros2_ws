@@ -133,7 +133,11 @@ def generate_launch_description():
             "angle_increment": 0.0087,
             "scan_time": 0.1,
             "range_min": 1.0,
-            "range_max": 10.0,
+            # 10 -> 20 m (2026-09-26): this scan is also the follow-me range and
+            # LiDAR-hold source, and a person beyond 10 m simply had no range at
+            # all. The collision monitor only looks inside ~2.6 m, so the longer
+            # range costs it nothing.
+            "range_max": 20.0,
             "use_inf": True,
             "inf_epsilon": 1.0,
             "use_sim_time": use_sim_time,

@@ -39,7 +39,7 @@ import tf2_ros
 
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import CameraInfo, LaserScan
-from std_msgs.msg import Int32
+from std_msgs.msg import Int32, String
 from vision_msgs.msg import Detection2DArray
 
 
@@ -69,7 +69,11 @@ class TargetSelector(Node):
         self.declare_parameter("selection_mode", "centred")
         self.declare_parameter("min_score", 0.5)
         self.declare_parameter("min_range", 1.0)
-        self.declare_parameter("max_range", 8.0)
+        # 8 -> 15 m: a 1.7 m person at 15 m is still ~45 px tall in the 416 px
+        # network input, well inside what YOLOX-Nano detects. 8 m was a number
+        # chosen here, not a sensor limit, and the 16:47 run hit it exactly and
+        # dropped the target.
+        self.declare_parameter("max_range", 15.0)
         # A detection within this angle of the previous target is treated as the
         # same person, so the rover does not swap targets when someone walks past.
         self.declare_parameter("association_gate_deg", 20.0)
@@ -88,6 +92,27 @@ class TargetSelector(Node):
         self.declare_parameter("scan_max_age", 0.4)
         self.declare_parameter("lost_timeout", 1.5)
 
+        # ---- LiDAR track: keep the person when the camera cannot see them ----
+        # The camera CONFIRMS who the person is; the 360 deg LiDAR KEEPS them. A
+        # confirmed target is tracked in the odom frame, and while the camera has
+        # no match the track is carried forward on the LiDAR cluster nearest its
+        # predicted position -- beside or even behind the rover, where the 55.7
+        # deg camera cannot see. The LiDAR cannot tell a person from a post, so
+        # every guard below exists to stop the track sliding onto something else.
+        self.declare_parameter("lidar_track", True)
+        self.declare_parameter("odom_frame", "odom")
+        # How long the track may run on LiDAR alone before the camera must
+        # reconfirm it. Past this it is treated as lost.
+        self.declare_parameter("lidar_only_timeout", 5.0)
+        # Association radius around the predicted position, plus what a walking
+        # person can cover since the last update.
+        self.declare_parameter("track_gate", 0.6)
+        self.declare_parameter("max_person_speed", 1.8)
+        # A person seen by a 2D scan is a short arc. Anything wider is a wall,
+        # a vehicle or a hedge, and is rejected rather than followed.
+        self.declare_parameter("max_cluster_width", 0.9)
+        self.declare_parameter("min_track_points", 3)
+
         g = lambda n: self.get_parameter(n).value  # noqa: E731
         self.base_frame = g("base_frame")
         self.mode = g("selection_mode")
@@ -103,6 +128,13 @@ class TargetSelector(Node):
         self.min_cluster = int(g("min_cluster_points"))
         self.scan_max_age = float(g("scan_max_age"))
         self.lost_timeout = float(g("lost_timeout"))
+        self.lidar_track = bool(g("lidar_track"))
+        self.odom_frame = g("odom_frame")
+        self.lidar_only_timeout = float(g("lidar_only_timeout"))
+        self.track_gate = float(g("track_gate"))
+        self.max_person_speed = float(g("max_person_speed"))
+        self.max_cluster_width = float(g("max_cluster_width"))
+        self.min_track_points = int(g("min_track_points"))
 
         self.K = None
         self.scan = None
@@ -113,7 +145,11 @@ class TargetSelector(Node):
         # Increments on every acquisition that is NOT a continuation of the
         # previous one, so a silent swap between people becomes visible.
         self.track_id = 0
-        self.stats = {"msgs": 0, "published": 0, "no_range": 0, "no_det": 0, "tf_fallback": 0}
+        # Odom-frame track: pos (x, y), vel (vx, vy), t (monotonic) of the last
+        # update, t_cam of the last CAMERA confirmation, source of the last fix.
+        self.trk = None
+        self.stats = {"msgs": 0, "published": 0, "no_range": 0, "no_det": 0, "tf_fallback": 0,
+                      "lidar": 0}
 
         self.tf_buffer = tf2_ros.Buffer()
         tf2_ros.TransformListener(self.tf_buffer, self)
@@ -122,6 +158,8 @@ class TargetSelector(Node):
                         history=HistoryPolicy.KEEP_LAST, depth=1)
         self.pub = self.create_publisher(PoseStamped, g("target_topic"), 10)
         self.track_pub = self.create_publisher(Int32, "/follow/track_id", 10)
+        # "camera" or "lidar": which sensor produced the current target.
+        self.source_pub = self.create_publisher(String, "/follow/target_source", 10)
         self.create_subscription(CameraInfo, g("camera_info_topic"), self.on_info, be)
         self.create_subscription(LaserScan, g("scan_topic"), self.on_scan, be)
         self.create_subscription(Detection2DArray, g("detections_topic"), self.on_dets, 10)
@@ -190,6 +228,151 @@ class TargetSelector(Node):
             return None
         return float(np.median(px[body])), float(np.median(py[body]))
 
+    def odom_T_base(self):
+        """(tx, ty, yaw) of base_frame in odom_frame, latest available."""
+        try:
+            tf = self.tf_buffer.lookup_transform(self.odom_frame, self.base_frame,
+                                                 rclpy.time.Time(),
+                                                 timeout=Duration(seconds=0.05))
+        except Exception as e:
+            self.get_logger().warn(f"no TF {self.odom_frame}<-{self.base_frame}: "
+                                   f"{str(e)[:60]} -- LiDAR tracking off this cycle",
+                                   throttle_duration_sec=5.0)
+            return None
+        q = tf.transform.rotation
+        yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+        return tf.transform.translation.x, tf.transform.translation.y, yaw
+
+    @staticmethod
+    def to_odom(T, x, y):
+        tx, ty, yaw = T
+        c, s_ = math.cos(yaw), math.sin(yaw)
+        return tx + c * x - s_ * y, ty + s_ * x + c * y
+
+    @staticmethod
+    def to_base(T, x, y):
+        tx, ty, yaw = T
+        c, s_ = math.cos(yaw), math.sin(yaw)
+        dx, dy = x - tx, y - ty
+        return c * dx + s_ * dy, -s_ * dx + c * dy
+
+    def track_update(self, T, xy_base, source):
+        """Fold a new fix (base frame) into the odom-frame track."""
+        now = time.monotonic()
+        ox, oy = self.to_odom(T, *xy_base)
+        if self.trk is None:
+            self.trk = {"pos": (ox, oy), "vel": (0.0, 0.0), "t": now, "t_cam": now,
+                        "src": source}
+        else:
+            dt = max(1e-3, now - self.trk["t"])
+            px, py = self.trk["pos"]
+            vx, vy = (ox - px) / dt, (oy - py) / dt
+            sp = math.hypot(vx, vy)
+            if sp > self.max_person_speed:          # a jump, not walking
+                vx, vy = vx * self.max_person_speed / sp, vy * self.max_person_speed / sp
+            a = 0.3                                 # light smoothing on velocity
+            ovx, ovy = self.trk["vel"]
+            self.trk["vel"] = (a * vx + (1 - a) * ovx, a * vy + (1 - a) * ovy)
+            self.trk["pos"] = (ox, oy)
+            self.trk["t"] = now
+            if source == "camera":
+                self.trk["t_cam"] = now
+        if self.trk["src"] != source:
+            if source == "lidar":
+                self.get_logger().warn("camera lost the target -- holding it on the LiDAR "
+                                       f"(up to {self.lidar_only_timeout:.0f} s)")
+            else:
+                self.get_logger().info("camera reconfirmed the target")
+            self.trk["src"] = source
+
+    def lidar_fix(self, T):
+        """Find the tracked person in the scan near the predicted position.
+
+        Returns an (x, y) in base_frame, or None. None is the safe answer:
+        anything ambiguous ends the LiDAR hold rather than guessing.
+        """
+        if self.trk is None or self.scan is None:
+            return None
+        now = time.monotonic()
+        if now - self.trk["t_cam"] > self.lidar_only_timeout:
+            return None
+        dt = now - self.trk["t"]
+        px = self.trk["pos"][0] + self.trk["vel"][0] * dt
+        py = self.trk["pos"][1] + self.trk["vel"][1] * dt
+        gate = self.track_gate + min(self.max_person_speed * dt, 1.0)
+
+        sc = self.scan
+        r = np.asarray(sc.ranges, dtype=np.float32)
+        ok = np.isfinite(r) & (r >= sc.range_min) & (r <= sc.range_max)
+        if not ok.any():
+            return None
+        idx = np.nonzero(ok)[0]
+        ang = sc.angle_min + idx * sc.angle_increment
+        bx, by = r[idx] * np.cos(ang), r[idx] * np.sin(ang)
+        tx, ty, yaw = T
+        c, s_ = math.cos(yaw), math.sin(yaw)
+        ox, oy = tx + c * bx - s_ * by, ty + s_ * bx + c * by
+        d = np.hypot(ox - px, oy - py)
+        sel = d <= gate
+        if sel.sum() < self.min_track_points:
+            return None
+        # The body: points close to the one nearest the prediction.
+        k = np.argmin(np.where(sel, d, np.inf))
+        body = sel & (np.hypot(ox - ox[k], oy - oy[k]) <= self.max_cluster_width / 2 + 0.1)
+        if body.sum() < self.min_track_points:
+            return None
+        bxs, bys = ox[body], oy[body]
+        width = math.hypot(bxs.max() - bxs.min(), bys.max() - bys.min())
+        # A wide return straddling the gate is a wall or a vehicle. Refuse it.
+        near_all = sel & (np.hypot(ox - ox[k], oy - oy[k]) <= 1.5)
+        span = math.hypot(ox[near_all].max() - ox[near_all].min(),
+                          oy[near_all].max() - oy[near_all].min())
+        if width > self.max_cluster_width or span > 2.0 * self.max_cluster_width:
+            self.get_logger().warn(
+                f"LiDAR cluster near the track is {max(width, span):.2f} m wide -- not "
+                f"a person, refusing to follow it", throttle_duration_sec=2.0)
+            return None
+        mx, my = float(np.median(bxs)), float(np.median(bys))
+        return self.to_base(T, mx, my)
+
+    def publish_target(self, stamp, xy, source):
+        b_base = math.atan2(xy[1], xy[0])
+        out = PoseStamped()
+        out.header.stamp = stamp
+        out.header.frame_id = self.base_frame
+        out.pose.position.x, out.pose.position.y = float(xy[0]), float(xy[1])
+        out.pose.orientation.z = math.sin(b_base / 2.0)
+        out.pose.orientation.w = math.cos(b_base / 2.0)
+        # Id first: the controller disables on an id change, and should learn of
+        # a new person before it receives that person's position.
+        self.track_pub.publish(Int32(data=self.track_id))
+        self.source_pub.publish(String(data=source))
+        self.pub.publish(out)
+        # Bearing from the rover is a fine stand-in for the camera bearing in
+        # the association gate: the camera sits on the rover's x axis.
+        self.last_bearing = b_base
+        self.last_range = math.hypot(xy[0], xy[1])
+        self.last_target_time = time.monotonic()
+        self.stats["published"] += 1
+
+    def try_lidar_hold(self, stamp):
+        """Carry the track on the LiDAR. True if a target was published."""
+        if not self.lidar_track or self.trk is None:
+            return False
+        T = self.odom_T_base()
+        if T is None:
+            return False
+        xy = self.lidar_fix(T)
+        if xy is None:
+            return False
+        rng = math.hypot(*xy)
+        if not (self.min_range <= rng <= self.max_range):
+            return False
+        self.track_update(T, xy, "lidar")
+        self.stats["lidar"] += 1
+        self.publish_target(stamp, xy, "lidar")
+        return True
+
     def on_dets(self, msg):
         self.stats["msgs"] += 1
         if self.K is None:
@@ -227,25 +410,54 @@ class TargetSelector(Node):
 
         if not cands:
             self.stats["no_det"] += 1
+            if self.try_lidar_hold(msg.header.stamp):
+                return
             if (self.last_bearing is not None
                     and time.monotonic() - self.last_target_time > self.lost_timeout):
                 self.get_logger().info("target lost")
                 self.last_bearing = None
                 self.last_range = None
+                self.trk = None
             return
 
         # Stay with whoever we were already following, if anyone matches in BOTH
         # bearing and range. Matching on bearing alone let someone crossing at a
         # similar angle but a very different distance take over the lock.
         pick = None
-        if self.last_bearing is not None:
+        T = self.odom_T_base() if (self.lidar_track and self.trk is not None) else None
+        if T is not None:
+            # Associate by PREDICTED POSITION in the odom frame. Bearing-first
+            # association (below) let the lock hop between two people ~1 m apart
+            # with no id change: as the tracked person walked across, a bystander
+            # became the nearest-in-bearing candidate, passed the 20 deg / 1.5 m
+            # gate, and was followed at 0.36 m/s (found in simulation 2026-09-26).
+            dt = time.monotonic() - self.trk["t"]
+            px = self.trk["pos"][0] + self.trk["vel"][0] * dt
+            py = self.trk["pos"][1] + self.trk["vel"][1] * dt
+            gate = self.track_gate + min(self.max_person_speed * dt, 1.0)
+            best, bd = None, float("inf")
+            for c in cands:
+                ox, oy = self.to_odom(T, *c["xy"])
+                dd = math.hypot(ox - px, oy - py)
+                if dd < bd:
+                    best, bd = c, dd
+            if bd <= gate:
+                pick = best
+        elif self.last_bearing is not None:
+            # No odom track (LiDAR tracking off, or no TF): bearing + range gate.
             near = min(cands, key=lambda c: abs(wrap(c["bearing"] - self.last_bearing)))
             if (abs(wrap(near["bearing"] - self.last_bearing)) <= self.gate
                     and abs(near["range"] - self.last_range) <= self.range_gate):
                 pick = near
+        if pick is None and self.trk is not None and self.try_lidar_hold(msg.header.stamp):
+            # The camera sees somebody, but not the person being tracked, while
+            # the LiDAR still has the tracked person. Stay with the track: a new
+            # face in frame must not steal the lock.
+            return
         if pick is None:
             pick = (min(cands, key=lambda c: c["range"]) if self.mode == "nearest"
                     else min(cands, key=lambda c: abs(c["bearing"])))
+            self.trk = None                         # genuinely a new target
             self.track_id += 1
             if self.last_bearing is not None:
                 # Not a continuation: the lock moved to a different person.
@@ -258,22 +470,11 @@ class TargetSelector(Node):
                 self.get_logger().info(
                     f"target acquired (track {self.track_id}) at "
                     f"{math.degrees(pick['bearing']):+.1f} deg / {pick['range']:.2f} m")
-        self.track_pub.publish(Int32(data=self.track_id))
-
-        # Bearing to the located point from the ROVER, which is what steers it.
-        b_base = math.atan2(pick["xy"][1], pick["xy"][0])
-        out = PoseStamped()
-        out.header.stamp = msg.header.stamp
-        out.header.frame_id = self.base_frame
-        out.pose.position.x, out.pose.position.y = pick["xy"]
-        out.pose.orientation.z = math.sin(b_base / 2.0)
-        out.pose.orientation.w = math.cos(b_base / 2.0)
-        self.pub.publish(out)
-
-        self.last_bearing = pick["bearing"]
-        self.last_range = pick["range"]
-        self.last_target_time = time.monotonic()
-        self.stats["published"] += 1
+        if self.lidar_track:
+            T = self.odom_T_base()
+            if T is not None:
+                self.track_update(T, pick["xy"], "camera")
+        self.publish_target(msg.header.stamp, pick["xy"], "camera")
 
     def report(self):
         s = self.stats
@@ -281,7 +482,7 @@ class TargetSelector(Node):
             self.get_logger().info(
                 f"{s['msgs'] / 10.0:.1f} Hz in, {s['published']} targets, "
                 f"{s['no_det']} frames with no usable person, {s['no_range']} detections "
-                f"the LiDAR could not range"
+                f"the LiDAR could not range, {s['lidar']} held on LiDAR alone"
                 + (f", {s['tf_fallback']} TF stamp fallbacks" if s["tf_fallback"] else ""))
         for k in s:
             s[k] = 0

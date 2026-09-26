@@ -29,7 +29,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 from geometry_msgs.msg import PoseStamped, Twist
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Int32
 
 
 class FollowController(Node):
@@ -69,6 +69,12 @@ class FollowController(Node):
         # Slower than the deadband is wide: turning hard while closing in is how
         # a tracked rover ends up pointing somewhere unintended.
         self.declare_parameter("turn_speed_scale", 0.6)
+        # Beyond this bearing, turn in place and do not drive at all. With the
+        # LiDAR holding a target beside or behind the rover, the old rule (60 %
+        # speed while turning) would drive forward PAST the person while it
+        # swung round. 35 deg is a little outside the camera's 27.8 deg half
+        # field of view: once the person is back in frame, driving resumes.
+        self.declare_parameter("max_drive_bearing_deg", 35.0)
         self.declare_parameter("target_timeout", 0.6)
         # On losing the target, turn toward where it was last seen for this long
         # before giving up. ROTATION ONLY, never forward: turning in place with
@@ -105,6 +111,7 @@ class FollowController(Node):
         self.b_dead = math.radians(float(g("bearing_deadband_deg")))
         self.w_min = float(g("min_effective_angular"))
         self.turn_scale = float(g("turn_speed_scale"))
+        self.max_drive_bearing = math.radians(float(g("max_drive_bearing_deg")))
         self.timeout = float(g("target_timeout"))
         self.search_timeout = float(g("search_timeout"))
         self.search_w = float(g("search_angular"))
@@ -126,6 +133,13 @@ class FollowController(Node):
         # been given one yet". Without this the controller switched itself off on
         # the first tick after being enabled, before any target had arrived.
         self.had_target = False
+        # The track id this follow session belongs to, latched from the first id
+        # seen after enabling. If the selector's id changes -- a different person
+        # -- follow disables itself. Without this a bystander could be handed over
+        # seamlessly: when a lock expires with someone else in frame, the
+        # selector publishes the new person with no gap, so the controller never
+        # saw a loss at all.
+        self.locked_id = None
         self.last_state = None
 
         be = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -134,6 +148,7 @@ class FollowController(Node):
         self.create_subscription(PoseStamped, g("target_topic"), self.on_target, be)
         self.create_subscription(Bool, g("enable_topic"), self.on_enable, 10)
         self.create_subscription(Bool, g("estop_topic"), self.on_estop, 10)
+        self.create_subscription(Int32, "/follow/track_id", self.on_track_id, 10)
         self.create_timer(1.0 / self.rate, self.tick)
 
         self.get_logger().warn(
@@ -147,6 +162,7 @@ class FollowController(Node):
         self.enabled = msg.data
         if self.enabled:
             self.had_target = False
+            self.locked_id = None
             self.search_until = 0.0
             self.get_logger().warn("FOLLOW ENABLED -- the rover will now drive itself "
                                    "toward the tracked person")
@@ -155,6 +171,22 @@ class FollowController(Node):
             self.stop_until = time.monotonic() + 1.0
             self.get_logger().warn("follow disabled -- commanding zero, then releasing "
                                    "the twist_mux slot")
+
+    def on_track_id(self, msg):
+        if not self.enabled:
+            return
+        if self.locked_id is None:
+            self.locked_id = msg.data
+            return
+        if msg.data != self.locked_id:
+            self.enabled = False
+            self.had_target = False
+            self.search_until = 0.0
+            self.v_cmd = 0.0
+            self.stop_until = time.monotonic() + 1.0
+            self.get_logger().error(
+                f"TARGET CHANGED to a different person (track {self.locked_id} -> "
+                f"{msg.data}) -- FOLLOW DISABLED. Re-enable explicitly to follow them.")
 
     def on_estop(self, msg):
         if msg.data and not self.estop:
@@ -250,6 +282,8 @@ class FollowController(Node):
             w = self.kp_ang * bearing
             w = math.copysign(max(self.w_min, min(self.w_max, abs(w))), w)
             v_want *= self.turn_scale
+            if abs(bearing) > self.max_drive_bearing:
+                v_want = 0.0                        # face them first, then drive
 
         # Ramp the request so a target reacquired at distance does not step the
         # command; the FCU speed loop handles a ramp far better than a jump.
