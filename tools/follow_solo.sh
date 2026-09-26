@@ -108,8 +108,13 @@ for slot in "$@"; do
   # Subscribed is not receiving. Confirm the FCU streams are actually flowing,
   # then give the recorder a few seconds' head start before anything moves.
   # Exit code, not grep: "NOT FLOWING" contains "FLOWING".
-  if ! python3 tools/fcu_flowing.py 3 2>/dev/null; then
-    echo "FCU telemetry is not flowing -- run python3 tools/preflight.py. Not enabling follow."
+  if ! python3 tools/fcu_flowing.py 3 2>/dev/null && ! python3 tools/fcu_flowing.py 3 2>/dev/null; then
+    # Twice, and then say enough to diagnose it from the paste alone: a failure
+    # at 13:34 on 2026-09-26 passed from another shell two minutes later.
+    echo "FCU telemetry is not flowing (checked twice). Not enabling follow."
+    echo "  mavros running: $(pgrep -x mavros_node >/dev/null && echo yes || echo NO -- is T1 up?)"
+    echo "  this shell: ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-unset} RMW=${RMW_IMPLEMENTATION:-unset}"
+    echo "  FASTRTPS_DEFAULT_PROFILES_FILE=${FASTRTPS_DEFAULT_PROFILES_FILE:-unset}"
     kill -INT "$rec" "$stat" 2>/dev/null; sleep 2; kill -KILL "$rec" 2>/dev/null
     exit 1
   fi
