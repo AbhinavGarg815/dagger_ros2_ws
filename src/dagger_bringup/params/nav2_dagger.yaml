@@ -130,19 +130,38 @@ local_costmap:
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
-        observation_sources: scan
+        observation_sources: scan scan_band
         scan:
           topic: /scan
           max_obstacle_height: 2.0
           clearing: true
           marking: true
           data_type: "LaserScan"
+          # 1 s without a scan marks the costmap NOT current, and Humble's
+          # controller then waits (controller_server.cpp:402) instead of
+          # computing velocity -> the rover stops via the twist_mux /
+          # cmd_vel_safety timeouts. Default 0.0 meant "never stale": a dead
+          # /scan (p2l wedge P9, or Patchwork++ dying) left Nav2 driving blind.
+          expected_update_rate: 1.0
           # /scan uses +inf for "no return within 30 m" (~200 of 723 beams in the
           # open). Nav2's default inf_is_valid=false SKIPS those rays, so open
           # directions never clear stale obstacles (ghosts). (2026-09-17)
           inf_is_valid: true
           raytrace_max_range: 30.0
           raytrace_min_range: 0.0
+          obstacle_max_range: 25.0
+        # The old 0.35-0.75 m band on the raw cloud, kept alongside the
+        # ground-segmented /scan so segmentation can only add obstacles. Its
+        # publisher always runs; with ground_seg:=false it duplicates /scan.
+        scan_band:
+          topic: /scan_band
+          max_obstacle_height: 2.0
+          clearing: true
+          marking: true
+          data_type: "LaserScan"
+          expected_update_rate: 1.0
+          inf_is_valid: true
+          raytrace_max_range: 30.0
           obstacle_max_range: 25.0
           obstacle_min_range: 0.0
       inflation_layer:
@@ -177,19 +196,38 @@ global_costmap:
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
-        observation_sources: scan
+        observation_sources: scan scan_band
         scan:
           topic: /scan
           max_obstacle_height: 2.0
           clearing: true
           marking: true
           data_type: "LaserScan"
+          # 1 s without a scan marks the costmap NOT current, and Humble's
+          # controller then waits (controller_server.cpp:402) instead of
+          # computing velocity -> the rover stops via the twist_mux /
+          # cmd_vel_safety timeouts. Default 0.0 meant "never stale": a dead
+          # /scan (p2l wedge P9, or Patchwork++ dying) left Nav2 driving blind.
+          expected_update_rate: 1.0
           # /scan uses +inf for "no return within 30 m" (~200 of 723 beams in the
           # open). Nav2's default inf_is_valid=false SKIPS those rays, so open
           # directions never clear stale obstacles (ghosts). (2026-09-17)
           inf_is_valid: true
           raytrace_max_range: 30.0
           raytrace_min_range: 0.0
+          obstacle_max_range: 25.0
+        # The old 0.35-0.75 m band on the raw cloud, kept alongside the
+        # ground-segmented /scan so segmentation can only add obstacles. Its
+        # publisher always runs; with ground_seg:=false it duplicates /scan.
+        scan_band:
+          topic: /scan_band
+          max_obstacle_height: 2.0
+          clearing: true
+          marking: true
+          data_type: "LaserScan"
+          expected_update_rate: 1.0
+          inf_is_valid: true
+          raytrace_max_range: 30.0
           obstacle_max_range: 25.0
           obstacle_min_range: 0.0
       inflation_layer:

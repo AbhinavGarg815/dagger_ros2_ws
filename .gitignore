@@ -29,3 +29,4 @@ frames_*.pdf
 # Detector models: multi-MB ONNX + TensorRT engines. Engines are built for THIS
 # GPU/TensorRT version and are not portable -- rebuild with tools/fetch_model.sh.
 models/
+src/patchwork-plusplus/

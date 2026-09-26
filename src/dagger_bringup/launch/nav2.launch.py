@@ -4,7 +4,8 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.conditions import IfCondition
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
 
@@ -29,6 +30,16 @@ def generate_launch_description():
         default_value=default_params,
     )
     use_sim_time_arg = DeclareLaunchArgument("use_sim_time", default_value="false")
+    # Ground segmentation (P2). true: the costmap's /scan is built from
+    # Patchwork++'s NON-GROUND cloud with a 0.12 m floor, so obstacles from ~12 cm
+    # up are seen. false: the old fixed 0.35-0.75 m band on the raw cloud, which
+    # misses anything under ~35 cm (kerbs, low debris).
+    ground_seg = LaunchConfiguration("ground_seg")
+    ground_seg_arg = DeclareLaunchArgument("ground_seg", default_value="true")
+    costmap_cloud = PythonExpression(
+        ["'/patchworkpp/nonground' if '", ground_seg, "' == 'true' else '/rslidar_points'"])
+    costmap_min_height = PythonExpression(
+        ["0.12 if '", ground_seg, "' == 'true' else 0.35"])
     autostart_arg = DeclareLaunchArgument("autostart", default_value="true")
 
     nav2_params = [params_file, extra_params]
@@ -42,7 +53,7 @@ def generate_launch_description():
         respawn=True,
         respawn_delay=1.0,
         remappings=[
-            ("cloud_in", "/rslidar_points"),
+            ("cloud_in", costmap_cloud),
             ("scan", "/scan"),
         ],
         parameters=[{
@@ -54,7 +65,9 @@ def generate_launch_description():
             # wall -> Theta* detoured 14 m around a straight 6 m goal. Also margin
             # for outdoor slope/pitch (2 deg at 5 m = 0.17 m). Stopgap until the
             # URDF height is measured + proper ground segmentation replaces this.
-            "min_height": 0.35,
+            # 0.35 on the raw cloud (ground_seg:=false); 0.12 on Patchwork++'s
+            # non-ground cloud, where the ground ring is already removed.
+            "min_height": costmap_min_height,
             # 0.90 -> 0.75 (2026-09-14): with the corrected 1.12 m LiDAR height the
             # rover's own mast/mount returns sit at z 0.81-1.12 (r 0.72-0.91 m); at
             # 0.90 they marked a lethal ring INSIDE the footprint -> Spin aborted
@@ -100,6 +113,62 @@ def generate_launch_description():
         remappings=[("cmd_vel", "/cmd_vel_nav_raw")],
     )
 
+    # Patchwork++ ground segmentation: raw cloud -> /patchworkpp/{ground,nonground}.
+    # The node does NOT transform: it only stamps its output with base_frame, so
+    # this must be the INPUT cloud's frame or every point is silently mislabelled.
+    # min_range 1.0 also drops the mast/mount self-returns (r 0.72-0.91 m).
+    # Measured on the July bags: 15.6 ms median, 17 % of one core.
+    patchworkpp = Node(
+        package="patchworkpp",
+        executable="patchworkpp_node",
+        name="patchworkpp",
+        output="screen",
+        respawn=True,
+        respawn_delay=1.0,
+        condition=IfCondition(ground_seg),
+        remappings=[("pointcloud_topic", "/rslidar_points")],
+        parameters=[{
+            "base_frame": "rslidar",
+            "sensor_height": 1.12,
+            "min_range": 1.0,
+            "max_range": 30.0,
+            "use_sim_time": use_sim_time,
+        }],
+    )
+
+    # The OLD band (raw cloud, 0.35-0.75 m) kept as a SECOND costmap source when
+    # ground segmentation is on, so segmentation can only ADD obstacles. Replayed
+    # data showed it adding ~5 low-obstacle rays per scan but also dropping ~1.7
+    # rays the band sees (none within 1.5 m); with both sources that cannot
+    # happen, by construction rather than by argument.
+    p2l_band = Node(
+        package="pointcloud_to_laserscan",
+        executable="pointcloud_to_laserscan_node",
+        name="p2l_band",
+        output="screen",
+        respawn=True,
+        respawn_delay=1.0,
+        # Always runs: the costmap lists /scan_band with expected_update_rate,
+        # so a missing publisher would mark it stale and stop Nav2 -- which
+        # would break ground_seg:=false. There it simply duplicates /scan.
+        remappings=[("cloud_in", "/rslidar_points"), ("scan", "/scan_band")],
+        parameters=[{
+            "target_frame": "base_footprint",
+            "transform_tolerance": 0.1,
+            "min_height": 0.35,
+            "max_height": 0.75,
+            "angle_min": -3.14159,
+            "angle_max": 3.14159,
+            "angle_increment": 0.0087,
+            "scan_time": 0.1,
+            "range_min": 0.5,
+            "range_max": 30.0,
+            "use_inf": True,
+            "inf_epsilon": 1.0,
+            "use_sim_time": use_sim_time,
+        }],
+    )
+
     # Permanent /scan subscriber (prevents the p2l lazy-subscribe flap) + restarts
     # p2l if /scan goes silent while clouds still arrive.
     scan_watchdog = Node(
@@ -107,8 +176,11 @@ def generate_launch_description():
         executable="scan_watchdog",
         name="scan_watchdog",
         output="screen",
-        # match THIS p2l instance only (p2l_safety runs the same executable)
-        parameters=[{"process_pattern": "__node:=pointcloud_to_laserscan( |$)"}],
+        # match THIS p2l instance only (p2l_safety runs the same executable).
+        # Watch p2l's ACTUAL input: with ground segmentation on, blaming p2l for a
+        # silent /scan while the raw cloud flows would restart the wrong node.
+        parameters=[{"process_pattern": "__node:=pointcloud_to_laserscan( |$)",
+                     "cloud_topic": costmap_cloud}],
     )
 
     # ---- Collision monitor: independent last gate on the Nav2 command path ----
@@ -221,6 +293,9 @@ def generate_launch_description():
         extra_params_arg,
         use_sim_time_arg,
         autostart_arg,
+        ground_seg_arg,
+        patchworkpp,
+        p2l_band,
         pointcloud_to_laserscan,
         scan_watchdog,
         p2l_safety,
