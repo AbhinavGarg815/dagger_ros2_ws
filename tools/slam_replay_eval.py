@@ -3,6 +3,7 @@
 
   --log poses.csv                  record /slam/pose until Ctrl-C (used by slam_replay.sh)
   <bag> <label> [<label> ...]      score each replay against the bag's /odometry/filtered
+  --loc <label> ... [<bag>]        score localization replays (+ map->odom corrections with the bag)
 
 Scores, per run: pose count; longest gap between poses and what the rover did
 in it (a pivot with no pose = the lane2/lane3 turn error, Q42); SLAM-minus-odom
@@ -126,7 +127,56 @@ def score(od, label):
         print(f"{'':>12}gap {g:4.1f}s at t={a - od[0][0]:5.1f}s: moved {net:.2f} m, turned {rot:+.0f} deg")
 
 
-def score_loc(label):
+def read_odom_full(bag):
+    """(stamp, x, y, yaw, v, wz) from /odometry/filtered, header stamps."""
+    import rosbag2_py
+    from rclpy.serialization import deserialize_message
+    from nav_msgs.msg import Odometry
+
+    r = rosbag2_py.SequentialReader()
+    r.open(rosbag2_py.StorageOptions(uri=bag, storage_id="mcap"),
+           rosbag2_py.ConverterOptions("", ""))
+    r.set_filter(rosbag2_py.StorageFilter(topics=["/odometry/filtered"]))
+    od = []
+    while r.has_next():
+        _, raw, _ = r.read_next()
+        m = deserialize_message(raw, Odometry)
+        od.append((m.header.stamp.sec + m.header.stamp.nanosec * 1e-9,
+                   m.pose.pose.position.x, m.pose.pose.position.y,
+                   yaw_of(m.pose.pose.orientation),
+                   m.twist.twist.linear.x, m.twist.twist.angular.z))
+    return od
+
+
+def corrections(sl, od):
+    """How much map->odom moved at each SLAM update, split by what the rover did.
+    Parked should be ~0; driving/pivoting show how much SLAM overrides odom --
+    along a plain corridor that is SLAM sliding along the lane (loc1, Q44)."""
+    ts = [o[0] for o in od]
+
+    def at(t):
+        i = min(max(bisect.bisect_left(ts, t), 1), len(od) - 1)
+        a, b = od[i - 1], od[i]
+        f = (t - a[0]) / max(b[0] - a[0], 1e-9)
+        return (a[1] + f * (b[1] - a[1]), a[2] + f * (b[2] - a[2]),
+                a[3] + f * math.remainder(b[3] - a[3], 2 * math.pi), b[4], b[5])
+
+    def m2o(s, o):
+        yaw = math.remainder(s[3] - o[2], 2 * math.pi)
+        c, n = math.cos(yaw), math.sin(yaw)
+        return s[1] - (c * o[0] - n * o[1]), s[2] - (n * o[0] + c * o[1])
+
+    bins = {}
+    for p, q in zip(sl, sl[1:]):
+        a, b = at(p[0]), at(q[0])
+        A, B = m2o(p, a), m2o(q, b)
+        kind = ("pivot" if abs(b[4]) > 0.15 and abs(b[3]) < 0.15
+                else "driving" if abs(b[3]) >= 0.15 else "parked")
+        bins.setdefault(kind, []).append(math.hypot(B[0] - A[0], B[1] - A[1]))
+    return bins
+
+
+def score_loc(label, od=None):
     """Localization replay: SLAM pose vs GNSS-in-map after the seed, and jumps."""
     base = os.path.expanduser(f"~/dagger_bags/replay/{label}")
 
@@ -159,6 +209,11 @@ def score_loc(label):
     print(f"{label:>12}: {len(sl)} SLAM poses, seeded={seeded} localized={localized} | "
           f"SLAM-GNSS median {ds[len(ds) // 2]:.2f} m, p90 {ds[int(0.9 * (len(ds) - 1))]:.2f} m, "
           f"max {ds[-1]:.2f} m | biggest pose step {big[0]:.2f} m in {big[1]:.1f} s at +{big[2]:.0f} s")
+    if od:
+        for kind, v in sorted(corrections(sl, od).items()):
+            v = sorted(v)
+            print(f"{'':>14}map->odom correction, {kind:7s} n {len(v):3d}: median {v[len(v) // 2]:.3f}, "
+                  f"p90 {v[int(0.9 * (len(v) - 1))]:.3f}, max {v[-1]:.2f} m, >0.2 m: {sum(x > 0.2 for x in v)}")
 
 
 def main():
@@ -172,8 +227,9 @@ def main():
         log(a.log)
         return
     if a.loc:
+        od = read_odom_full(os.path.expanduser(a.bag)) if a.bag else None
         for label in a.loc:
-            score_loc(label)
+            score_loc(label, od)
         return
     if not a.bag or not a.labels:
         ap.error("need <bag> <label> ...")

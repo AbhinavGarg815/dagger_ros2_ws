@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Test SLAM LOCALIZATION offline: play a recorded drive against a saved map.
-#   bash tools/slam_loc_replay.sh <bag> <label> <map> [offset_x offset_y]
+#   bash tools/slam_loc_replay.sh <bag> <label> <map> [offset_x offset_y [param:=value ...]]
 #   bash tools/slam_loc_replay.sh ~/dagger_bags/slam_lane1 l1 lane3fix
 #   bash tools/slam_loc_replay.sh ~/dagger_bags/slam_lane1 l1_off2 lane3fix 2.0 0.0
 # Same nodes as `slam.launch.py mode:=localization` (slam_toolbox localization +
@@ -12,6 +12,7 @@
 set -e
 bag=${1:?usage: slam_loc_replay.sh <bag> <label> <map> [offset_x offset_y]}
 label=${2:?}; map=${3:?}
+extra=(); for kv in "${@:6}"; do extra+=(-p "$kv"); done   # slam_toolbox overrides
 # always floats: the node declares them as double and rejects "0"
 ox=$(printf %.3f "${4:-0}"); oy=$(printf %.3f "${5:-0}")
 export ROS_DOMAIN_ID=${REPLAY_DOMAIN:-77}
@@ -27,7 +28,7 @@ python3 "$ws/tools/tf_filter.py" > "$out/tf_filter.log" 2>&1 & pids=($!)
 /opt/ros/humble/lib/slam_toolbox/localization_slam_toolbox_node --ros-args -r __node:=slam_toolbox \
   --params-file "$share/params/slam_toolbox.yaml" \
   -p mode:=localization -p map_frame:=map -p transform_publish_period:=0.05 \
-  -p map_file_name:="$base" -p use_sim_time:=true \
+  -p map_file_name:="$base" -p "map_start_pose:=[0.0, 0.0, 0.0]" -p use_sim_time:=true "${extra[@]}" \
   -r map:=/slam/map -r map_metadata:=/slam/map_metadata -r pose:=/slam/pose \
   > "$out/slam.log" 2>&1 & pids+=($!)
 python3 "$ws/tools/slam_replay_eval.py" --log "$out/poses.csv" > "$out/logger.log" 2>&1 & pids+=($!)
@@ -36,7 +37,7 @@ python3 "$ws/tools/slam_replay_eval.py" --log "$out/poses.csv" > "$out/logger.lo
   > "$out/geo.log" 2>&1 & pids+=($!)
 sleep 5
 
-echo "[$label] map $map, seed offset ($ox, $oy); playing $bag"
+echo "[$label] map $map, seed offset ($ox, $oy), overrides: ${*:6}; playing $bag"
 ros2 bag play "$bag" --clock --remap /tf:=/tf_bag --topics /scan /tf /tf_static \
   /odometry/filtered /mavros/global_position/global /gps/heading_imu /mavros/gpsstatus/gps1/raw \
   > "$out/play.log" 2>&1

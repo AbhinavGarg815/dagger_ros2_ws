@@ -27,6 +27,7 @@ class MapMatcher:
             raise RuntimeError(f"cannot read map image {path}")
         occ_thresh = meta.get("occupied_thresh", 0.65)
         occupied = img < int(round((1.0 - occ_thresh) * 255))
+        self.occupied_count = int(occupied.sum())
         self.res = float(meta["resolution"])
         self.ox, self.oy = float(meta["origin"][0]), float(meta["origin"][1])
         self.h, self.w = img.shape

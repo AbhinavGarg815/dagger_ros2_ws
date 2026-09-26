@@ -22,6 +22,11 @@ HEALTH (continuously): the score of the scan SLAM last processed, at the pose
 SLAM gave it (/slam/pose carries that scan's stamp), on /slam/match_score; /slam/localized (latched Bool) is true
 after `ok_count` checks <= ok_score, false again after `lost_count` checks >=
 lost_score. Scores: ~0.05-0.10 m locked, ~0.7-1.0 m wrong place.
+MAP CHECK: /slam/localized also needs slam_toolbox to have LOADED the saved map
+-- its /slam/map must hold >= map_min_ratio of the saved map's occupied cells.
+Without that the localization node only tracks scan-to-scan from the seed, and
+the scan still fits the saved map for a while, so the score alone cannot tell
+(0b70017 dropped map_start_pose; the loc1 drive ran that way unnoticed).
 Also /slam/gnss_pose: GNSS converted into the map, for comparison in Foxglove.
 
 offset_x / offset_y shift the GNSS centre of the search on purpose (offline
@@ -38,6 +43,7 @@ from nav_msgs.msg import Odometry
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
+from nav_msgs.msg import OccupancyGrid
 from sensor_msgs.msg import Imu, LaserScan, NavSatFix
 from std_msgs.msg import Bool, Float32
 
@@ -81,6 +87,7 @@ class SlamGeoInit(Node):
         self.declare_parameter("ok_count", 3)
         self.declare_parameter("lost_score", 0.35)
         self.declare_parameter("lost_count", 3)
+        self.declare_parameter("map_min_ratio", 0.6)
         self.declare_parameter("offset_x", 0.0)
         self.declare_parameter("offset_y", 0.0)
         g = lambda n: self.get_parameter(n).value  # noqa: E731
@@ -102,6 +109,10 @@ class SlamGeoInit(Node):
         self.ok_score, self.ok_count = g("ok_score"), int(g("ok_count"))
         self.lost_score, self.lost_count = g("lost_score"), int(g("lost_count"))
         self.offset = (g("offset_x"), g("offset_y"))
+        self.map_min_ratio = g("map_min_ratio")
+        self.map_ok = False
+        self.map_ratio = None
+        self.start = None
 
         self.h_acc = None
         self.fix_type = 0
@@ -127,6 +138,9 @@ class SlamGeoInit(Node):
         self.create_subscription(LaserScan, "/scan", self.on_scan, sensor)
         self.create_subscription(PoseWithCovarianceStamped, "/initialpose", self.on_initialpose, 10)
         self.create_subscription(PoseWithCovarianceStamped, "/slam/pose", self.on_slam_pose, 10)
+        self.create_subscription(OccupancyGrid, "/slam/map", self.on_slam_map, QoSProfile(
+            depth=1, reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.init_pub = self.create_publisher(PoseWithCovarianceStamped, "/initialpose", 10)
         self.gnss_pub = self.create_publisher(PoseStamped, "/slam/gnss_pose", 10)
         self.score_pub = self.create_publisher(Float32, "/slam/match_score", 10)
@@ -171,6 +185,16 @@ class SlamGeoInit(Node):
 
     def on_slam_pose(self, m):
         self.slam_pose = m
+
+    def on_slam_map(self, m):
+        occupied = sum(1 for v in m.data if v >= 65)
+        self.map_ratio = occupied / max(self.matcher.occupied_count, 1)
+        ok = self.map_ratio >= self.map_min_ratio
+        if ok != self.map_ok:
+            self.map_ok = ok
+            log = self.get_logger().info if ok else self.get_logger().error
+            log(f"slam_toolbox map {'LOADED' if ok else 'NOT the saved map'}: {occupied} occupied "
+                f"cells = {100 * self.map_ratio:.0f} % of the saved map's {self.matcher.occupied_count}")
 
     def on_initialpose(self, m):
         if not self.seeded:   # someone else (Foxglove) set the pose: stop auto-seeding
@@ -256,6 +280,15 @@ class SlamGeoInit(Node):
         score = self.matcher.score(scan_points(scan), p.position.x, p.position.y,
                                    yaw_of(p.orientation))
         self.score_pub.publish(Float32(data=score))
+        if self.start is None:
+            self.start = self.now_s()
+        if not self.map_ok:
+            self.set_localized(False)
+            if self.now_s() - self.start > 20.0:
+                self.get_logger().error(
+                    "slam_toolbox has not published the saved map (map_start_pose / map_file_name?) "
+                    f"-- ratio {self.map_ratio}; NOT localized", throttle_duration_sec=30.0)
+            return
         self.good = self.good + 1 if score <= self.ok_score else 0
         self.bad = self.bad + 1 if score >= self.lost_score else 0
         if not self.localized and self.good >= self.ok_count:
