@@ -36,6 +36,7 @@ def generate_launch_description():
     selection_mode = LaunchConfiguration("selection_mode")
     use_controller = LaunchConfiguration("use_controller")
     follow_distance = LaunchConfiguration("follow_distance")
+    max_linear = LaunchConfiguration("max_linear")
     engine_path = LaunchConfiguration("engine_path")
     debug_image = LaunchConfiguration("debug_image")
     image_rotation = LaunchConfiguration("image_rotation_deg")
@@ -48,6 +49,10 @@ def generate_launch_description():
     # "centred" follows whoever is ahead; "nearest" grabs the closest person.
     selection_mode_arg = DeclareLaunchArgument("selection_mode", default_value="centred")
     follow_distance_arg = DeclareLaunchArgument("follow_distance", default_value="3.0")
+    # Forward speed ceiling. 0.4 is where the stop distance was validated
+    # (0.165 m from 0.384 m/s, 2026-09-26). Raise per run to test higher speeds;
+    # change the default only once the stop at that speed is measured.
+    max_linear_arg = DeclareLaunchArgument("max_linear", default_value="0.4")
     # Engines are built for one GPU + TensorRT version, so models/ is gitignored
     # and this points into the source tree rather than the install share dir.
     engine_path_arg = DeclareLaunchArgument(
@@ -132,6 +137,7 @@ def generate_launch_description():
         condition=IfCondition(use_controller),
         parameters=[{
             "follow_distance": follow_distance,
+            "max_linear": max_linear,
             "use_sim_time": use_sim_time,
         }],
     )
@@ -144,6 +150,7 @@ def generate_launch_description():
         use_controller_arg,
         selection_mode_arg,
         follow_distance_arg,
+        max_linear_arg,
         engine_path_arg,
         debug_image_arg,
         image_rotation_arg,
