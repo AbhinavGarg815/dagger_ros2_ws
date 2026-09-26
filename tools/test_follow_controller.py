@@ -96,7 +96,7 @@ r_id2b = phase("  ...still track 8", 2.0, 4.5, 0.0, track=8)
 checks = [
     ("silent while disabled", r_dis is None),
     ("drives forward when too far", r_fwd and r_fwd[1] > 0.05),
-    ("respects max_linear 0.4", r_fwd and r_fwd[1] <= 0.4 + 1e-6),
+    ("respects max_linear 0.6 (the default)", r_fwd and r_fwd[1] <= 0.6 + 1e-6),
     ("settles to zero in the deadband (after ramping down)", r_dead and r_dead[0] < 1e-6),
     ("never reverses when too close", r_close and r_close[0] >= 0.0),
     ("turns IN PLACE for a target at 60 deg (v = 0)", r_side and r_side[1] < 1e-6 and r_side[3] > 0.3),

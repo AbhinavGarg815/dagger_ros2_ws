@@ -51,9 +51,9 @@ class FollowController(Node):
         # kp_linear 0.35, so it reaches the speed cap sooner instead of easing
         # toward it while the person walks away.
         self.declare_parameter("close_time", 1.5)
-        # 0.4 m/s is where the FCU cruise is calibrated (CRUISE_SPEED 0.4 /
-        # CRUISE_THROTTLE 45) and where the 0.14 m stop distance was measured.
-        self.declare_parameter("max_linear", 0.4)
+        # 0.6 m/s, validated 2026-09-26: stop 0.286 m from ~0.6 m/s. The FCU's
+        # WP_SPEED caps GUIDED velocity, so it must be >= this (it is 2.0).
+        self.declare_parameter("max_linear", 0.6)
         # 0.5 m/s^2: 0 -> 0.4 in 0.8 s rather than 1.33 s. Measured 2026-09-25,
         # the person receded at a median 0.30 and p90 0.77 m/s, so time spent
         # ramping is time spent falling behind.
