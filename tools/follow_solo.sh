@@ -114,7 +114,16 @@ for slot in "$@"; do
       kill -INT "$rec" "$stat" 2>/dev/null; sleep 2; kill -KILL "$rec" 2>/dev/null
       exit 1
     fi
-    echo "$(date +%H:%M:%S) recording -> ~/dagger_bags/pf_${bag} (FCU topics subscribed)"
+    # Subscribed is not receiving. Confirm the FCU streams are actually flowing,
+    # then give the recorder a few seconds' head start before anything moves.
+    # Exit code, not grep: "NOT FLOWING" contains "FLOWING".
+    if ! python3 tools/fcu_flowing.py 3 2>/dev/null; then
+      echo "FCU telemetry is not flowing -- run python3 tools/preflight.py. Not enabling follow."
+      kill -INT "$rec" "$stat" 2>/dev/null; sleep 2; kill -KILL "$rec" 2>/dev/null
+      exit 1
+    fi
+    sleep 3
+    echo "$(date +%H:%M:%S) recording -> ~/dagger_bags/pf_${bag} (FCU telemetry flowing)"
     echo "$(date +%H:%M:%S) ENABLING FOLLOW for ${DURATION_S}s -- walk away slowly"
     set_follow true
     sleep "$DURATION_S"
