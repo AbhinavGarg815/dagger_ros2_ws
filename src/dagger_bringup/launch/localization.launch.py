@@ -123,6 +123,8 @@ def generate_launch_description():
             "zero_velocity_deadband": 0.02,
             "pivot_yaw_rate_gate": 0.25,
             "zero_lateral_velocity": True,
+            # P10: zero velocity once both tracks have sat at neutral for 1 s.
+            "zupt_neutral_pwm": 1500,
         }],
         condition=IfCondition(use_fused),
     )

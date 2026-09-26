@@ -19,12 +19,14 @@ LOCAL_POSITION_NED (msg 32) to ~20 Hz via MAV_CMD_SET_MESSAGE_INTERVAL (not pers
 -- request on each bring-up).
 """
 import math
+import time
 
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 from nav_msgs.msg import Odometry
+from mavros_msgs.msg import RCOut
 from tf2_ros import TransformBroadcaster
 from geometry_msgs.msg import TransformStamped
 
@@ -64,6 +66,20 @@ class FcuOdomRelay(Node):
         # steered a real left curve to "fix" it. True = publish vy as exactly 0, so the
         # EKF receives vy=0 as a measurement (a hard lateral constraint).
         self.declare_parameter("zero_lateral_velocity", False)
+        # Zero-velocity update on NEUTRAL TRACK OUTPUT (P10). After a hard stop
+        # EK3's body vx read about -0.07 m/s, decaying over ~8 s, while both
+        # tracks sat at neutral PWM -- so the fused odom slid ~0.3 m backwards
+        # after every collision-monitor stop, smearing the costmap and shifting
+        # the restart pose (bag pf_stopdist_cruise04). With no track powered the
+        # rover is not moving once coasting has ended, which takes ~0.7 s (N8).
+        # 0 = off. Otherwise the neutral PWM; both left and right outputs must
+        # stay within zupt_band_us of it for zupt_hold_s. If rc/out goes stale
+        # the gate switches OFF rather than guessing.
+        self.declare_parameter("zupt_neutral_pwm", 0)
+        self.declare_parameter("zupt_band_us", 25)
+        self.declare_parameter("zupt_hold_s", 1.0)
+        self.declare_parameter("zupt_rc_topic", "/mavros/rc/out")
+        self.declare_parameter("zupt_channels", [0, 2])   # SERVO1 left, SERVO3 right
 
         g = self.get_parameter
         self.odom_frame = g("odom_frame").value
@@ -74,6 +90,12 @@ class FcuOdomRelay(Node):
         self.zv_deadband = float(g("zero_velocity_deadband").value)
         self.pivot_gate = float(g("pivot_yaw_rate_gate").value)
         self.zero_lateral = bool(g("zero_lateral_velocity").value)
+        self.zupt_neutral = int(g("zupt_neutral_pwm").value)
+        self.zupt_band = int(g("zupt_band_us").value)
+        self.zupt_hold = float(g("zupt_hold_s").value)
+        self.zupt_ch = [int(c) for c in g("zupt_channels").value]
+        self.rc_time = 0.0            # monotonic time of the last rc/out message
+        self.neutral_since = None     # monotonic time both tracks became neutral
 
         # mavros publishes local_position with BEST_EFFORT sensor QoS.
         be = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -83,9 +105,28 @@ class FcuOdomRelay(Node):
         self.pub = self.create_publisher(Odometry, g("output_topic").value, rel)
         self.br = TransformBroadcaster(self) if self.publish_tf else None
         self.create_subscription(Odometry, g("input_topic").value, self.cb, be)
+        if self.zupt_neutral > 0:
+            self.create_subscription(RCOut, g("zupt_rc_topic").value, self.on_rc, be)
         self.get_logger().info(
             f"fcu_odom_relay: {g('input_topic').value} -> {g('output_topic').value} "
             f"({self.odom_frame}->{self.base_frame}), publish_tf={self.publish_tf}")
+
+    def on_rc(self, msg):
+        now = time.monotonic()
+        self.rc_time = now
+        ch = msg.channels
+        neutral = all(c < len(ch) and abs(ch[c] - self.zupt_neutral) <= self.zupt_band
+                      for c in self.zupt_ch)
+        if not neutral:
+            self.neutral_since = None
+        elif self.neutral_since is None:
+            self.neutral_since = now
+
+    def zupt_active(self):
+        now = time.monotonic()
+        if self.zupt_neutral <= 0 or now - self.rc_time > 0.5:
+            return False                      # off, or rc/out stale: do not guess
+        return self.neutral_since is not None and now - self.neutral_since >= self.zupt_hold
 
     def cb(self, msg):
         out = Odometry()
@@ -103,6 +144,8 @@ class FcuOdomRelay(Node):
             lin.x = lin.y = 0.0
         if self.zero_lateral:
             lin.y = 0.0
+        if self.zupt_active():
+            lin.x = lin.y = 0.0
         if any(self.twist_var):
             cov = list(out.twist.covariance)
             for idx, var in zip((0, 7, 35), self.twist_var):  # vx, vy, vyaw
@@ -130,7 +173,8 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     node.destroy_node()
-    rclpy.shutdown()
+    if rclpy.ok():
+        rclpy.shutdown()
 
 
 if __name__ == "__main__":
