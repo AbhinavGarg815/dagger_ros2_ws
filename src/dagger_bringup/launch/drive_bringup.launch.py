@@ -5,7 +5,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
 
@@ -40,10 +40,37 @@ def generate_launch_description():
         output="screen",
     )
 
+    # mavros loads all 65 plugins by default and used a full core (102 %) on
+    # 2026-09-26, with the Orin saturated at ~495 % of 600 % and the follow
+    # collision monitor starving as a result. The stack uses 13. In mavros a
+    # plugin is disabled when it matches the denylist AND not the allowlist, so
+    # the pattern is deny "*", allow ours. mavros_plugins:=all restores the lot.
+    #   sys_status  /mavros/state, set_mode, arming     command  cmd/command
+    #   sys_time    time sync                           param    FCU params
+    #   rc_io       rc/out, rc/in                       imu      imu/data(_raw)
+    #   local_position, global_position, home_position, gps_status (gps1/raw)
+    #   setpoint_velocity  the GUIDED command path
+    #   setpoint_raw       FCU echo of the executed target (latency checks)
+    #   waypoint           /mavros/mission (tools/gps_goal.py --mission)
+    # Not included, add when needed: gps_rtk (RTCM injection over the RFD868),
+    # vision_pose (the superseded ExtNav yaw relay).
+    mavros_plugins = LaunchConfiguration("mavros_plugins")
+    mavros_plugins_arg = DeclareLaunchArgument("mavros_plugins", default_value="minimal")
+    minimal = ["sys_status", "sys_time", "command", "param", "rc_io", "imu",
+               "local_position", "global_position", "home_position", "gps_status",
+               "setpoint_velocity", "setpoint_raw", "waypoint"]
     mavros_node = Node(
         package="mavros",
         executable="mavros_node",
         output="screen",
+        condition=IfCondition(PythonExpression(["'", mavros_plugins, "' == 'minimal'"])),
+        parameters=[{"fcu_url": fcu_url, "plugin_denylist": ["*"], "plugin_allowlist": minimal}],
+    )
+    mavros_node_all = Node(
+        package="mavros",
+        executable="mavros_node",
+        output="screen",
+        condition=IfCondition(PythonExpression(["'", mavros_plugins, "' == 'all'"])),
         parameters=[{"fcu_url": fcu_url}],
     )
 
@@ -64,5 +91,6 @@ def generate_launch_description():
     )
 
     return LaunchDescription(
-        [fcu_url_arg, use_camera_arg, rsp, lidar, mavros_node, system_ready, camera]
+        [fcu_url_arg, use_camera_arg, mavros_plugins_arg, rsp, lidar, mavros_node,
+         mavros_node_all, system_ready, camera]
     )
