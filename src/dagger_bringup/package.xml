@@ -33,6 +33,7 @@
   <!-- Follow-me: D435 colour stream and the person detector -->
   <exec_depend>realsense2_camera</exec_depend>
   <exec_depend>vision_msgs</exec_depend>
+  <exec_depend>nav2_msgs</exec_depend>
   <exec_depend>cv_bridge</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
