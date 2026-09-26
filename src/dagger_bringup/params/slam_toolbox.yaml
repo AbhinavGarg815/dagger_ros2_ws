@@ -1,0 +1,75 @@
+# slam_toolbox (2D) for Dagger -- mapping and localization, indoor and outdoor.
+#
+# Why 2D and why slam_toolbox (2026-09-26): the RS-Helios-16P has no IMU and the
+# Cube refuses to stream its IMU above 10 Hz over MAVLink (MAV_RESULT DENIED at
+# 50 Hz; SCHED_LOOP_RATE 50), which rules out LiDAR-inertial SLAM (FAST-LIO2,
+# LIO-SAM) without new hardware. mrg_slam was already too heavy for this Orin.
+# slam_toolbox needs no IMU, is light, and is built for Nav2.
+#
+# Input: /scan, the ground-segmented 360 deg scan the costmap uses (Patchwork++
+# non-ground cloud, 0.12-0.75 m) -- far cleaner than the old band for matching.
+# Odometry prior: our fused odom (gyro + GNSS heading + FCU velocity).
+#
+# Frames and topics are set by launch/slam.launch.py: in SHADOW mode (default)
+# map_frame is slam_map and transform_publish_period 0, so NOTHING is published
+# on /tf and the GPS map layer and Nav2 are untouched.
+slam_toolbox:
+  ros__parameters:
+    solver_plugin: solver_plugins::CeresSolver
+    ceres_linear_solver: SPARSE_NORMAL_CHOLESKY
+    ceres_preconditioner: SCHUR_JACOBI
+    ceres_trust_strategy: LEVENBERG_MARQUARDT
+    ceres_dogleg_type: TRADITIONAL_DOGLEG
+    ceres_loss_function: None
+
+    odom_frame: odom
+    base_frame: base_footprint
+    scan_topic: /scan
+    use_map_saver: true
+
+    debug_logging: false
+    throttle_scans: 1
+    transform_timeout: 0.2
+    tf_buffer_duration: 30.0
+    stack_size_to_use: 40000000
+    scan_queue_size: 1          # async: always the newest scan, never a backlog
+
+    # 5 cm cells; the 16-beam scan is reliable to ~20 m for matching outdoors.
+    resolution: 0.05
+    min_laser_range: 0.5        # the scan's own range_min
+    max_laser_range: 20.0
+    minimum_time_interval: 0.5
+    map_update_interval: 5.0
+
+    # A slow tracked rover: add a scan every 0.3 m or 0.3 rad.
+    minimum_travel_distance: 0.3
+    minimum_travel_heading: 0.3
+    use_scan_matching: true
+    use_scan_barycenter: true
+    scan_buffer_size: 10
+    scan_buffer_maximum_scan_distance: 10.0
+    link_match_minimum_response_fine: 0.1
+    link_scan_maximum_distance: 1.5
+
+    do_loop_closing: true
+    loop_search_maximum_distance: 3.0
+    loop_match_minimum_chain_size: 10
+    loop_match_maximum_variance_coarse: 3.0
+    loop_match_minimum_response_coarse: 0.35
+    loop_match_minimum_response_fine: 0.45
+
+    correlation_search_space_dimension: 0.5
+    correlation_search_space_resolution: 0.01
+    correlation_search_space_smear_deviation: 0.1
+    loop_search_space_dimension: 8.0
+    loop_search_space_resolution: 0.05
+    loop_search_space_smear_deviation: 0.03
+
+    distance_variance_penalty: 0.5
+    angle_variance_penalty: 1.0
+    fine_search_angle_offset: 0.00349
+    coarse_search_angle_offset: 0.349
+    coarse_angle_resolution: 0.0349
+    minimum_angle_penalty: 0.9
+    minimum_distance_penalty: 0.5
+    use_response_expansion: true

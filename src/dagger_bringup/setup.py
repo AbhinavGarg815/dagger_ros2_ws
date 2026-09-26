@@ -15,6 +15,7 @@ setup(
         (os.path.join("share", package_name, "params"), glob("params/*.yaml")),
         (os.path.join("share", package_name, "config"), glob("config/*.xml")),
         (os.path.join("share", package_name, "behavior_trees"), glob("behavior_trees/*.xml")),
+        (os.path.join("share", package_name, "maps"), glob("maps/*")),
     ],
     install_requires=["setuptools"],
     zip_safe=True,
