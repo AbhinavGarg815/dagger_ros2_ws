@@ -38,11 +38,17 @@ slam_toolbox:
     resolution: 0.05
     min_laser_range: 0.5        # the scan's own range_min
     max_laser_range: 20.0
-    minimum_time_interval: 0.5
+    # 1 Hz: with no distance gate below, this is what paces scan insertion.
+    minimum_time_interval: 1.0
     map_update_interval: 5.0
 
-    # A slow tracked rover: add a scan every 0.3 m or 0.3 rad.
-    minimum_travel_distance: 0.3
+    # 0.0, NOT a travel threshold: this build gates scans on DISTANCE only
+    # (minimum_travel_heading never triggers), so a pivot in place added no scan
+    # for ~10 s and the first scan after it matched ~19 deg off -> doubled walls
+    # at turns (Q42). Replay of lane3: longest gap 9.8 s -> 1.1 s, worst jump
+    # 19 deg -> 1.8 deg, CPU about the same. Cost: scans are also added while
+    # parked (1/s), so people walking past a parked rover can end up in the map.
+    minimum_travel_distance: 0.0
     minimum_travel_heading: 0.3
     use_scan_matching: true
     use_scan_barycenter: true
