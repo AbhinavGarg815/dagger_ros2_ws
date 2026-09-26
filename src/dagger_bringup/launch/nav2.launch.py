@@ -36,6 +36,10 @@ def generate_launch_description():
     # misses anything under ~35 cm (kerbs, low debris).
     ground_seg = LaunchConfiguration("ground_seg")
     ground_seg_arg = DeclareLaunchArgument("ground_seg", default_value="true")
+    # Low-obstacle memory (costmap low_obstacle_layer + its three feeder nodes).
+    # Off: shelved 2026-09-26 -- people left persistent blobs. See nav2_dagger.yaml.
+    low_memory = LaunchConfiguration("low_obstacle_memory")
+    low_memory_arg = DeclareLaunchArgument("low_obstacle_memory", default_value="false")
     costmap_cloud = PythonExpression(
         ["'/patchworkpp/nonground' if '", ground_seg, "' == 'true' else '/rslidar_points'"])
     costmap_min_height = PythonExpression(
@@ -187,6 +191,7 @@ def generate_launch_description():
             output="screen",
             respawn=True,
             respawn_delay=1.0,
+            condition=IfCondition(low_memory),
             remappings=[("cloud_in", costmap_cloud), ("scan", scan)],
             parameters=[{
                 "target_frame": "base_footprint",
@@ -213,6 +218,7 @@ def generate_launch_description():
         executable="low_scan_filter",
         name="low_scan_filter",
         output="screen",
+        condition=IfCondition(low_memory),
         respawn=True,
         respawn_delay=1.0,
         parameters=[{"use_sim_time": use_sim_time}],
@@ -343,6 +349,7 @@ def generate_launch_description():
         use_sim_time_arg,
         autostart_arg,
         ground_seg_arg,
+        low_memory_arg,
         patchworkpp,
         p2l_band,
         p2l_low_all,

@@ -173,9 +173,13 @@ local_costmap:
       # a low object would be visible again if still present. Being a separate
       # layer, the normal layer's clearing cannot reach it. A wrong low mark
       # stays until the rover is 4 m past it or drives over it.
+      # DISABLED 2026-09-26 by the operator, kept for future work: on the
+      # rover a person who walked past left a blob that stayed -- the low-only
+      # filter did not keep them out. Re-enable with low_obstacle_memory:=true
+      # (launch) AND enabled: true here once that is solved.
       low_obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
-        enabled: true
+        enabled: false
         footprint_clearing_enabled: true
         observation_sources: scan_low
         scan_low:
@@ -264,9 +268,13 @@ global_costmap:
       # a low object would be visible again if still present. Being a separate
       # layer, the normal layer's clearing cannot reach it. A wrong low mark
       # stays until the rover is 4 m past it or drives over it.
+      # DISABLED 2026-09-26 by the operator, kept for future work: on the
+      # rover a person who walked past left a blob that stayed -- the low-only
+      # filter did not keep them out. Re-enable with low_obstacle_memory:=true
+      # (launch) AND enabled: true here once that is solved.
       low_obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
-        enabled: true
+        enabled: false
         footprint_clearing_enabled: true
         observation_sources: scan_low
         scan_low:
