@@ -49,6 +49,71 @@ trap 'disable_follow; kill -INT ${rec:-0} ${stat:-0} 2>/dev/null; exit 130' INT 
 
 for slot in "$@"; do
   while [ "$(date +%H:%M:%S)" \< "$slot" ]; do sleep 0.2; done
+  # All the slow setup FIRST -- recorder, FCU-topic subscription, telemetry
+  # check -- and the gate LAST, immediately before enabling. The earlier order
+  # (gate, then setup) let 33 s pass between the gate confirming the operator's
+  # start position and follow actually enabling (lidar_hold_1, 2026-09-26),
+  # which is long enough for that confirmation to mean nothing.
+  # Unique per run: ros2 bag refuses to reuse an output folder, and on
+  # 2026-09-25 a no-op earlier run had already taken plain "$name" -- so the
+  # one run that actually drove recorded no bag at all, and the only record of
+  # it was the status log. Losing the odometry of a first drive is not
+  # recoverable, so a failed recorder now aborts BEFORE follow is enabled.
+  stamp=$(date +%H%M%S)
+  bag="${name}_${stamp}"
+  bash tools/pf_record.sh "$bag" > "/tmp/follow_rec_$bag.log" 2>&1 &
+  rec=$!
+  python3 tools/follow_status.py -r 2 > "$HOME/dagger_bags/pf_${bag}_status.log" 2>&1 &
+  stat=$!
+  # Poll, do not sleep once: ros2 bag subscribes to 17 topics before it
+  # creates the folder, which took longer than a flat 3 s wait and aborted two
+  # runs whose recorders were in fact starting normally (and were then left
+  # running as orphans). Give it 25 s, and check the process is still alive so
+  # a genuine failure is caught immediately rather than waited out.
+  ok=0
+  for _ in $(seq 1 50); do
+    if [ -d "$HOME/dagger_bags/pf_${bag}" ]; then ok=1; break; fi
+    kill -0 "$rec" 2>/dev/null || break
+    sleep 0.5
+  done
+  if [ "$ok" -ne 1 ]; then
+    echo "RECORDER FAILED -- not enabling follow. See /tmp/follow_rec_$bag.log:"
+    tail -3 "/tmp/follow_rec_$bag.log"
+    kill -INT "$rec" 2>/dev/null; kill -INT "$stat" 2>/dev/null
+    sleep 2; kill -KILL "$rec" 2>/dev/null
+    exit 1
+  fi
+  # The folder existing is not enough. On 2026-09-25 (stop_test_173211) the
+  # recorder took ~30 s to discover mavros's publishers: every /mavros/* topic
+  # in the bag started six seconds AFTER the event under test, while
+  # /odometry/filtered had been recording all along. Wait until the recorder
+  # has actually subscribed to the FCU topics the analysis depends on.
+  need="/mavros/rc/out /mavros/rc/in /mavros/local_position/velocity_body /mavros/setpoint_velocity/cmd_vel_unstamped"
+  ok=0
+  for _ in $(seq 1 90); do
+    missing=0
+    for tp in $need; do
+      grep -q "Subscribed to topic '$tp'" "/tmp/follow_rec_$bag.log" 2>/dev/null || missing=1
+    done
+    [ "$missing" -eq 0 ] && { ok=1; break; }
+    kill -0 "$rec" 2>/dev/null || break
+    sleep 0.5
+  done
+  if [ "$ok" -ne 1 ]; then
+    echo "RECORDER NOT SUBSCRIBED to the FCU topics after 45 s -- not enabling follow."
+    grep -o "Subscribed to topic '[^']*'" "/tmp/follow_rec_$bag.log" | tail -5
+    kill -INT "$rec" "$stat" 2>/dev/null; sleep 2; kill -KILL "$rec" 2>/dev/null
+    exit 1
+  fi
+  # Subscribed is not receiving. Confirm the FCU streams are actually flowing,
+  # then give the recorder a few seconds' head start before anything moves.
+  # Exit code, not grep: "NOT FLOWING" contains "FLOWING".
+  if ! python3 tools/fcu_flowing.py 3 2>/dev/null; then
+    echo "FCU telemetry is not flowing -- run python3 tools/preflight.py. Not enabling follow."
+    kill -INT "$rec" "$stat" 2>/dev/null; sleep 2; kill -KILL "$rec" 2>/dev/null
+    exit 1
+  fi
+  sleep 3
   # Retry for POLL_S rather than judging one instant: the operator is standing in
   # front of the rover and cannot see this terminal, so the gate has to let them
   # walk themselves into the window. Every safety condition is unchanged -- this
@@ -62,67 +127,12 @@ for slot in "$@"; do
     sleep 2
   done
   echo "slot $slot: $g"
-  if echo "$g" | grep -q PASS; then
-    # Unique per run: ros2 bag refuses to reuse an output folder, and on
-    # 2026-09-25 a no-op earlier run had already taken plain "$name" -- so the
-    # one run that actually drove recorded no bag at all, and the only record of
-    # it was the status log. Losing the odometry of a first drive is not
-    # recoverable, so a failed recorder now aborts BEFORE follow is enabled.
-    stamp=$(date +%H%M%S)
-    bag="${name}_${stamp}"
-    bash tools/pf_record.sh "$bag" > "/tmp/follow_rec_$bag.log" 2>&1 &
-    rec=$!
-    python3 tools/follow_status.py -r 2 > "$HOME/dagger_bags/pf_${bag}_status.log" 2>&1 &
-    stat=$!
-    # Poll, do not sleep once: ros2 bag subscribes to 17 topics before it
-    # creates the folder, which took longer than a flat 3 s wait and aborted two
-    # runs whose recorders were in fact starting normally (and were then left
-    # running as orphans). Give it 25 s, and check the process is still alive so
-    # a genuine failure is caught immediately rather than waited out.
-    ok=0
-    for _ in $(seq 1 50); do
-      if [ -d "$HOME/dagger_bags/pf_${bag}" ]; then ok=1; break; fi
-      kill -0 "$rec" 2>/dev/null || break
-      sleep 0.5
-    done
-    if [ "$ok" -ne 1 ]; then
-      echo "RECORDER FAILED -- not enabling follow. See /tmp/follow_rec_$bag.log:"
-      tail -3 "/tmp/follow_rec_$bag.log"
-      kill -INT "$rec" 2>/dev/null; kill -INT "$stat" 2>/dev/null
-      sleep 2; kill -KILL "$rec" 2>/dev/null
-      exit 1
-    fi
-    # The folder existing is not enough. On 2026-09-25 (stop_test_173211) the
-    # recorder took ~30 s to discover mavros's publishers: every /mavros/* topic
-    # in the bag started six seconds AFTER the event under test, while
-    # /odometry/filtered had been recording all along. Wait until the recorder
-    # has actually subscribed to the FCU topics the analysis depends on.
-    need="/mavros/rc/out /mavros/rc/in /mavros/local_position/velocity_body /mavros/setpoint_velocity/cmd_vel_unstamped"
-    ok=0
-    for _ in $(seq 1 90); do
-      missing=0
-      for tp in $need; do
-        grep -q "Subscribed to topic '$tp'" "/tmp/follow_rec_$bag.log" 2>/dev/null || missing=1
-      done
-      [ "$missing" -eq 0 ] && { ok=1; break; }
-      kill -0 "$rec" 2>/dev/null || break
-      sleep 0.5
-    done
-    if [ "$ok" -ne 1 ]; then
-      echo "RECORDER NOT SUBSCRIBED to the FCU topics after 45 s -- not enabling follow."
-      grep -o "Subscribed to topic '[^']*'" "/tmp/follow_rec_$bag.log" | tail -5
-      kill -INT "$rec" "$stat" 2>/dev/null; sleep 2; kill -KILL "$rec" 2>/dev/null
-      exit 1
-    fi
-    # Subscribed is not receiving. Confirm the FCU streams are actually flowing,
-    # then give the recorder a few seconds' head start before anything moves.
-    # Exit code, not grep: "NOT FLOWING" contains "FLOWING".
-    if ! python3 tools/fcu_flowing.py 3 2>/dev/null; then
-      echo "FCU telemetry is not flowing -- run python3 tools/preflight.py. Not enabling follow."
-      kill -INT "$rec" "$stat" 2>/dev/null; sleep 2; kill -KILL "$rec" 2>/dev/null
-      exit 1
-    fi
-    sleep 3
+    if ! echo "$g" | grep -q PASS; then
+    echo "$(date +%H:%M:%S) gate did not pass at slot $slot -- stopping this recording"
+    kill -INT "$rec" "$stat" 2>/dev/null; sleep 2; kill -KILL "$rec" 2>/dev/null
+    continue
+  fi
+  if true; then
     echo "$(date +%H:%M:%S) recording -> ~/dagger_bags/pf_${bag} (FCU telemetry flowing)"
     echo "$(date +%H:%M:%S) ENABLING FOLLOW for ${DURATION_S}s -- walk away slowly"
     set_follow true
