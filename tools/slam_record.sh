@@ -6,7 +6,10 @@
 # -> ~/dagger_bags/slam_<name>. Ctrl-C to stop.
 set -e
 name=${1:?usage: slam_record.sh <name> [clouds]}
-out=~/dagger_bags/slam_${name}
+# Timestamped: ros2 bag refuses an existing folder, and on 2026-09-26 a second
+# 'lane2' start was refused that way -- the drive that made the better map was
+# never recorded. The same trap was fixed in follow_solo.sh the day before.
+out=~/dagger_bags/slam_${name}_$(date +%H%M%S)
 topics="/scan /scan_band /scan_safety /odometry/filtered /mavros/imu/data_raw \
   /mavros/local_position/odom /mavros/gpsstatus/gps1/raw /mavros/global_position/global \
   /gps/heading_imu /tf /tf_static /slam/map /slam/pose"
