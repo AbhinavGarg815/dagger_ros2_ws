@@ -18,6 +18,7 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
+from launch.conditions import UnlessCondition
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
@@ -45,4 +46,13 @@ def generate_launch_description():
         remappings=[("map", "/slam/map"), ("map_metadata", "/slam/map_metadata"),
                     ("pose", "/slam/pose")],
     )
-    return LaunchDescription([publish_tf_arg, slam])
+    # Shadow mode only: slam_map as the root of its own tiny TF tree (never
+    # touching odom), so Foxglove can use it as a display frame.
+    viewer_tf = Node(
+        package="dagger_bringup",
+        executable="slam_pose_tf",
+        name="slam_pose_tf",
+        output="screen",
+        condition=UnlessCondition(publish_tf),
+    )
+    return LaunchDescription([publish_tf_arg, slam, viewer_tf])
