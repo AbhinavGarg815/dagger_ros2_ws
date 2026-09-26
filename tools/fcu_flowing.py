@@ -31,10 +31,18 @@ def main():
     for topic, (typ, _) in NEED.items():
         n.create_subscription(typ, topic, lambda m, k=topic: got.__setitem__(k, got[k] + 1),
                               qos_profile_sensor_data)
-    # let discovery settle, then count over a clean window
-    end = time.time() + 2.0
-    while time.time() < end:
+    # Wait for the FIRST message on every topic, not a fixed delay: a fresh
+    # process takes ~6 s to discover mavros's publishers (measured 2026-09-26;
+    # /mavros/state 8.5 s). The first version waited 2 s and then counted for 3,
+    # so it listened entirely inside that dead window and reported healthy
+    # telemetry as NOT FLOWING -- blocking a test on a false alarm.
+    end = time.time() + 20.0
+    while time.time() < end and not all(got.values()):
         rclpy.spin_once(n, timeout_sec=0.05)
+    silent = [k for k in NEED if not got[k]]
+    if silent:
+        print("FCU telemetry NOT FLOWING: no message at all in 20 s on " + ", ".join(silent))
+        n.destroy_node(); rclpy.shutdown(); sys.exit(1)
     for k in got:
         got[k] = 0
     end = time.time() + window

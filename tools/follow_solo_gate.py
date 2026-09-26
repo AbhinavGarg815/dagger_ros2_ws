@@ -54,7 +54,9 @@ def main():
     # couple of seconds, so a flat 3 s window sometimes catches NOTHING and the
     # gate reports "not armed+GUIDED (mode=?, armed=?)" on a rover that is armed
     # and in GUIDED. Wait specifically for a state message, then sample the rest.
-    end = time.time() + 10.0
+    # 20 s, not 10: a fresh process took 8.5 s to receive its first State
+    # (2026-09-26), leaving 10 s with almost no margin.
+    end = time.time() + 20.0
     while time.time() < end and "st" not in s:
         rclpy.spin_once(n, timeout_sec=0.05)
     end = time.time() + 3.0
@@ -64,7 +66,7 @@ def main():
     fail = []
     st = s.get("st")
     if not st:
-        fail.append("no /mavros/state after 10 s -- mavros discovery, not the FCU")
+        fail.append("no /mavros/state after 20 s -- mavros discovery, not the FCU")
     elif not st.armed or st.mode != "GUIDED":
         fail.append(f"not armed+GUIDED (mode={st.mode}, armed={st.armed})")
 
