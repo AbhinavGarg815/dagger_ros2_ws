@@ -27,7 +27,7 @@ python3 "$ws/tools/tf_filter.py" > "$out/tf_filter.log" 2>&1 & pids=($!)
 /opt/ros/humble/lib/slam_toolbox/localization_slam_toolbox_node --ros-args -r __node:=slam_toolbox \
   --params-file "$share/params/slam_toolbox.yaml" \
   -p mode:=localization -p map_frame:=map -p transform_publish_period:=0.05 \
-  -p map_file_name:="$base" -p map_start_at_dock:=true -p use_sim_time:=true \
+  -p map_file_name:="$base" -p use_sim_time:=true \
   -r map:=/slam/map -r map_metadata:=/slam/map_metadata -r pose:=/slam/pose \
   > "$out/slam.log" 2>&1 & pids+=($!)
 python3 "$ws/tools/slam_replay_eval.py" --log "$out/poses.csv" > "$out/logger.log" 2>&1 & pids+=($!)

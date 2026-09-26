@@ -16,8 +16,8 @@ LOCALIZATION: localizes on the saved pose graph maps/<map>.posegraph and OWNS
 map->odom. T2 must then run with map_source:=slam (no gps_map_odom) -- odom can
 have only one parent. The start pose: GNSS (through maps/<map>_geo.yaml) narrows a scan-to-map
 search on maps/<map>.pgm, and the winner goes to /initialpose (slam_geo_init);
-Foxglove's pose-estimate tool can override it. Until then the map is loaded at
-the mapping start point. /slam/localized says when the scan fits the map.
+Foxglove's pose-estimate tool can override it. Until then SLAM sits at the map
+origin (the localization node does not support starting at the dock). /slam/localized says when the scan fits the map.
 """
 import os
 
@@ -60,8 +60,7 @@ def setup(context):
              name="slam_toolbox", output="screen", remappings=remaps,
              parameters=[params, {"mode": "localization", "map_frame": "map",
                                   "transform_publish_period": 0.05,
-                                  "map_file_name": base,
-                                  "map_start_at_dock": True}]),
+                                  "map_file_name": base}]),
         Node(package="dagger_bringup", executable="slam_geo_init",
              name="slam_geo_init", output="screen",
              parameters=[{"geo_file": base + "_geo.yaml", "map_yaml": base + ".yaml"}]),

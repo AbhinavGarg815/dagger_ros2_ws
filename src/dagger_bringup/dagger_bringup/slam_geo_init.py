@@ -18,8 +18,8 @@ SEED (once, at startup):
   - publish it on /initialpose. Rejected -> retry on a newer scan; after a few
     rejections, say so: set the pose with Foxglove's pose-estimate tool (which
     publishes /initialpose too -- seen here, auto-seeding then stops).
-HEALTH (continuously): the score of the latest scan at SLAM's pose (TF map ->
-base_footprint) on /slam/match_score; /slam/localized (latched Bool) is true
+HEALTH (continuously): the score of the scan SLAM last processed, at the pose
+SLAM gave it (/slam/pose carries that scan's stamp), on /slam/match_score; /slam/localized (latched Bool) is true
 after `ok_count` checks <= ok_score, false again after `lost_count` checks >=
 lost_score. Scores: ~0.05-0.10 m locked, ~0.7-1.0 m wrong place.
 Also /slam/gnss_pose: GNSS converted into the map, for comparison in Foxglove.
@@ -27,6 +27,7 @@ Also /slam/gnss_pose: GNSS converted into the map, for comparison in Foxglove.
 offset_x / offset_y shift the GNSS centre of the search on purpose (offline
 tests). Leave them 0 on the rover.
 """
+import collections
 import math
 
 import rclpy
@@ -34,14 +35,11 @@ import yaml
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
 from mavros_msgs.msg import GPSRAW
 from nav_msgs.msg import Odometry
-from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
-from rclpy.time import Time
 from sensor_msgs.msg import Imu, LaserScan, NavSatFix
 from std_msgs.msg import Bool, Float32
-from tf2_ros import Buffer, TransformListener
 
 from dagger_bringup.scan_map_match import MapMatcher, scan_points
 
@@ -69,7 +67,6 @@ class SlamGeoInit(Node):
         self.declare_parameter("geo_file", "")
         self.declare_parameter("map_yaml", "")
         self.declare_parameter("map_frame", "map")
-        self.declare_parameter("base_frame", "base_footprint")
         self.declare_parameter("samples", 10)
         self.declare_parameter("max_h_acc_m", 6.0)
         self.declare_parameter("max_speed", 0.05)
@@ -95,7 +92,7 @@ class SlamGeoInit(Node):
         self.tx, self.ty = geo["tx"], geo["ty"]
         self.kx, self.ky = enu_scale(self.lat0)
         self.matcher = MapMatcher(g("map_yaml"))
-        self.frame, self.base = g("map_frame"), g("base_frame")
+        self.frame = g("map_frame")
         self.samples = int(g("samples"))
         self.max_h_acc, self.max_speed = g("max_h_acc_m"), g("max_speed")
         self.heading_timeout = g("heading_timeout")
@@ -111,6 +108,8 @@ class SlamGeoInit(Node):
         self.speed = None
         self.heading = None        # (time, ENU yaw)
         self.scan = None
+        self.scans = collections.deque(maxlen=40)   # ~4 s, to find the one /slam/pose used
+        self.slam_pose = None
         self.buf = []              # still, good GNSS samples as map (x, y, yaw)
         self.seeded = False
         self.next_try = 0.0
@@ -118,8 +117,8 @@ class SlamGeoInit(Node):
         self.localized = None
         self.good = self.bad = 0
 
-        self.tf = Buffer(cache_time=Duration(seconds=10))
-        TransformListener(self.tf, self)
+        # No TF listener: in Python it decodes every /tf message (~25 % CPU on the
+        # Orin, measured live 2026-09-26) for a check that runs every 2 s.
         sensor = qos_profile_sensor_data   # mavros is best effort
         self.create_subscription(NavSatFix, "/mavros/global_position/global", self.on_fix, sensor)
         self.create_subscription(Imu, "/gps/heading_imu", self.on_heading, sensor)
@@ -127,6 +126,7 @@ class SlamGeoInit(Node):
         self.create_subscription(Odometry, "/odometry/filtered", self.on_odom, sensor)
         self.create_subscription(LaserScan, "/scan", self.on_scan, sensor)
         self.create_subscription(PoseWithCovarianceStamped, "/initialpose", self.on_initialpose, 10)
+        self.create_subscription(PoseWithCovarianceStamped, "/slam/pose", self.on_slam_pose, 10)
         self.init_pub = self.create_publisher(PoseWithCovarianceStamped, "/initialpose", 10)
         self.gnss_pub = self.create_publisher(PoseStamped, "/slam/gnss_pose", 10)
         self.score_pub = self.create_publisher(Float32, "/slam/match_score", 10)
@@ -167,6 +167,10 @@ class SlamGeoInit(Node):
 
     def on_scan(self, m):
         self.scan = m
+        self.scans.append(m)
+
+    def on_slam_pose(self, m):
+        self.slam_pose = m
 
     def on_initialpose(self, m):
         if not self.seeded:   # someone else (Foxglove) set the pose: stop auto-seeding
@@ -241,15 +245,16 @@ class SlamGeoInit(Node):
 
     # ---- health ----
     def check_health(self):
-        if not self.seeded or self.scan is None:
+        if not self.seeded or self.slam_pose is None or not self.scans:
             return
-        try:
-            t = self.tf.lookup_transform(self.frame, self.base, Time.from_msg(self.scan.header.stamp))
-        except Exception:
-            return
-        q = t.transform.rotation
-        score = self.matcher.score(scan_points(self.scan), t.transform.translation.x,
-                                   t.transform.translation.y, yaw_of(q))
+        stamp = lambda h: h.stamp.sec + h.stamp.nanosec * 1e-9  # noqa: E731
+        ts = stamp(self.slam_pose.header)
+        scan = min(self.scans, key=lambda sc: abs(stamp(sc.header) - ts))
+        if abs(stamp(scan.header) - ts) > 0.06:
+            return   # that scan already left the buffer (or /slam/pose is stale)
+        p = self.slam_pose.pose.pose
+        score = self.matcher.score(scan_points(scan), p.position.x, p.position.y,
+                                   yaw_of(p.orientation))
         self.score_pub.publish(Float32(data=score))
         self.good = self.good + 1 if score <= self.ok_score else 0
         self.bad = self.bad + 1 if score >= self.lost_score else 0
