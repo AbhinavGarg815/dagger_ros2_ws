@@ -40,6 +40,12 @@ def generate_launch_description():
         ["'/patchworkpp/nonground' if '", ground_seg, "' == 'true' else '/rslidar_points'"])
     costmap_min_height = PythonExpression(
         ["0.12 if '", ground_seg, "' == 'true' else 0.35"])
+    # The low-obstacle layer's inputs. With ground_seg:=false the low band is
+    # made empty (floor above ceiling) rather than taken from the raw cloud,
+    # where it would be full of ground ring; the layer then stays current and
+    # empty instead of going stale and stopping Nav2.
+    low_min_height = PythonExpression(["0.12 if '", ground_seg, "' == 'true' else 9.0"])
+    low_max_height = PythonExpression(["0.35 if '", ground_seg, "' == 'true' else 8.0"])
     autostart_arg = DeclareLaunchArgument("autostart", default_value="true")
 
     nav2_params = [params_file, extra_params]
@@ -169,6 +175,49 @@ def generate_launch_description():
         }],
     )
 
+    # ---- Low-obstacle memory (costmap low_obstacle_layer) -----------------------
+    # Two scans from the same cloud: everything 12-35 cm, and everything tall
+    # (40-160 cm). low_scan_filter keeps only bearings where something is low and
+    # NOT tall, so people and walls stay out of the remembering layer.
+    def p2l_band_node(name, scan, lo, hi):
+        return Node(
+            package="pointcloud_to_laserscan",
+            executable="pointcloud_to_laserscan_node",
+            name=name,
+            output="screen",
+            respawn=True,
+            respawn_delay=1.0,
+            remappings=[("cloud_in", costmap_cloud), ("scan", scan)],
+            parameters=[{
+                "target_frame": "base_footprint",
+                "transform_tolerance": 0.1,
+                "min_height": lo,
+                "max_height": hi,
+                # identical geometry in both: the filter pairs them ray by ray
+                "angle_min": -3.14159,
+                "angle_max": 3.14159,
+                "angle_increment": 0.0087,
+                "scan_time": 0.1,
+                "range_min": 0.5,
+                "range_max": 30.0,
+                "use_inf": True,
+                "inf_epsilon": 1.0,
+                "use_sim_time": use_sim_time,
+            }],
+        )
+
+    p2l_low_all = p2l_band_node("p2l_low_all", "/scan_low_all", low_min_height, low_max_height)
+    p2l_tall = p2l_band_node("p2l_tall", "/scan_tall", 0.40, 1.60)
+    low_scan_filter = Node(
+        package="dagger_bringup",
+        executable="low_scan_filter",
+        name="low_scan_filter",
+        output="screen",
+        respawn=True,
+        respawn_delay=1.0,
+        parameters=[{"use_sim_time": use_sim_time}],
+    )
+
     # Permanent /scan subscriber (prevents the p2l lazy-subscribe flap) + restarts
     # p2l if /scan goes silent while clouds still arrive.
     scan_watchdog = Node(
@@ -296,6 +345,9 @@ def generate_launch_description():
         ground_seg_arg,
         patchworkpp,
         p2l_band,
+        p2l_low_all,
+        p2l_tall,
+        low_scan_filter,
         pointcloud_to_laserscan,
         scan_watchdog,
         p2l_safety,
