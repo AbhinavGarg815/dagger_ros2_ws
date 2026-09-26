@@ -24,7 +24,7 @@ import tf2_ros
 
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Imu, PointCloud2, LaserScan
-from std_msgs.msg import Float64
+from std_msgs.msg import Bool, Float32, Float64
 from mavros_msgs.msg import GPSRAW, State, RCOut, RCIn
 from mavros_msgs.srv import CommandLong
 from rcl_interfaces.srv import GetParameters, SetParameters
@@ -72,6 +72,15 @@ class Preflight(Node):
                         history=HistoryPolicy.KEEP_LAST, depth=50)
         for topic, typ, _, raw in TOPICS:
             self.create_subscription(typ, topic, self._mk_cb(topic, raw), be, raw=raw)
+        # SLAM localization health (slam_geo_init; latched)
+        self.slam_localized = None
+        self.slam_score = None
+        latched = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, depth=1,
+                             durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.create_subscription(Bool, "/slam/localized",
+                                 lambda m: setattr(self, "slam_localized", m.data), latched)
+        self.create_subscription(Float32, "/slam/match_score",
+                                 lambda m: setattr(self, "slam_score", m.data), 10)
         self.tf_buf = tf2_ros.Buffer(cache_time=Duration(seconds=10))
         self.tf_lis = tf2_ros.TransformListener(self.tf_buf, self)
 
@@ -134,6 +143,22 @@ class Preflight(Node):
             ok &= good
             print(f"  [{'OK' if good else 'FAIL'}] SET_MESSAGE_INTERVAL msg {msg_id} -> {hz:g} Hz")
         return ok
+
+    def map_owners(self):
+        """Who publishes map->odom: gps_map_odom, and/or slam_toolbox when it runs
+        with transform_publish_period > 0 (localization; shadow mapping uses 0)."""
+        names = set(self.get_node_names())
+        owners = []
+        if "gps_map_odom" in names:
+            owners.append("gps_map_odom")
+        if "slam_toolbox" in names:
+            r = self.call(self.create_client(GetParameters, "/slam_toolbox/get_parameters"),
+                          GetParameters.Request(names=["transform_publish_period", "mode"]), 3.0)
+            period = r.values[0].double_value if r and r.values else None
+            mode = r.values[1].string_value if r and len(r.values) > 1 else "?"
+            if period is None or period > 0.0:
+                owners.append(f"slam_toolbox ({mode})")
+        return owners
 
     def lifecycle(self):
         out = {}
@@ -244,6 +269,29 @@ def main():
             print(f"  pose @ ({mx:.2f}, {my:.2f}) yaw {math.degrees(yaws[-1]):.1f} deg")
             print(f"  IF STATIONARY -> position noise: 1-sigma {sd:.3f} m, span {span:.3f} m; "
                   f"yaw span {yspan:.2f} deg over {a.sample:g} s")
+
+        # odom must have exactly ONE parent: gps_map_odom (T2 map_source:=gps) or
+        # slam_toolbox localization (T5 mode:=localization + T2 map_source:=slam).
+        print("== map->odom")
+        owners = n.map_owners()
+        good = len(owners) == 1
+        print(f"  [{'OK' if good else 'FAIL'}] owner: {', '.join(owners) or 'NONE'}"
+              + ("" if good else "  <-- need exactly one"))
+        if not good:
+            fails.append("map-owner")
+        try:
+            n.tf_buf.lookup_transform("map", "base_footprint", Time())
+            print("  [OK] map->base_footprint")
+        except Exception as e:  # noqa: BLE001
+            fails.append("tf-map")
+            print(f"  [FAIL] map->base_footprint: {e}")
+        if any(o.startswith("slam_toolbox") for o in owners):
+            good = n.slam_localized is True
+            score = f"{n.slam_score:.3f} m" if n.slam_score is not None else "none"
+            print(f"  [{'OK' if good else 'FAIL'}] SLAM localized={n.slam_localized} "
+                  f"(scan-to-map score {score}; locked ~0.03-0.10, lost >= 0.35)")
+            if not good:
+                fails.append("slam-localized")
 
         print("== Nav2 lifecycle")
         for node, label in n.lifecycle().items():

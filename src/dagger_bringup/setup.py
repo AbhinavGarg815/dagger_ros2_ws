@@ -41,6 +41,7 @@ setup(
             "follow_controller = dagger_bringup.follow_controller:main",
             "low_scan_filter = dagger_bringup.low_scan_filter:main",
             "slam_pose_tf = dagger_bringup.slam_pose_tf:main",
+            "slam_geo_init = dagger_bringup.slam_geo_init:main",
         ],
     },
 )

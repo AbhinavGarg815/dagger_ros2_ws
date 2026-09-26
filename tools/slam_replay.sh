@@ -6,7 +6,7 @@
 # touched. Plays only /scan /tf /tf_static at 1x (async slam drops scans when it
 # is slow, so replaying faster would not be faithful). Writes to
 # ~/dagger_bags/replay/<label>/: poses.csv (every /slam/pose), map.{pgm,yaml},
-# cpu.txt. Compare runs with tools/slam_replay_eval.py.
+# graph.{posegraph,data} (loadable for localization), cpu.txt. Compare runs with tools/slam_replay_eval.py.
 set -e
 bag=${1:?usage: slam_replay.sh <bag> <label> [param:=value ...]}
 label=${2:?usage: slam_replay.sh <bag> <label> [param:=value ...]}
@@ -43,6 +43,8 @@ el=$(awk -v s="$(awk '{print $22}' /proc/$slam_pid/stat)" -v t="$ticks" \
 awk -v u="$ut" -v s="$st" -v t="$ticks" -v e="$el" \
   'BEGIN{printf "slam_toolbox cpu %.1f s over %.0f s wall = %.1f %%\n", (u+s)/t, e, 100*(u+s)/t/e}' | tee "$out/cpu.txt"
 
+timeout 20 ros2 service call /slam_toolbox/serialize_map slam_toolbox/srv/SerializePoseGraph \
+  "{filename: '$out/graph'}" > "$out/serialize.log" 2>&1 || true
 timeout 20 ros2 run nav2_map_server map_saver_cli -t /slam/map -f "$out/map" \
   --ros-args -p map_subscribe_transient_local:=true -p use_sim_time:=true > "$out/saver.log" 2>&1 || true
 kill -INT $log_pid $slam_pid 2>/dev/null || true

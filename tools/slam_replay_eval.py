@@ -41,11 +41,37 @@ def log(path):
         f.flush()
 
     node.create_subscription(PoseWithCovarianceStamped, "/slam/pose", cb, 50)
+
+    # localization replays: also log GNSS converted into the map (slam_geo_init)
+    from geometry_msgs.msg import PoseStamped
+    g = open(path.replace("poses.csv", "gnss.csv"), "w", newline="")
+    gw = csv.writer(g)
+    gw.writerow(["stamp", "x", "y", "yaw"])
+
+    def gcb(m):
+        s = m.header.stamp.sec + m.header.stamp.nanosec * 1e-9
+        gw.writerow([f"{s:.3f}", m.pose.position.x, m.pose.position.y, yaw_of(m.pose.orientation)])
+        g.flush()
+
+    node.create_subscription(PoseStamped, "/slam/gnss_pose", gcb, 50)
+
+    from std_msgs.msg import Float32
+    h = open(path.replace("poses.csv", "score.csv"), "w", newline="")
+    hw = csv.writer(h)
+    hw.writerow(["stamp", "score"])
+
+    def hcb(m):
+        hw.writerow([f"{node.get_clock().now().nanoseconds * 1e-9:.3f}", f"{m.data:.4f}"])
+        h.flush()
+
+    node.create_subscription(Float32, "/slam/match_score", hcb, 50)
     try:
         rclpy.spin(node)
     except (KeyboardInterrupt, Exception):
         pass
     f.close()
+    g.close()
+    h.close()
 
 
 def read_odom(bag):
@@ -100,14 +126,54 @@ def score(od, label):
         print(f"{'':>12}gap {g:4.1f}s at t={a - od[0][0]:5.1f}s: moved {net:.2f} m, turned {rot:+.0f} deg")
 
 
+def score_loc(label):
+    """Localization replay: SLAM pose vs GNSS-in-map after the seed, and jumps."""
+    base = os.path.expanduser(f"~/dagger_bags/replay/{label}")
+
+    def rows(name):
+        with open(os.path.join(base, name)) as f:
+            return [tuple(float(v) for v in r) for r in list(csv.reader(f))[1:]]
+    sl, gn = rows("poses.csv"), rows("gnss.csv")
+    geo = open(os.path.join(base, "geo.log")).read()
+    seeded, localized = "seeded" in geo, "localized" in geo
+    if len(sl) < 2 or not gn:
+        print(f"{label:>12}: {len(sl)} SLAM poses, {len(gn)} GNSS -- nothing to score "
+              f"(seeded={seeded})")
+        return
+    gts = [g[0] for g in gn]
+    d = []
+    for p in sl:
+        i = bisect.bisect_left(gts, p[0])
+        j = min((k for k in (i - 1, i) if 0 <= k < len(gn)), key=lambda k: abs(gts[k] - p[0]))
+        if abs(gts[j] - p[0]) < 0.5:
+            d.append(math.hypot(p[1] - gn[j][1], p[2] - gn[j][2]))
+    steps = [(math.hypot(b[1] - a[1], b[2] - a[2]), b[0] - a[0], b[0] - sl[0][0])
+             for a, b in zip(sl, sl[1:])]
+    big = max(steps)
+    ds = sorted(d)
+    sc = [r[1] for r in rows("score.csv")] if os.path.exists(os.path.join(base, "score.csv")) else []
+    if sc:
+        ss = sorted(sc)
+        print(f"{'':>14}match score (m): median {ss[len(ss) // 2]:.3f}, max {ss[-1]:.3f}, "
+              f"{sum(v > 0.35 for v in sc)}/{len(sc)} checks >= 0.35")
+    print(f"{label:>12}: {len(sl)} SLAM poses, seeded={seeded} localized={localized} | "
+          f"SLAM-GNSS median {ds[len(ds) // 2]:.2f} m, p90 {ds[int(0.9 * (len(ds) - 1))]:.2f} m, "
+          f"max {ds[-1]:.2f} m | biggest pose step {big[0]:.2f} m in {big[1]:.1f} s at +{big[2]:.0f} s")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--log")
+    ap.add_argument("--loc", nargs="+", metavar="LABEL", help="score localization replays")
     ap.add_argument("bag", nargs="?")
     ap.add_argument("labels", nargs="*")
     a = ap.parse_args()
     if a.log:
         log(a.log)
+        return
+    if a.loc:
+        for label in a.loc:
+            score_loc(label)
         return
     if not a.bag or not a.labels:
         ap.error("need <bag> <label> ...")
