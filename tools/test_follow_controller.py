@@ -79,6 +79,16 @@ r_after = phase("  ...after search", 7.0)
 r_noauto = phase("target back, NOT re-enabled", 2.0, 4.5)
 enable()
 r_reen = phase("after explicit re-enable", 3.0, 4.5)
+# bearing dithering across the 5 deg threshold: 4.5 / 5.5 / 4.5 / ...
+cmds.clear()
+for k in range(60):
+    p = PoseStamped(); p.header.frame_id = "base_footprint"
+    p.header.stamp = n.get_clock().now().to_msg()
+    p.pose.position.x, p.pose.position.y = pol(4.5, 5.5 if k % 2 else 4.5)
+    tgt.publish(p); spin(0.05)
+ws = [abs(c.angular.z) > 1e-3 for c in cmds]
+toggles = sum(1 for a, b in zip(ws, ws[1:]) if a != b)
+print(f"  {'bearing dithering 4.5/5.5 deg':44s} -> yaw on/off toggles: {toggles}")
 r_id1 = phase("following track 7", 2.0, 4.5, 0.0, track=7)
 r_id2 = phase("track id changes to 8", 2.0, 4.5, 0.0, track=8)
 r_id2b = phase("  ...still track 8", 2.0, 4.5, 0.0, track=8)
@@ -95,6 +105,7 @@ checks = [
     ("stops commanding once the search expires", r_after is None or r_after[1] < 1e-6),
     ("does not resume on its own", r_noauto is None),
     ("resumes after explicit re-enable", r_reen and r_reen[1] > 0.05),
+    ("no yaw chatter when bearing dithers across 5 deg", toggles <= 2),
     ("DISABLES when the track id changes (different person)",
      r_id2b is None or (r_id2b[1] < 1e-6 and abs(r_id2b[3]) < 1e-6)),
 ]

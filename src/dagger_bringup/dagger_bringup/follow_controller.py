@@ -61,6 +61,11 @@ class FollowController(Node):
         self.declare_parameter("kp_angular", 0.9)
         self.declare_parameter("max_angular", 0.5)
         self.declare_parameter("bearing_deadband_deg", 5.0)
+        # Hysteresis on that deadband: start turning above 5 deg, stop only below
+        # 3 deg. With the median bearing sitting at 4.3 deg while following
+        # (2026-09-25), a single threshold plus the 0.15 rad/s stiction floor
+        # made the yaw command toggle 0 <-> 0.15 whenever the reading crossed 5.
+        self.declare_parameter("bearing_release_deg", 3.0)
         # Below ~0.15 rad/s the tracks do not break stiction and the commanded
         # rate mostly does not happen (measured: actual/commanded 0.12 at
         # 0.02 rad/s). Asking for less than this just winds up the FCU
@@ -109,6 +114,8 @@ class FollowController(Node):
         self.kp_ang = float(g("kp_angular"))
         self.w_max = float(g("max_angular"))
         self.b_dead = math.radians(float(g("bearing_deadband_deg")))
+        self.b_release = math.radians(float(g("bearing_release_deg")))
+        self.turning = False
         self.w_min = float(g("min_effective_angular"))
         self.turn_scale = float(g("turn_speed_scale"))
         self.max_drive_bearing = math.radians(float(g("max_drive_bearing_deg")))
@@ -276,7 +283,11 @@ class FollowController(Node):
                   else (err - math.copysign(self.dead, err)) / self.close_time)
         v_want = max(0.0, min(self.v_max, v_want))      # never reverse
 
-        if abs(bearing) < self.b_dead:
+        if self.turning:
+            self.turning = abs(bearing) >= self.b_release
+        else:
+            self.turning = abs(bearing) >= self.b_dead
+        if not self.turning:
             w = 0.0
         else:
             w = self.kp_ang * bearing
