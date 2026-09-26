@@ -3,7 +3,7 @@
 #   bash tools/slam_record.sh <name>            # 2D: scans, odom, TF (~small)
 #   bash tools/slam_record.sh <name> clouds     # + raw /rslidar_points for 3D SLAM work
 #                                                 (~8 MB/s: 5 min is ~2.4 GB)
-# -> ~/dagger_bags/slam_<name>. Ctrl-C to stop.
+# -> ~/dagger_bags/slam_<name>_<HHMMSS>. Ctrl-C to stop.
 set -e
 name=${1:?usage: slam_record.sh <name> [clouds]}
 # Timestamped: ros2 bag refuses an existing folder, and on 2026-09-26 a second
