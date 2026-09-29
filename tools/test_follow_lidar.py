@@ -21,6 +21,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from geometry_msgs.msg import PoseStamped, TransformStamped, Twist
+from nav_msgs.msg import Odometry
 from sensor_msgs.msg import CameraInfo, LaserScan
 from std_msgs.msg import Bool, Int32, String
 from rcl_interfaces.msg import Log
@@ -53,13 +54,20 @@ def tfm(par, ch, xyz, q):
     t.transform.translation.x, t.transform.translation.y, t.transform.translation.z = xyz
     t.transform.rotation.x, t.transform.rotation.y, t.transform.rotation.z, t.transform.rotation.w = q
     return t
-stb.sendTransform([tfm("odom", "base_footprint", (0., 0., 0.), (0., 0., 0., 1.)),
-                   tfm("base_footprint", "d435_color_optical_frame", tuple(CAM), q_from_R(R))])
+# Only the static camera transform on TF: target_selector reads odom<-base from
+# /odometry/filtered (no TF listener since 2026-09-29), published below at 20 Hz.
+stb.sendTransform([tfm("base_footprint", "d435_color_optical_frame", tuple(CAM), q_from_R(R))])
 be = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryPolicy.KEEP_LAST, depth=1)
 p_info = n.create_publisher(CameraInfo, "/d435/color/camera_info", be)
 p_scan = n.create_publisher(LaserScan, "/scan_safety", be)
 p_det = n.create_publisher(Detection2DArray, "/follow/detections", 10)
 p_en = n.create_publisher(Bool, "/follow/enable", 10)
+p_odom = n.create_publisher(Odometry, "/odometry/filtered", be)
+def pub_odom():   # rover parked at the odom origin, as the old static odom->base TF said
+    o = Odometry(); o.header.frame_id = "odom"; o.child_frame_id = "base_footprint"
+    o.header.stamp = n.get_clock().now().to_msg(); o.pose.pose.orientation.w = 1.0
+    p_odom.publish(o)
+n.create_timer(0.05, pub_odom)
 LOG = []
 n.create_subscription(PoseStamped, "/follow/target", lambda m: LOG.append(("tgt", time.time(), m.pose.position.x, m.pose.position.y)), be)
 n.create_subscription(String, "/follow/target_source", lambda m: LOG.append(("src", time.time(), m.data)), 10)

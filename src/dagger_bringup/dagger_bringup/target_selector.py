@@ -34,10 +34,12 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.duration import Duration
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, HistoryPolicy
 import tf2_ros
 
 from geometry_msgs.msg import PoseStamped
+from nav_msgs.msg import Odometry
+from tf2_msgs.msg import TFMessage
 from sensor_msgs.msg import CameraInfo, LaserScan
 from std_msgs.msg import Int32, String
 from vision_msgs.msg import Detection2DArray
@@ -101,6 +103,8 @@ class TargetSelector(Node):
         # every guard below exists to stop the track sliding onto something else.
         self.declare_parameter("lidar_track", True)
         self.declare_parameter("odom_frame", "odom")
+        self.declare_parameter("odom_topic", "/odometry/filtered")
+        self.declare_parameter("odom_timeout", 0.5)
         # How long the track may run on LiDAR alone before the camera must
         # reconfirm it. Past this it is treated as lost.
         self.declare_parameter("lidar_only_timeout", 5.0)
@@ -151,8 +155,17 @@ class TargetSelector(Node):
         self.stats = {"msgs": 0, "published": 0, "no_range": 0, "no_det": 0, "tf_fallback": 0,
                       "lidar": 0}
 
+        # No TransformListener: in Python it decodes every /tf message (a Python
+        # TF listener cost ~16-25 % CPU elsewhere, measured 2026-09-29). This node
+        # needs only base<-camera, which is STATIC (fixed URDF joint), and
+        # odom<-base, which is exactly /odometry/filtered.
         self.tf_buffer = tf2_ros.Buffer()
-        tf2_ros.TransformListener(self.tf_buffer, self)
+        self.create_subscription(
+            TFMessage, "/tf_static", self.on_tf_static,
+            QoSProfile(depth=100, reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        self.odom = None           # (tx, ty, yaw, monotonic receipt time)
+        self.odom_timeout = float(g("odom_timeout"))
 
         be = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
                         history=HistoryPolicy.KEEP_LAST, depth=1)
@@ -162,6 +175,7 @@ class TargetSelector(Node):
         self.source_pub = self.create_publisher(String, "/follow/target_source", 10)
         self.create_subscription(CameraInfo, g("camera_info_topic"), self.on_info, be)
         self.create_subscription(LaserScan, g("scan_topic"), self.on_scan, be)
+        self.create_subscription(Odometry, g("odom_topic"), self.on_odom, be)
         self.create_subscription(Detection2DArray, g("detections_topic"), self.on_dets, 10)
         self.create_timer(10.0, self.report)
 
@@ -176,6 +190,20 @@ class TargetSelector(Node):
                 f"intrinsics fx {self.K[0]:.1f} fy {self.K[1]:.1f} "
                 f"cx {self.K[2]:.1f} cy {self.K[3]:.1f} -> "
                 f"{math.degrees(2 * math.atan(msg.width / 2 / msg.k[0])):.1f} deg horizontal FOV")
+
+    def on_tf_static(self, msg):
+        for t in msg.transforms:
+            self.tf_buffer.set_transform_static(t, "tf_static")
+
+    def on_odom(self, msg):
+        if msg.header.frame_id != self.odom_frame or msg.child_frame_id != self.base_frame:
+            self.get_logger().warn(
+                f"odometry is {msg.header.frame_id}->{msg.child_frame_id}, expected "
+                f"{self.odom_frame}->{self.base_frame}; ignoring it", throttle_duration_sec=10.0)
+            return
+        p, q = msg.pose.pose.position, msg.pose.pose.orientation
+        yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+        self.odom = (p.x, p.y, yaw, time.monotonic())
 
     def on_scan(self, msg):
         self.scan = msg
@@ -229,19 +257,14 @@ class TargetSelector(Node):
         return float(np.median(px[body])), float(np.median(py[body]))
 
     def odom_T_base(self):
-        """(tx, ty, yaw) of base_frame in odom_frame, latest available."""
-        try:
-            tf = self.tf_buffer.lookup_transform(self.odom_frame, self.base_frame,
-                                                 rclpy.time.Time(),
-                                                 timeout=Duration(seconds=0.05))
-        except Exception as e:
-            self.get_logger().warn(f"no TF {self.odom_frame}<-{self.base_frame}: "
-                                   f"{str(e)[:60]} -- LiDAR tracking off this cycle",
-                                   throttle_duration_sec=5.0)
+        """(tx, ty, yaw) of base_frame in odom_frame from the latest odometry."""
+        if self.odom is None or time.monotonic() - self.odom[3] > self.odom_timeout:
+            self.get_logger().warn(
+                f"no fresh {self.odom_frame}<-{self.base_frame} odometry "
+                f"(timeout {self.odom_timeout}s) -- LiDAR tracking off this cycle",
+                throttle_duration_sec=5.0)
             return None
-        q = tf.transform.rotation
-        yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
-        return tf.transform.translation.x, tf.transform.translation.y, yaw
+        return self.odom[:3]
 
     @staticmethod
     def to_odom(T, x, y):
