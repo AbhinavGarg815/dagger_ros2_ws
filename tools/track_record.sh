@@ -12,6 +12,6 @@ out=~/dagger_bags/track_${name}_$(date +%H%M%S)
 mkdir -p ~/dagger_bags
 echo "recording -> $out   (Ctrl-C to stop)"
 exec ros2 bag record -s mcap -o "$out" \
-  /follow/detections /scan_safety /odometry/filtered /tf_static /d435/color/camera_info \
+  /follow/detections /follow/person_detections /follow/search_hint /scan_safety /odometry/filtered /tf_static /d435/color/camera_info \
   /follow/tracks /follow/select /follow/state /follow/target /follow/track_id \
   /follow/target_source /follow/ui/image/compressed
