@@ -93,8 +93,15 @@ class PersonTracker(Node):
         # --- tracker ---
         p("iou_min", 0.2)
         p("new_track_score", 0.5)
-        p("max_missed", 10)
+        p("max_missed", 20)                # camera frames a confirmed track survives unseen
         p("other_person_radius", 0.6)
+        # ID stability (person_tracking.Tracker): see there for each one's reason
+        p("high_score", 0.45)              # >= : may start tracks; below: only extend them
+        p("iou_strong", 0.4)
+        p("dispute_frames", 3)
+        p("dup_iou", 0.5)
+        p("min_hits", 3)
+        p("tentative_max_missed", 2)
         g = lambda n: self.get_parameter(n).value  # noqa: E731
 
         self.tracker = Tracker(
@@ -105,7 +112,10 @@ class PersonTracker(Node):
             min_track_points=int(g("min_track_points")),
             max_cluster_width=float(g("max_cluster_width")),
             min_range=float(g("min_range")), max_range=float(g("max_range")),
-            other_person_radius=float(g("other_person_radius")))
+            other_person_radius=float(g("other_person_radius")),
+            high_score=float(g("high_score")), iou_strong=float(g("iou_strong")),
+            dispute_frames=int(g("dispute_frames")), dup_iou=float(g("dup_iou")),
+            min_hits=int(g("min_hits")), tentative_max_missed=int(g("tentative_max_missed")))
         self.base_frame, self.odom_frame = g("base_frame"), g("odom_frame")
         self.rot = int(g("image_rotation_deg")) % 360
         self.publish_target = bool(g("publish_target"))
@@ -122,6 +132,7 @@ class PersonTracker(Node):
         self.scan, self.scan_time = None, 0.0
         self.odom = None                         # (tx, ty, yaw, monotonic receipt)
         self.last_state = None
+        self.pending_state, self.pending_n = None, 0
         self.last_refusal = None
         self.proc_ms, self.lag_ms = [], []
         self.stats = {"no_range": 0, "held": 0, "targets": 0}
@@ -293,11 +304,17 @@ class PersonTracker(Node):
         self.tracks_pub.publish(out)
 
     def log_changes(self, state):
-        if state != self.last_state:
+        # Debounce: a state is logged once it has held for 3 frames (LOST/NONE at
+        # once) -- the live log flapped TRACKING/HOLD every 100-300 ms.
+        if state == self.pending_state:
+            self.pending_n += 1
+        else:
+            self.pending_state, self.pending_n = state, 1
+        if state != self.last_state and (self.pending_n >= 3 or state in ("LOST", "NONE")):
             sid = self.tracker.selected_id
             msgs = {"TRACKING": f"person #{sid}: camera has them",
-                    "HOLD_LIDAR": f"person #{sid}: out of camera view -- holding on the LiDAR",
-                    "COASTING": f"person #{sid}: not seen this frame",
+                    "HOLD_LIDAR": f"person #{sid}: camera lost them -- holding on the LiDAR",
+                    "COASTING": f"person #{sid}: not seen for 3+ frames",
                     "LOST": f"person #{sid} LOST"
                             + (f" (LiDAR hold refused: {self.tracker.hold_refusal})"
                                if self.tracker.hold_refusal else "")

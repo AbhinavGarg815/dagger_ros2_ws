@@ -133,11 +133,13 @@ class Detection:
 
 
 class Track:
-    __slots__ = ("id", "box", "vbox", "score", "visible", "age", "missed",
+    __slots__ = ("id", "box", "vbox", "score", "visible", "age", "missed", "hits", "disputes",
                  "pos", "vel", "t_pos", "t_cam", "held", "bearing", "range")
 
-    def __init__(self, tid, det, now):
-        self.id = tid
+    def __init__(self, det, now):
+        self.id = None                  # public id, given on confirmation (min_hits)
+        self.hits = 1                   # camera matches so far
+        self.disputes = 0               # consecutive matches whose LiDAR range disagreed
         self.box = det.box.copy()
         self.vbox = np.zeros(4)         # box change per frame
         self.score = det.score
@@ -164,10 +166,11 @@ class Track:
 
 class Tracker:
 
-    def __init__(self, iou_min=0.2, new_track_score=0.5, max_missed=10, vel_gain=0.5,
+    def __init__(self, iou_min=0.2, new_track_score=0.5, max_missed=20, vel_gain=0.5,
                  track_gate=0.6, max_person_speed=1.8, lidar_only_timeout=5.0,
                  min_track_points=3, max_cluster_width=0.9, min_range=1.0, max_range=15.0,
-                 other_person_radius=0.6):
+                 other_person_radius=0.6, high_score=0.45, iou_strong=0.4, dispute_frames=3,
+                 dup_iou=0.5, min_hits=3, tentative_max_missed=2):
         self.iou_min = iou_min                  # without positions, below this is not the same person
         self.new_track_score = new_track_score  # weaker detections only extend tracks
         self.max_missed = max_missed            # camera frames a track survives unseen
@@ -180,6 +183,22 @@ class Tracker:
         self.min_range, self.max_range = min_range, max_range
         # a hold cluster within this of another person's fresh position is theirs
         self.other_person_radius = other_person_radius
+        # --- ID stability (live 2026-09-29: 25 ids in 100 s for 1-3 people) ---
+        # Two-stage matching (ByteTrack): detections >= high_score first; weaker
+        # ones (side-on / back views score lower) may then only EXTEND tracks.
+        self.high_score = high_score
+        # A match the LiDAR range contradicts (range_at flipped to legs, background,
+        # a pole) is still the same person if the boxes overlap this much: keep the
+        # id, ignore that range; re-anchor to it only after dispute_frames in a row.
+        self.iou_strong, self.dispute_frames = iou_strong, dispute_frames
+        # An unmatched detection overlapping a track this much is a duplicate,
+        # not a new person.
+        self.dup_iou = dup_iou
+        # two detections whose LiDAR positions are closer than this got ONE cluster
+        self.same_cluster = 0.35
+        # New tracks are TENTATIVE (no id, not shown, not clickable) until matched
+        # min_hits times; a tentative one dies after tentative_max_missed misses.
+        self.min_hits, self.tentative_max_missed = min_hits, tentative_max_missed
         self.tracks = []
         self.next_id = 1
         self.selected_id = -1
@@ -189,7 +208,7 @@ class Tracker:
     # ---- operator ----
     def select(self, tid):
         """Select an EXISTING track. Returns False (and changes nothing) otherwise."""
-        if any(t.id == tid for t in self.tracks):
+        if any(t.id == tid for t in self.tracks if t.id is not None):
             self.selected_id, self.selected_lost = int(tid), False
             return True
         return False
@@ -199,9 +218,13 @@ class Tracker:
 
     def selected(self):
         for t in self.tracks:
-            if t.id == self.selected_id:
+            if t.id is not None and t.id == self.selected_id:
                 return t
         return None
+
+    def confirmed(self):
+        """Tracks with a public id (what the UI shows and the operator can click)."""
+        return [t for t in self.tracks if t.id is not None]
 
     def state(self):
         if self.selected_id < 0:
@@ -225,55 +248,72 @@ class Tracker:
         dets: [Detection]; now: seconds (monotonic); T: odom<-base (tx, ty, yaw) or
         None (no odometry -> image-only association); scan: (px, py) base-frame
         LiDAR points or None (no LiDAR hold).
-        Returns (tracks, target) where target is (x, y, source) in base_footprint
-        for the selected person, or None.
+        Returns (confirmed tracks, target) where target is (x, y, source) in
+        base_footprint for the selected person, or None.
         """
+        # One LiDAR cluster cannot be two people. range_at takes the NEAREST
+        # cluster in a box's direction, so a person partly behind another gets the
+        # front person's range. Where two detections got (nearly) the same position,
+        # the larger box -- the nearer person -- keeps it; the other is unranged.
+        # (scene test 2026-09-29: A walking behind B was re-anchored onto B.)
+        for a_ in range(len(dets)):
+            for b_ in range(a_ + 1, len(dets)):
+                da, db = dets[a_], dets[b_]
+                if da.xy is not None and db.xy is not None and \
+                        math.hypot(da.xy[0] - db.xy[0], da.xy[1] - db.xy[1]) < self.same_cluster:
+                    ha, hb = da.box[3] - da.box[1], db.box[3] - db.box[1]
+                    (db if ha >= hb else da).xy = None
         det_o = [to_odom(T, *d.xy) if (T is not None and d.xy is not None) else None
                  for d in dets]
-        nt, nd = len(self.tracks), len(dets)
-        cost = np.full((nt, nd), INF)
-        if nt and nd:
-            iou = iou_matrix([t.predicted_box() for t in self.tracks], [d.box for d in dets])
-            for i, t in enumerate(self.tracks):
-                pp = t.predicted_pos(now) if T is not None else None
-                g = self.gate(now - t.t_pos)
-                for j in range(nd):
-                    if pp is not None and det_o[j] is not None:
-                        dist = math.hypot(det_o[j][0] - pp[0], det_o[j][1] - pp[1])
-                        if dist <= g:            # position decides; IoU only breaks ties
-                            cost[i, j] = 0.7 * dist / g + 0.3 * (1.0 - iou[i, j])
-                    elif iou[i, j] >= self.iou_min:
-                        cost[i, j] = 1.0 + (1.0 - iou[i, j])   # worse than any position match
-        matched_t, matched_d = {}, set()
-        if nt and nd:
-            rows, cols = linear_sum_assignment(cost)
-            for r, c in zip(rows, cols):
-                if cost[r, c] < INF:
-                    matched_t[r] = c
-                    matched_d.add(c)
+        # stage 1: all tracks x confident detections; stage 2: leftover tracks x weak ones
+        high = [j for j, d in enumerate(dets) if d.score >= self.high_score]
+        low = [j for j, d in enumerate(dets) if d.score < self.high_score]
+        matches = self._associate(list(range(len(self.tracks))), high, dets, det_o, now, T)
+        left = [i for i in range(len(self.tracks)) if i not in matches]
+        matches.update(self._associate(left, low, dets, det_o, now, T))
+        matched_d = {j for j, _ in matches.values()}
 
         target = None
         unmatched_sel = None
         for i, t in enumerate(self.tracks):
             t.held = False
-            if i in matched_t:
-                d, o = dets[matched_t[i]], det_o[matched_t[i]]
+            if i in matches:
+                j, disputed = matches[i]
+                d, o = dets[j], det_o[j]
                 t.vbox = self.vel_gain * (d.box - t.box) + (1 - self.vel_gain) * t.vbox
                 t.box, t.score, t.bearing = d.box.copy(), d.score, d.bearing
                 t.visible, t.missed, t.t_cam = True, 0, now
-                if o is not None:
+                t.hits += 1
+                if t.id is None and t.hits >= self.min_hits:
+                    t.id = self.next_id
+                    self.next_id += 1
+                use_pos = o is not None
+                if disputed:
+                    # Never re-anchor onto where somebody else is: that range is theirs.
+                    theirs = any(x is not t and x.id is not None and x.pos is not None and
+                                 math.hypot(o[0] - x.predicted_pos(now)[0],
+                                            o[1] - x.predicted_pos(now)[1]) < self.other_person_radius
+                                 for x in self.tracks)
+                    t.disputes = 0 if theirs else t.disputes + 1
+                    if t.disputes >= self.dispute_frames:
+                        t.pos, t.vel, t.t_pos = o, (0.0, 0.0), now   # consistently elsewhere: re-anchor
+                        t.disputes = 0
+                    use_pos = False              # this frame's range is not trusted
+                else:
+                    t.disputes = 0
+                if use_pos:
                     self._fix(t, o, now)
                     t.range = math.hypot(*d.xy)
-                else:
+                elif o is None:
                     t.range = float("nan")
-                if t.id == self.selected_id and d.xy is not None \
-                        and self.min_range <= t.range <= self.max_range:
+                if (t.id is not None and t.id == self.selected_id and use_pos
+                        and self.min_range <= t.range <= self.max_range):
                     target = (d.xy[0], d.xy[1], "camera")
             else:
                 t.box = t.predicted_box()
                 t.visible, t.score = False, 0.0
                 t.missed += 1
-                if t.id == self.selected_id and not self.selected_lost:
+                if t.id is not None and t.id == self.selected_id and not self.selected_lost:
                     unmatched_sel = t
             t.age += 1
 
@@ -288,24 +328,61 @@ class Tracker:
             if hold is not None:
                 target = hold
 
-        for j, d in enumerate(dets):
-            if j not in matched_d and d.score >= self.new_track_score:
-                t = Track(self.next_id, d, now)
+        boxes_now = [t.box for t in self.tracks]
+        for j in high:
+            d = dets[j]
+            if j in matched_d or d.score < self.new_track_score:
+                continue
+            if boxes_now and iou_matrix([d.box], boxes_now).max() >= self.dup_iou:
+                continue                         # someone already tracked there
+            t = Track(d, now)
+            if self.min_hits <= 1:
+                t.id = self.next_id
                 self.next_id += 1
-                if det_o[j] is not None:
-                    t.pos, t.range = det_o[j], math.hypot(*d.xy)
-                self.tracks.append(t)
+            if det_o[j] is not None:
+                t.pos, t.range = det_o[j], math.hypot(*d.xy)
+            self.tracks.append(t)
+            boxes_now.append(t.box)
 
         alive = []
         for t in self.tracks:
-            if t.missed <= self.max_missed or t.held:
+            limit = self.max_missed if t.id is not None else self.tentative_max_missed
+            if t.missed <= limit or t.held:
                 alive.append(t)
-            elif t.id == self.selected_id:
+            elif t.id is not None and t.id == self.selected_id:
                 self.selected_lost = True        # keep the ID; never hand it to someone else
         self.tracks = alive
         if self.selected_lost:
             target = None
-        return self.tracks, target
+        return self.confirmed(), target
+
+    def _associate(self, tis, djs, dets, det_o, now, T):
+        """Hungarian match of tracks tis to detections djs -> {track: (det, disputed)}."""
+        if not tis or not djs:
+            return {}
+        iou = iou_matrix([self.tracks[i].predicted_box() for i in tis], [dets[j].box for j in djs])
+        cost = np.full((len(tis), len(djs)), INF)
+        disputed = np.zeros_like(cost, dtype=bool)
+        for a, i in enumerate(tis):
+            t = self.tracks[i]
+            pp = t.predicted_pos(now) if T is not None else None
+            g = self.gate(now - t.t_pos)
+            for b, j in enumerate(djs):
+                if pp is not None and det_o[j] is not None:
+                    dist = math.hypot(det_o[j][0] - pp[0], det_o[j][1] - pp[1])
+                    if dist <= g:                # position decides; IoU only breaks ties
+                        cost[a, b] = 0.7 * dist / g + 0.3 * (1.0 - iou[a, b])
+                    elif iou[a, b] >= self.iou_strong:   # range disagrees, boxes agree
+                        cost[a, b] = 1.2 + (1.0 - iou[a, b])
+                        disputed[a, b] = True
+                elif iou[a, b] >= self.iou_min:
+                    cost[a, b] = 1.0 + (1.0 - iou[a, b])   # worse than any position match
+        out = {}
+        rows, cols = linear_sum_assignment(cost)
+        for r, c in zip(rows, cols):
+            if cost[r, c] < INF:
+                out[tis[r]] = (djs[c], bool(disputed[r, c]))
+        return out
 
     def _fix(self, t, o, now):
         """Fold an odom position fix into the track (velocity clamped to walking)."""

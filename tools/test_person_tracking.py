@@ -17,8 +17,17 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src", "dagger_bringup"))
 from dagger_bringup.person_tracking import (COASTING, HOLD_LIDAR, LOST, NONE,  # noqa: E402
-                                            TRACKING, Detection, Tracker, iou_matrix,
+                                            TRACKING, Detection, iou_matrix,
                                             lidar_cluster, range_at)
+from dagger_bringup.person_tracking import Tracker as NewTracker  # noqa: E402
+
+
+def Tracker(**kw):
+    """Tests below were written for immediate ids and 1 s survival; the ID-stability
+    features (confirmation, 2 s survival) are tested separately at the end."""
+    kw.setdefault("min_hits", 1)
+    kw.setdefault("max_missed", 10)
+    return NewTracker(**kw)
 
 FX, CX = 606.0, 320.0
 DT = 0.1
@@ -228,6 +237,94 @@ xy = range_at(px, py, (0.29, 0.0), 0.0, math.radians(5))
 check("range_at finds the person straight ahead", xy is not None and abs(xy[0] - 2.8) < 0.2, str(xy))
 got, why = lidar_cluster(px, py, (3.0, 0.0), 0.8)
 check("lidar_cluster accepts a person-sized cluster", got is not None and why is None)
+
+# ---------------- ID stability (defaults of the real Tracker) ----------------
+t = NewTracker()
+t.update([det_at(3.0, 0.2)], 0, T0)
+t.update([det_at(3.0, 0.2)], DT, T0)
+check("new person is tentative (no id, not shown) before min_hits", t.confirmed() == [] and not t.select(1))
+tr, _ = t.update([det_at(3.0, 0.2)], 2 * DT, T0)
+check("confirmed on the 3rd sighting -> id 1, selectable", [x.id for x in tr] == [1] and t.select(1))
+t = NewTracker()
+t.update([Detection(box(300), .9)], 0)
+t.update([], DT)
+t.update([], 2 * DT)
+t.update([], 3 * DT)
+check("a one-frame false detection never gets an id", t.next_id == 1 and t.tracks == [])
+
+# a LiDAR range glitch (the range jumps 2 m for one frame) must not change the id
+t = NewTracker()
+for k in range(5):
+    t.update([det_at(3.0, 0.2)], k * DT, T0)
+t.select(1)
+glitch = det_at(3.0, 0.2)
+glitch.xy = (5.0, 0.2)                                   # range_at picked the wall behind
+tr, tgt = t.update([glitch], 5 * DT, T0)
+check("one-frame range glitch: same id, no new track, no target from the bad range",
+      [x.id for x in tr] == [1] and len(t.tracks) == 1 and tgt is None, f"ids {[x.id for x in tr]}")
+tr, tgt = t.update([det_at(3.0, 0.2)], 6 * DT, T0)
+check("... and the next good frame targets again at the true range",
+      tgt is not None and abs(tgt[0] - 3.0) < 1e-6)
+# the person really is somewhere else consistently -> re-anchor after dispute_frames
+for k in range(7, 10):
+    moved = det_at(3.0, 0.2)
+    moved.xy = (4.2, 0.2)
+    tr, tgt = t.update([moved], k * DT, T0)
+check("range consistently different for 3 frames -> re-anchored, same id",
+      [x.id for x in tr] == [1] and abs(t.selected().pos[0] - 4.2) < 1e-6)
+
+# weak (side-on) detections keep a track alive but never start one
+t = NewTracker()
+for k in range(4):
+    t.update([det_at(3.0, 0.2)], k * DT, T0)
+for k in range(4, 34):                                   # 3 s of weak detections
+    tr, _ = t.update([det_at(3.0, 0.2, score=0.3)], k * DT, T0)
+check("3 s of weak (0.3) detections keep id 1 alive", [x.id for x in tr] == [1] and tr[0].visible)
+t = NewTracker()
+for k in range(5):
+    t.update([det_at(3.0, 0.2, score=0.3)], k * DT, T0)
+check("weak detections alone never start a track", t.tracks == [])
+
+# a duplicate detection on top of a tracked person does not become a second person
+t = NewTracker()
+for k in range(4):
+    t.update([det_at(3.0, 0.2)], k * DT, T0)
+dup = Detection(det_at(3.0, 0.2).box + np.array([5, 5, 5, 5]), 0.8, 0.0, None)
+for k in range(4, 8):
+    t.update([det_at(3.0, 0.2), dup], k * DT, T0)
+check("duplicate box over a tracked person -> no second track", len(t.tracks) == 1)
+
+# survival: 1.5 s without any detection keeps the id (max_missed 20 = 2 s)
+t = NewTracker()
+for k in range(4):
+    t.update([det_at(3.0, 0.2)], k * DT, T0)
+for k in range(4, 19):
+    t.update([], k * DT, T0)
+tr, _ = t.update([det_at(3.0, 0.25)], 19 * DT, T0)
+check("1.5 s dropout -> same id when seen again", [x.id for x in tr] == [1])
+
+# a person partly behind another gets the FRONT person's LiDAR range (range_at takes
+# the nearest cluster): that must never move them onto the front person
+t = NewTracker()
+for k in range(5):
+    t.update([det_at(4.8, 0.4), det_at(3.0, 0.0)], k * DT, T0)
+sel = next(x.id for x in t.confirmed() if x.pos[0] > 4)
+t.select(sel)
+stolen = False
+for k in range(5, 15):
+    a_ = det_at(4.8, 0.3)
+    a_.xy = (3.0, 0.0)                                   # A's box, but B's cluster
+    tr, tgt = t.update([a_, det_at(3.0, 0.0)], k * DT, T0)
+    if tgt is not None and math.hypot(tgt[0] - 3.0, tgt[1]) < 0.5:
+        stolen = True
+check("range borrowed from the person in front: A never re-anchored onto B, no target at B",
+      not stolen and t.selected() is not None and t.selected().pos[0] > 4.0,
+      f"A pos {t.selected().pos if t.selected() else None}")
+d1, d2 = det_at(4.8, 0.3), det_at(3.0, 0.0)
+d1.xy = (3.02, 0.01)
+NewTracker().update([d1, d2], 0, T0)
+check("same cluster for two boxes -> the smaller (farther) box loses its range",
+      d1.xy is None and d2.xy is not None)
 
 print(f"\n{sum(results)}/{len(results)} passed")
 sys.exit(0 if all(results) else 1)

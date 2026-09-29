@@ -43,6 +43,7 @@ def generate_launch_description():
     image_rotation = LaunchConfiguration("image_rotation_deg")
     use_ui = LaunchConfiguration("use_ui")
     target_source = LaunchConfiguration("target_source")
+    det_conf = LaunchConfiguration("det_conf")
     ui_port = LaunchConfiguration("ui_port")
 
     use_sim_time_arg = DeclareLaunchArgument("use_sim_time", default_value="false")
@@ -82,6 +83,10 @@ def generate_launch_description():
     #               UI; nothing is followed until someone is selected (default)
     #   selector -- target_selector: automatic "whoever is ahead" (selection_mode);
     #               for solo tests without anyone at the page (follow_solo.sh)
+    # Detector confidence threshold. 0.45 = validated default. Lower (e.g. 0.2)
+    # also publishes weak detections -- side-on / back views score lower -- which
+    # the tracker only uses to EXTEND existing tracks, never to start one.
+    det_conf_arg = DeclareLaunchArgument("det_conf", default_value="0.45")
     target_source_arg = DeclareLaunchArgument("target_source", default_value="tracker",
                                               choices=["tracker", "selector"])
     is_tracker = PythonExpression(["'", target_source, "' == 'tracker'"])
@@ -124,6 +129,7 @@ def generate_launch_description():
         condition=IfCondition(use_detector),
         parameters=[{
             "engine_path": engine_path,
+            "conf_threshold": ParameterValue(det_conf, value_type=float),
             "target_rate": 10.0,
             "publish_debug_image": debug_image,
             "image_rotation_deg": image_rotation,
@@ -207,6 +213,7 @@ def generate_launch_description():
         image_rotation_arg,
         use_ui_arg,
         target_source_arg,
+        det_conf_arg,
         ui_port_arg,
         collision_monitor_follow,
         lifecycle_manager,
