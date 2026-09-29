@@ -180,9 +180,14 @@ class SlamGeoInit(Node):
         ok = self.map_ratio >= self.map_min_ratio
         if ok != self.map_ok:
             self.map_ok = ok
-            log = self.get_logger().info if ok else self.get_logger().error
-            log(f"slam_toolbox map {'LOADED' if ok else 'NOT the saved map'}: {occupied} occupied "
-                f"cells = {100 * self.map_ratio:.0f} % of the saved map's {self.matcher.occupied_count}")
+            text = (f"slam_toolbox map {'LOADED' if ok else 'NOT the saved map'}: {occupied} "
+                    f"occupied cells = {100 * self.map_ratio:.0f} % of the saved map's "
+                    f"{self.matcher.occupied_count}")
+            # separate call sites: rclpy refuses one line logging at two severities
+            if ok:
+                self.get_logger().info(text)
+            else:
+                self.get_logger().error(text)
 
     def on_initialpose(self, m):
         if not self.seeded:   # someone else (Foxglove) set the pose: stop auto-seeding

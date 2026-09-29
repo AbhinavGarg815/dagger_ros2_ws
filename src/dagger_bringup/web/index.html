@@ -52,6 +52,7 @@ let last = null;              // {hdr, bmp}: what is on screen now (clicks resol
 let decoding = false, pending = null;
 let offset = null, bestRtt = Infinity, rtts = [];
 let drawn = 0, fpsT0 = performance.now();
+let following = false;
 
 function setMsg(t) { $("msg").textContent = t || ""; }
 function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
@@ -100,11 +101,17 @@ function status(hdr) {
   if (hdr.range != null && st !== "NONE") tgt += " " + hdr.range.toFixed(1) + " m";
   if (hdr.source) tgt += " (" + hdr.source + ")";
   $("target").textContent = tgt;
-  $("followst").textContent = hdr.follow === true ? "ON" : hdr.follow === false ? "off" : "–";
-  $("follow").disabled = !(hdr.allow_follow && hdr.selected >= 0 && st === "TRACKING");
+  const fs = hdr.follow_state || (hdr.follow === true ? "enabled" : "off");
+  $("followst").textContent = fs;
+  $("followst").style.color = fs === "following" ? "#69f0ae" : fs === "searching" ? "#ffd740"
+                            : fs.startsWith("disabled: target") ? "#ff5252" : "";
+  following = fs === "following" || fs === "searching" || fs === "no target";
+  $("follow").disabled = !(hdr.allow_follow && hdr.selected >= 0 && st === "TRACKING" && !following);
   const b = $("banner");
   if (st === "LOST") { b.style.display = "block"; b.style.background = "#c62828";
                        b.textContent = "TARGET #" + hdr.selected + " LOST — click a person to reselect"; }
+  else if (st === "HOLD_LIDAR") { b.style.display = "block"; b.style.background = "#f9a825";
+                       b.textContent = "#" + hdr.selected + " out of camera view — held on LiDAR"; }
   else b.style.display = "none";
 }
 
@@ -146,7 +153,12 @@ cv.addEventListener("click", ev => {
       if (!best || a < best.a) best = { id: t.id, a };
     }
   }
-  if (best) { send({ type: "select", id: best.id }); setMsg("selected #" + best.id); }
+  if (best) {
+    send({ type: "select", id: best.id });
+    setMsg(following && best.id !== last.hdr.selected
+      ? "selected #" + best.id + " — following STOPS (different person); press FOLLOW to follow them"
+      : "selected #" + best.id);
+  }
   else setMsg("no person under the click");
 });
 $("follow").onclick = () => send({ type: "follow" });

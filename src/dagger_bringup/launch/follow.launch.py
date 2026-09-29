@@ -21,7 +21,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
@@ -42,6 +42,7 @@ def generate_launch_description():
     debug_image = LaunchConfiguration("debug_image")
     image_rotation = LaunchConfiguration("image_rotation_deg")
     use_ui = LaunchConfiguration("use_ui")
+    target_source = LaunchConfiguration("target_source")
     ui_port = LaunchConfiguration("ui_port")
 
     use_sim_time_arg = DeclareLaunchArgument("use_sim_time", default_value="false")
@@ -74,9 +75,16 @@ def generate_launch_description():
     # fixes the GEOMETRY, this fixes what the network is shown.
     image_rotation_arg = DeclareLaunchArgument("image_rotation_deg", default_value="180")
     # Click-to-select browser UI: http://<rover-ip>:<ui_port>/ (person_tracker +
-    # ui_server). Following from the page is off until the tracker drives
-    # /follow/target from the selection (phase 2).
+    # ui_server). FOLLOW from the page only with target_source:=tracker.
     use_ui_arg = DeclareLaunchArgument("use_ui", default_value="true")
+    # Who publishes /follow/target (exactly one node may):
+    #   tracker  -- person_tracker: the person the operator CLICKS in the browser
+    #               UI; nothing is followed until someone is selected (default)
+    #   selector -- target_selector: automatic "whoever is ahead" (selection_mode);
+    #               for solo tests without anyone at the page (follow_solo.sh)
+    target_source_arg = DeclareLaunchArgument("target_source", default_value="tracker",
+                                              choices=["tracker", "selector"])
+    is_tracker = PythonExpression(["'", target_source, "' == 'tracker'"])
     ui_port_arg = DeclareLaunchArgument("ui_port", default_value="8080")
 
     # /cmd_vel_follow_raw -> stop / slowdown / approach -> /cmd_vel_follow.
@@ -129,7 +137,8 @@ def generate_launch_description():
         executable="target_selector",
         name="target_selector",
         output="screen",
-        condition=IfCondition(use_selector),
+        condition=IfCondition(PythonExpression(
+            ["'", use_selector, "' == 'true' and '", target_source, "' == 'selector'"])),
         parameters=[{
             "selection_mode": selection_mode,
             "use_sim_time": use_sim_time,
@@ -158,9 +167,13 @@ def generate_launch_description():
         executable="person_tracker",
         name="person_tracker",
         output="screen",
-        condition=IfCondition(use_ui),
+        respawn=True,          # a crash restarts it; the selection is then gone -> no target
+        respawn_delay=1.0,
+        condition=IfCondition(PythonExpression(
+            ["'", use_ui, "' == 'true' or '", target_source, "' == 'tracker'"])),
         parameters=[{
             "image_rotation_deg": image_rotation,
+            "publish_target": ParameterValue(is_tracker, value_type=bool),
             "use_sim_time": use_sim_time,
         }],
     )
@@ -170,10 +183,12 @@ def generate_launch_description():
         executable="ui_server",
         name="ui_server",
         output="screen",
+        respawn=True,          # a crash restarts it; the selection is then gone -> no target
+        respawn_delay=1.0,
         condition=IfCondition(use_ui),
         parameters=[{
             "port": ParameterValue(ui_port, value_type=int),
-            "allow_follow": False,
+            "allow_follow": ParameterValue(is_tracker, value_type=bool),
             "use_sim_time": use_sim_time,
         }],
     )
@@ -191,6 +206,7 @@ def generate_launch_description():
         debug_image_arg,
         image_rotation_arg,
         use_ui_arg,
+        target_source_arg,
         ui_port_arg,
         collision_monitor_follow,
         lifecycle_manager,

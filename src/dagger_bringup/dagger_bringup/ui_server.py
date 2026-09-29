@@ -110,6 +110,7 @@ class UiServer(Node):
         self.images = collections.OrderedDict()   # stamp -> (msg, arrival)
         self.tracks = collections.OrderedDict()   # stamp -> msg
         self.follow_enabled = None
+        self.follow_state = ""                     # follow_controller's /follow/state
         self.target_source = ""
         self.target_range = None
         self.ui_armed = False                     # following was enabled from the page
@@ -120,6 +121,7 @@ class UiServer(Node):
         self.create_subscription(PersonTracks, g("tracks_topic"), self.on_tracks, 10)
         self.create_subscription(Bool, g("enable_topic"),
                                  lambda m: setattr(self, "follow_enabled", m.data), 10)
+        self.create_subscription(String, "/follow/state", self.on_state, 10)
         self.create_subscription(String, "/follow/target_source",
                                  lambda m: setattr(self, "target_source", m.data), 10)
         self.create_subscription(PoseStamped, "/follow/target", self.on_target, be)
@@ -128,6 +130,11 @@ class UiServer(Node):
         self.create_timer(0.05, self.flush_unpaired)
 
     # ---------------- ROS thread ----------------
+    def on_state(self, m):
+        self.follow_state = m.data
+        if m.data.startswith("disabled"):
+            self.ui_armed = False                  # the controller stood down by itself
+
     def on_target(self, m):
         p = m.pose.position
         self.target_range = (p.x ** 2 + p.y ** 2) ** 0.5
@@ -165,7 +172,8 @@ class UiServer(Node):
 
     def emit(self, img, trk):
         h = {"type": "frame", "stamp": stamp_s(img.header),
-             "follow": self.follow_enabled, "allow_follow": self.allow_follow,
+             "follow": self.follow_enabled, "follow_state": self.follow_state,
+             "allow_follow": self.allow_follow,
              "source": self.target_source,
              "range": num(self.target_range) if self.target_range is not None else None}
         if trk is not None:

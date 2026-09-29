@@ -29,7 +29,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 from geometry_msgs.msg import PoseStamped, Twist
-from std_msgs.msg import Bool, Int32
+from std_msgs.msg import Bool, Int32, String
 
 
 class FollowController(Node):
@@ -148,10 +148,15 @@ class FollowController(Node):
         # saw a loss at all.
         self.locked_id = None
         self.last_state = None
+        # For the operator's UI: current state and why follow last turned off.
+        # Publishing only -- nothing below reads it back.
+        self.disable_reason = "not enabled yet"
+        self.state_sent, self.state_sent_at = None, 0.0
 
         be = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
                         history=HistoryPolicy.KEEP_LAST, depth=1)
         self.pub = self.create_publisher(Twist, g("cmd_topic"), 10)
+        self.state_pub = self.create_publisher(String, "/follow/state", 10)
         self.create_subscription(PoseStamped, g("target_topic"), self.on_target, be)
         self.create_subscription(Bool, g("enable_topic"), self.on_enable, 10)
         self.create_subscription(Bool, g("estop_topic"), self.on_estop, 10)
@@ -176,6 +181,7 @@ class FollowController(Node):
         else:
             self.v_cmd = 0.0
             self.stop_until = time.monotonic() + 1.0
+            self.disable_reason = "operator"
             self.get_logger().warn("follow disabled -- commanding zero, then releasing "
                                    "the twist_mux slot")
 
@@ -191,6 +197,7 @@ class FollowController(Node):
             self.search_until = 0.0
             self.v_cmd = 0.0
             self.stop_until = time.monotonic() + 1.0
+            self.disable_reason = f"target changed (#{self.locked_id} -> #{msg.data})"
             self.get_logger().error(
                 f"TARGET CHANGED to a different person (track {self.locked_id} -> "
                 f"{msg.data}) -- FOLLOW DISABLED. Re-enable explicitly to follow them.")
@@ -220,6 +227,13 @@ class FollowController(Node):
             return "searching"
         return "no target"
 
+    def publish_state(self, st, now):
+        """/follow/state for the UI: on every change and at 2 Hz."""
+        text = st if st != "disabled" else f"disabled: {self.disable_reason}"
+        if text != self.state_sent or now - self.state_sent_at >= 0.5:
+            self.state_pub.publish(String(data=text))
+            self.state_sent, self.state_sent_at = text, now
+
     def tick(self):
         now = time.monotonic()
         have_target = (self.target is not None
@@ -240,6 +254,7 @@ class FollowController(Node):
                     "of frame, so not turning")
 
         st = self.state()
+        self.publish_state(st, now)
         if st != self.last_state:
             if self.last_state == "following":
                 self.stop_until = now + 1.0
@@ -263,6 +278,7 @@ class FollowController(Node):
             self.had_target = False
             self.search_until = 0.0
             self.stop_until = now + 1.0
+            self.disable_reason = "target lost"
             self.get_logger().error(
                 "target not recovered -- FOLLOW DISABLED. Re-enable explicitly with "
                 "/follow/enable true once you are back in front of the rover.")
