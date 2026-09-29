@@ -17,12 +17,18 @@ Why a relay instead of letting Foxglove publish /goal_pose directly:
   - LOCALIZATION: in SLAM mode a goal is refused while /slam/localized is false.
     (In GPS mode nothing publishes /slam/localized and goals pass.)
 Pose estimates are always converted into map (slam_toolbox ignores the frame id).
+
+Also /plan -> /plan_viz for display: Humble's Theta* planner leaves every pose's
+frame_id empty (only the Path header says odom). The controller transforms by
+the header, so driving is fine, but Foxglove refuses to draw it ("Path poses
+must all have the same frame_id. odom != ''"). View /plan_viz instead.
 """
 import math
 
 import rclpy
 import tf2_ros
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
+from nav_msgs.msg import Path
 from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
@@ -52,6 +58,8 @@ class GoalPoseRelay(Node):
         self.init_pub = self.create_publisher(PoseWithCovarianceStamped, "/initialpose", 10)
         self.create_subscription(PoseStamped, "/goal_pose_ui", self.on_goal, 10)
         self.create_subscription(PoseWithCovarianceStamped, "/initialpose_ui", self.on_init, 10)
+        self.plan_pub = self.create_publisher(Path, "/plan_viz", 1)
+        self.create_subscription(Path, "/plan", self.on_plan, 1)
         self.get_logger().info("relaying /goal_pose_ui -> /goal_pose (stamp 0) and "
                                "/initialpose_ui -> /initialpose (in map)")
 
@@ -83,6 +91,11 @@ class GoalPoseRelay(Node):
             f"goal -> Nav2: {frame} ({pose.position.x:.2f}, {pose.position.y:.2f}) "
             f"yaw {math.degrees(yaw_of(pose.orientation)):.1f} deg"
             + ("" if m.header.frame_id in FIXED else f" [clicked in {m.header.frame_id}]"))
+
+    def on_plan(self, m):
+        for p in m.poses:
+            p.header = m.header
+        self.plan_pub.publish(m)
 
     def on_init(self, m):
         frame, pose = m.header.frame_id or "map", m.pose.pose
