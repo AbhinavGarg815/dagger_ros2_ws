@@ -16,6 +16,7 @@ setup(
         (os.path.join("share", package_name, "config"), glob("config/*.xml")),
         (os.path.join("share", package_name, "behavior_trees"), glob("behavior_trees/*.xml")),
         (os.path.join("share", package_name, "maps"), glob("maps/*")),
+        (os.path.join("share", package_name, "web"), glob("web/*")),
     ],
     install_requires=["setuptools"],
     zip_safe=True,
@@ -43,6 +44,8 @@ setup(
             "slam_pose_tf = dagger_bringup.slam_pose_tf:main",
             "slam_geo_init = dagger_bringup.slam_geo_init:main",
             "goal_pose_relay = dagger_bringup.goal_pose_relay:main",
+            "person_tracker = dagger_bringup.person_tracker:main",
+            "ui_server = dagger_bringup.ui_server:main",
         ],
     },
 )

@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dagger follow</title>
+<style>
+  :root { --bg:#111; --fg:#eee; --muted:#999; --ok:#2e7d32; --warn:#f9a825; --bad:#c62828; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+               font:14px/1.3 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  #wrap { display:flex; flex-direction:column; height:100%; }
+  #bar { display:flex; flex-wrap:wrap; gap:6px 14px; align-items:center; padding:6px 10px; background:#1b1b1b; }
+  #bar .k { color:var(--muted); }
+  #conn.ok { color:#69f0ae; } #conn.bad { color:#ff5252; }
+  #stage { position:relative; flex:1; min-height:0; display:flex; align-items:center; justify-content:center; }
+  canvas { max-width:100%; max-height:100%; cursor:crosshair; background:#000; }
+  #banner { position:absolute; top:10px; left:50%; transform:translateX(-50%); padding:6px 14px; border-radius:6px;
+            font-weight:700; display:none; }
+  #controls { display:flex; gap:10px; padding:8px 10px; background:#1b1b1b; }
+  button { font:inherit; font-weight:700; border:0; border-radius:8px; padding:14px 18px; color:#fff; cursor:pointer; }
+  button:disabled { opacity:.35; cursor:not-allowed; }
+  #follow { background:var(--ok); } #stop { background:var(--bad); flex:1; font-size:20px; } #clear { background:#555; }
+  #msg { color:var(--warn); padding:0 10px 6px; min-height:1.3em; background:#1b1b1b; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="bar">
+    <span id="conn" class="bad">connecting…</span>
+    <span><span class="k">age</span> <b id="age">–</b></span>
+    <span><span class="k">fps</span> <b id="fps">–</b></span>
+    <span><span class="k">rtt</span> <b id="rtt">–</b></span>
+    <span><span class="k">people</span> <b id="npeople">–</b></span>
+    <span><span class="k">target</span> <b id="target">none</b></span>
+    <span><span class="k">follow</span> <b id="followst">–</b></span>
+  </div>
+  <div id="stage"><canvas id="cv" width="640" height="480"></canvas><div id="banner"></div></div>
+  <div id="msg"></div>
+  <div id="controls">
+    <button id="follow" disabled>FOLLOW</button>
+    <button id="stop">STOP (space)</button>
+    <button id="clear">CLEAR (esc)</button>
+  </div>
+</div>
+<script>
+"use strict";
+const cv = document.getElementById("cv"), ctx = cv.getContext("2d");
+const $ = id => document.getElementById(id);
+let ws = null, backoff = 500;
+let last = null;              // {hdr, bmp}: what is on screen now (clicks resolve against it)
+let decoding = false, pending = null;
+let offset = null, bestRtt = Infinity, rtts = [];
+let drawn = 0, fpsT0 = performance.now();
+
+function setMsg(t) { $("msg").textContent = t || ""; }
+function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
+
+// ---------- geometry: native camera pixels <-> upright canvas ----------
+function viewMatrix(h) {
+  const W = h.w || 640, H = h.h || 480, rot = ((h.rot || 0) % 360 + 360) % 360;
+  const upW = (rot === 90 || rot === 270) ? H : W, upH = (rot === 90 || rot === 270) ? W : H;
+  if (cv.width !== upW || cv.height !== upH) { cv.width = upW; cv.height = upH; }
+  // rotate about the image centre, clockwise by rot, into the upright canvas
+  return new DOMMatrix().translate(upW / 2, upH / 2).rotate(rot).translate(-W / 2, -H / 2);
+}
+function canvasPoint(ev) {
+  const r = cv.getBoundingClientRect();
+  return new DOMPoint((ev.clientX - r.left) * cv.width / r.width, (ev.clientY - r.top) * cv.height / r.height);
+}
+
+// ---------- drawing ----------
+function draw(hdr, bmp) {
+  const m = viewMatrix(hdr);
+  ctx.setTransform(m); ctx.drawImage(bmp, 0, 0);
+  const tracks = hdr.tracks || [];
+  for (const t of tracks) {
+    const [x1, y1, x2, y2] = t.box, sel = t.id === hdr.selected;
+    ctx.setTransform(m);
+    ctx.lineWidth = sel ? 5 : 2.5;
+    ctx.strokeStyle = sel ? "#ff1744" : "#00e676";
+    ctx.setLineDash(t.visible ? [] : [8, 6]);
+    ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+    // label upright, at the top-left corner of the box as seen on screen
+    const c = [new DOMPoint(x1, y1), new DOMPoint(x2, y1), new DOMPoint(x1, y2), new DOMPoint(x2, y2)].map(p => p.matrixTransform(m));
+    const lx = Math.min(...c.map(p => p.x)), ly = Math.min(...c.map(p => p.y));
+    ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.setLineDash([]);
+    const label = "#" + t.id + (t.range != null ? "  " + t.range.toFixed(1) + " m" : "");
+    ctx.font = "bold 18px system-ui"; const tw = ctx.measureText(label).width;
+    ctx.fillStyle = sel ? "#ff1744" : "rgba(0,0,0,.65)"; ctx.fillRect(lx, Math.max(0, ly - 24), tw + 10, 24);
+    ctx.fillStyle = "#fff"; ctx.fillText(label, lx + 5, Math.max(18, ly - 6));
+  }
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+}
+
+function status(hdr) {
+  $("npeople").textContent = hdr.tracks ? hdr.tracks.length : "no tracker";
+  const st = hdr.state || "NONE";
+  let tgt = st === "NONE" ? "none" : "#" + hdr.selected + " " + st;
+  if (hdr.range != null && st !== "NONE") tgt += " " + hdr.range.toFixed(1) + " m";
+  if (hdr.source) tgt += " (" + hdr.source + ")";
+  $("target").textContent = tgt;
+  $("followst").textContent = hdr.follow === true ? "ON" : hdr.follow === false ? "off" : "–";
+  $("follow").disabled = !(hdr.allow_follow && hdr.selected >= 0 && st === "TRACKING");
+  const b = $("banner");
+  if (st === "LOST") { b.style.display = "block"; b.style.background = "#c62828";
+                       b.textContent = "TARGET #" + hdr.selected + " LOST — click a person to reselect"; }
+  else b.style.display = "none";
+}
+
+// ---------- frames: decode newest only ----------
+function onFrame(buf) {
+  const dv = new DataView(buf), n = dv.getUint32(0);
+  const hdr = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, n)));
+  const blob = new Blob([new Uint8Array(buf, 4 + n)], { type: "image/jpeg" });
+  pending = { hdr, blob };
+  if (!decoding) decodeNext();
+}
+async function decodeNext() {
+  if (!pending) return;
+  const { hdr, blob } = pending; pending = null; decoding = true;
+  try {
+    const bmp = await createImageBitmap(blob);
+    if (last && last.bmp) last.bmp.close();
+    last = { hdr, bmp };
+    draw(hdr, bmp); status(hdr); drawn++;
+    if (offset !== null) {
+      const age = Date.now() / 1000 + offset - hdr.stamp;
+      $("age").textContent = Math.round(age * 1000) + " ms";
+      $("age").style.color = age > 0.35 ? "#ff5252" : age > 0.2 ? "#ffd740" : "#69f0ae";
+    }
+  } catch (e) { setMsg("decode error: " + e); }
+  decoding = false;
+  if (pending) decodeNext();
+}
+
+// ---------- input ----------
+cv.addEventListener("click", ev => {
+  if (!last || !last.hdr.tracks) return;
+  const p = canvasPoint(ev).matrixTransform(viewMatrix(last.hdr).inverse());   // -> native pixels
+  let best = null;
+  for (const t of last.hdr.tracks) {
+    const [x1, y1, x2, y2] = t.box;
+    if (p.x >= x1 && p.x <= x2 && p.y >= y1 && p.y <= y2) {
+      const a = (x2 - x1) * (y2 - y1);
+      if (!best || a < best.a) best = { id: t.id, a };
+    }
+  }
+  if (best) { send({ type: "select", id: best.id }); setMsg("selected #" + best.id); }
+  else setMsg("no person under the click");
+});
+$("follow").onclick = () => send({ type: "follow" });
+$("stop").onclick = () => { send({ type: "stop" }); setMsg("STOP sent"); };
+$("clear").onclick = () => send({ type: "clear" });
+document.addEventListener("keydown", ev => {
+  if (ev.code === "Space") { ev.preventDefault(); $("stop").click(); }
+  else if (ev.code === "Escape") $("clear").click();
+});
+
+// ---------- connection + clock ----------
+function connect() {
+  ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
+  ws.binaryType = "arraybuffer";
+  ws.onopen = () => { $("conn").textContent = "connected"; $("conn").className = "ok"; backoff = 500; setMsg(""); };
+  ws.onclose = () => {
+    $("conn").textContent = "DISCONNECTED — retrying"; $("conn").className = "bad";
+    const b = $("banner"); b.style.display = "block"; b.style.background = "#c62828"; b.textContent = "NO LINK TO ROVER";
+    setTimeout(connect, backoff); backoff = Math.min(backoff * 2, 4000);
+  };
+  ws.onmessage = ev => {
+    if (typeof ev.data !== "string") { onFrame(ev.data); return; }
+    const m = JSON.parse(ev.data);
+    if (m.type === "pong") {
+      const now = Date.now() / 1000, rtt = now - m.t;
+      rtts.push(rtt); if (rtts.length > 20) rtts.shift();
+      if (rtt <= bestRtt * 1.5 || offset === null) {          // trust the fastest round trips
+        bestRtt = Math.min(bestRtt, rtt); offset = m.server - (m.t + rtt / 2);
+      }
+      $("rtt").textContent = Math.round(1000 * rtts.reduce((a, b) => a + b, 0) / rtts.length) + " ms";
+    } else if (m.type === "error") setMsg(m.msg);
+  };
+}
+setInterval(() => send({ type: "hb", t: Date.now() / 1000 }), 250);
+setInterval(() => {
+  const now = performance.now();
+  $("fps").textContent = (drawn * 1000 / (now - fpsT0)).toFixed(1); drawn = 0; fpsT0 = now;
+  if (last && offset !== null && Date.now() / 1000 + offset - last.hdr.stamp > 1.0) {
+    const b = $("banner"); b.style.display = "block"; b.style.background = "#f9a825"; b.textContent = "STALE VIDEO";
+  }
+}, 1000);
+connect();
+</script>
+</body>
+</html>

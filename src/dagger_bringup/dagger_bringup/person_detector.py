@@ -17,6 +17,7 @@ Detections carry the IMAGE's header, so the stamp is the capture time and
 frame_id is the camera optical frame. The selector needs both to transform a
 bearing into the LiDAR's frame at the right instant.
 """
+import array
 import time
 
 import numpy as np
@@ -24,7 +25,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, CompressedImage
 from vision_msgs.msg import (BoundingBox2D, Detection2D, Detection2DArray,
                              ObjectHypothesisWithPose)
 
@@ -54,6 +55,12 @@ class PersonDetector(Node):
         # and the URDF transform stay the single source of truth for geometry.
         # This must match the roll in dagger_description's d435_joint.
         self.declare_parameter("image_rotation_deg", 0)
+        # JPEG of every PROCESSED frame for the click-to-follow browser UI
+        # (ui_server). Same header as that frame's detections, so the boxes the
+        # operator clicks always belong to the image they see. Native orientation
+        # (the browser rotates). Encoded only while someone subscribes.
+        self.declare_parameter("ui_image_topic", "/follow/ui/image/compressed")
+        self.declare_parameter("ui_jpeg_quality", 70)
 
         g = lambda n: self.get_parameter(n).value  # noqa: E731
         engine = g("engine_path")
@@ -63,6 +70,7 @@ class PersonDetector(Node):
         self.period = 1.0 / float(g("target_rate"))
         self.publish_debug = bool(g("publish_debug_image"))
         self.rot_deg = int(g("image_rotation_deg")) % 360
+        self.ui_quality = int(g("ui_jpeg_quality"))
         if self.rot_deg not in (0, 90, 180, 270):
             raise RuntimeError(f"image_rotation_deg must be 0/90/180/270, got {self.rot_deg}")
 
@@ -82,6 +90,7 @@ class PersonDetector(Node):
         self.pub = self.create_publisher(Detection2DArray, g("detections_topic"), 10)
         self.debug_pub = (self.create_publisher(Image, g("debug_image_topic"), 1)
                           if self.publish_debug else None)
+        self.ui_pub = self.create_publisher(CompressedImage, g("ui_image_topic"), qos)
         self.create_subscription(Image, g("image_topic"), self.on_image, qos)
 
         self.last_run = 0.0
@@ -129,6 +138,18 @@ class PersonDetector(Node):
             d.results.append(h)
             out.detections.append(d)
         self.pub.publish(out)
+
+        if self.ui_pub.get_subscription_count() > 0:
+            import cv2
+            ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, self.ui_quality])
+            if ok:
+                ui = CompressedImage()
+                ui.header = msg.header
+                ui.format = "jpeg"
+                # array('B'), NOT bytes: rclpy validates a bytes value element by
+                # element in Python -- 32 ms for a 166 KB JPEG vs 0.11 ms (measured)
+                ui.data = array.array("B", jpg.tobytes())
+                self.ui_pub.publish(ui)
 
         if self.debug_pub is not None:
             import cv2

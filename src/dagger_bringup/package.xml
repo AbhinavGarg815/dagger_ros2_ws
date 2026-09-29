@@ -33,6 +33,9 @@
   <!-- Follow-me: D435 colour stream and the person detector -->
   <exec_depend>realsense2_camera</exec_depend>
   <exec_depend>vision_msgs</exec_depend>
+  <exec_depend>dagger_msgs</exec_depend>
+  <exec_depend>python3-tornado</exec_depend>
+  <exec_depend>python3-scipy</exec_depend>
   <exec_depend>tf2_geometry_msgs</exec_depend>
   <exec_depend>nav2_msgs</exec_depend>
   <exec_depend>cv_bridge</exec_depend>

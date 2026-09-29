@@ -23,6 +23,7 @@ from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -40,6 +41,8 @@ def generate_launch_description():
     engine_path = LaunchConfiguration("engine_path")
     debug_image = LaunchConfiguration("debug_image")
     image_rotation = LaunchConfiguration("image_rotation_deg")
+    use_ui = LaunchConfiguration("use_ui")
+    ui_port = LaunchConfiguration("ui_port")
 
     use_sim_time_arg = DeclareLaunchArgument("use_sim_time", default_value="false")
     autostart_arg = DeclareLaunchArgument("autostart", default_value="true")
@@ -70,6 +73,11 @@ def generate_launch_description():
     # this in step with the roll on dagger_description's d435_joint; the URDF
     # fixes the GEOMETRY, this fixes what the network is shown.
     image_rotation_arg = DeclareLaunchArgument("image_rotation_deg", default_value="180")
+    # Click-to-select browser UI: http://<rover-ip>:<ui_port>/ (person_tracker +
+    # ui_server). Following from the page is off until the tracker drives
+    # /follow/target from the selection (phase 2).
+    use_ui_arg = DeclareLaunchArgument("use_ui", default_value="true")
+    ui_port_arg = DeclareLaunchArgument("ui_port", default_value="8080")
 
     # /cmd_vel_follow_raw -> stop / slowdown / approach -> /cmd_vel_follow.
     # Same zones and same /scan_safety as the Nav2 monitor, so the rover stops at
@@ -144,6 +152,32 @@ def generate_launch_description():
         }],
     )
 
+    # Every person -> a stable ID; the operator's click selects one.
+    person_tracker = Node(
+        package="dagger_bringup",
+        executable="person_tracker",
+        name="person_tracker",
+        output="screen",
+        condition=IfCondition(use_ui),
+        parameters=[{
+            "image_rotation_deg": image_rotation,
+            "use_sim_time": use_sim_time,
+        }],
+    )
+    # Video + boxes to the browser, clicks back (tornado, latest-frame-only).
+    ui_server = Node(
+        package="dagger_bringup",
+        executable="ui_server",
+        name="ui_server",
+        output="screen",
+        condition=IfCondition(use_ui),
+        parameters=[{
+            "port": ParameterValue(ui_port, value_type=int),
+            "allow_follow": False,
+            "use_sim_time": use_sim_time,
+        }],
+    )
+
     return LaunchDescription([
         use_sim_time_arg,
         autostart_arg,
@@ -156,9 +190,13 @@ def generate_launch_description():
         engine_path_arg,
         debug_image_arg,
         image_rotation_arg,
+        use_ui_arg,
+        ui_port_arg,
         collision_monitor_follow,
         lifecycle_manager,
         person_detector,
         target_selector,
         follow_controller,
+        person_tracker,
+        ui_server,
     ])
