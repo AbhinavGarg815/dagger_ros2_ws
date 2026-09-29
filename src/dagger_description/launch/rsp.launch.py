@@ -22,13 +22,15 @@ def generate_launch_description():
         }]
     )
     
+    # Only the two wheel joints move, and nothing but the Foxglove robot model
+    # uses their frames (all sensors hang off fixed joints): 2 Hz, not 20 Hz
+    # (measured 9.5 % CPU at 20 Hz, 2026-09-29). This is the file drive_bringup
+    # (T1) includes.
     joint_state_publisher = Node(
         package="joint_state_publisher",
         executable="joint_state_publisher",
         output="screen",
-            parameters=[{
-            "rate": 20.0
-        }]
+        parameters=[{"rate": 2.0}],
     )
     
     static_tf_lidar = Node(

@@ -5,7 +5,7 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 
 from mavros_msgs.msg import State
-from sensor_msgs.msg import NavSatFix, Imu, PointCloud2
+from sensor_msgs.msg import NavSatFix, Imu
 from std_msgs.msg import UInt32, Bool
 
 
@@ -30,7 +30,6 @@ class SystemReady(Node):
         self.fcu_connected = False
         self.gps_fixed = False
         self.satellites = 0
-        self.last_lidar = None
         self.last_imu = None
 
         self.all_ready = False
@@ -46,11 +45,12 @@ class SystemReady(Node):
         self.create_subscription(
             UInt32, "/mavros/global_position/raw/satellites", self.sat_cb, qos_profile_sensor_data
         )
-        # raw=True: only the arrival time is used; deserialising the 0.8 MB x 10 Hz
-        # cloud in Python cost ~11 % CPU (measured 2026-09-29).
-        self.create_subscription(
-            PointCloud2, "/rslidar_points", self.lidar_cb, qos_profile_sensor_data, raw=True
-        )
+        # LiDAR: "the driver is publishing the cloud" from the ROS graph -- NOT by
+        # subscribing. Receiving the 0.8 MB x 10 Hz cloud cost this node ~11 % CPU
+        # even as a raw subscription (A/B 2026-09-29: 11.5 % vs 0.6 % without it),
+        # and /system_ready only feeds this console status. Data flow is checked
+        # where it matters: preflight (/rslidar_points >= 8 Hz) and the scan
+        # watchdogs.
         self.create_subscription(
             Imu, "/mavros/imu/data", self.imu_cb, qos_profile_sensor_data
         )
@@ -69,8 +69,6 @@ class SystemReady(Node):
     def sat_cb(self, msg):
         self.satellites = msg.data
 
-    def lidar_cb(self, msg):
-        self.last_lidar = self.get_clock().now()
 
     def imu_cb(self, msg):
         self.last_imu = self.get_clock().now()
@@ -81,7 +79,7 @@ class SystemReady(Node):
         return (self.get_clock().now() - stamp).nanoseconds / 1e9 <= self.sensor_timeout
 
     def check(self):
-        lidar_ok = self.fresh(self.last_lidar)
+        lidar_ok = self.count_publishers("/rslidar_points") > 0
         imu_ok = self.fresh(self.last_imu)
 
         if self.gps_fixed and not self.gps_announced:
@@ -143,7 +141,7 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     node.destroy_node()
-    rclpy.shutdown()
+    rclpy.try_shutdown()   # Ctrl-C already shut the context down
 
 
 if __name__ == "__main__":
