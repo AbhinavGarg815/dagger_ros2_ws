@@ -36,7 +36,6 @@ import collections
 import math
 
 import rclpy
-import yaml
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
 from mavros_msgs.msg import GPSRAW
 from nav_msgs.msg import Odometry
@@ -47,23 +46,12 @@ from nav_msgs.msg import OccupancyGrid
 from sensor_msgs.msg import Imu, LaserScan, NavSatFix
 from std_msgs.msg import Bool, Float32
 
+from dagger_bringup.geo_map import GeoMap
 from dagger_bringup.scan_map_match import MapMatcher, scan_points
-
-A_WGS84 = 6378137.0
-E2_WGS84 = 6.69437999014e-3
 
 
 def yaw_of(q):
     return math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
-
-
-def enu_scale(lat0_deg):
-    """Metres per degree (east, north) at lat0 -- same as tools/slam_georef.py."""
-    lat = math.radians(lat0_deg)
-    s = 1 - E2_WGS84 * math.sin(lat) ** 2
-    n = A_WGS84 / math.sqrt(s)
-    m = A_WGS84 * (1 - E2_WGS84) / s ** 1.5
-    return math.radians(1) * n * math.cos(lat), math.radians(1) * m
 
 
 class SlamGeoInit(Node):
@@ -92,12 +80,7 @@ class SlamGeoInit(Node):
         self.declare_parameter("offset_y", 0.0)
         g = lambda n: self.get_parameter(n).value  # noqa: E731
 
-        with open(g("geo_file")) as f:
-            geo = yaml.safe_load(f)
-        self.lat0, self.lon0 = geo["datum_lat"], geo["datum_lon"]
-        self.rot = math.radians(geo["yaw_deg"])
-        self.tx, self.ty = geo["tx"], geo["ty"]
-        self.kx, self.ky = enu_scale(self.lat0)
+        self.geo = GeoMap(g("geo_file"))
         self.matcher = MapMatcher(g("map_yaml"))
         self.frame = g("map_frame")
         self.samples = int(g("samples"))
@@ -151,7 +134,7 @@ class SlamGeoInit(Node):
         self.create_timer(1.0, self.try_seed)
         self.create_timer(g("health_period"), self.check_health)
         self.get_logger().info(
-            f"map datum {self.lat0:.7f},{self.lon0:.7f} yaw {geo['yaw_deg']:+.2f} deg; seeding from "
+            f"map datum {self.geo.lat0:.7f},{self.geo.lon0:.7f} yaw {self.geo.yaw_deg:+.2f} deg; seeding from "
             f"{self.samples} still GNSS fixes + scan search +-{self.radius:.0f} m / "
             f"+-{math.degrees(self.yaw_win):.0f} deg")
 
@@ -159,10 +142,7 @@ class SlamGeoInit(Node):
         return self.get_clock().now().nanoseconds * 1e-9
 
     def to_map(self, lat, lon, yaw_enu):
-        e = (lon - self.lon0) * self.kx - self.tx
-        n = (lat - self.lat0) * self.ky - self.ty
-        c, s = math.cos(self.rot), math.sin(self.rot)
-        return c * e + s * n, -s * e + c * n, math.remainder(yaw_enu - self.rot, 2 * math.pi)
+        return self.geo.to_map(lat, lon, yaw_enu)
 
     def set_localized(self, value):
         if value != self.localized:
