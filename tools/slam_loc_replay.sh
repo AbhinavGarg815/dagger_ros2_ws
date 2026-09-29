@@ -12,7 +12,12 @@
 set -e
 bag=${1:?usage: slam_loc_replay.sh <bag> <label> <map> [offset_x offset_y]}
 label=${2:?}; map=${3:?}
-extra=(); for kv in "${@:6}"; do extra+=(-p "$kv"); done   # slam_toolbox overrides
+# overrides: param:=value -> slam_toolbox, geo.param:=value -> slam_geo_init
+# (e.g. geo.max_speed:=1.0 when the recording starts moving before 10 still fixes)
+extra=(); geo=()
+for kv in "${@:6}"; do
+  if [[ $kv == geo.* ]]; then geo+=(-p "${kv#geo.}"); else extra+=(-p "$kv"); fi
+done
 # always floats: the node declares them as double and rejects "0"
 ox=$(printf %.3f "${4:-0}"); oy=$(printf %.3f "${5:-0}")
 export ROS_DOMAIN_ID=${REPLAY_DOMAIN:-77}
@@ -33,7 +38,7 @@ python3 "$ws/tools/tf_filter.py" > "$out/tf_filter.log" 2>&1 & pids=($!)
   > "$out/slam.log" 2>&1 & pids+=($!)
 python3 "$ws/tools/slam_replay_eval.py" --log "$out/poses.csv" > "$out/logger.log" 2>&1 & pids+=($!)
 "$ws/install/dagger_bringup/lib/dagger_bringup/slam_geo_init" --ros-args \
-  -p geo_file:="${base}_geo.yaml" -p map_yaml:="${base}.yaml" -p use_sim_time:=true -p offset_x:=$ox -p offset_y:=$oy \
+  -p geo_file:="${base}_geo.yaml" -p map_yaml:="${base}.yaml" -p use_sim_time:=true "${geo[@]}" -p offset_x:=$ox -p offset_y:=$oy \
   > "$out/geo.log" 2>&1 & pids+=($!)
 sleep 5
 
