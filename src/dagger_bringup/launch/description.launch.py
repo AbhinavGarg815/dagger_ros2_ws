@@ -19,10 +19,14 @@ def generate_launch_description():
         parameters=[{"robot_description": robot_description, "use_sim_time": False}],
     )
 
+    # Only the two wheel joints move, and nothing but the Foxglove robot model uses
+    # their frames (all sensors hang off fixed joints): 2 Hz instead of the default
+    # 10 Hz (~6 % CPU, 2026-09-29).
     jsp = Node(
         package="joint_state_publisher",
         executable="joint_state_publisher",
         output="screen",
+        parameters=[{"rate": 2}],
     )
 
     lidar_static_tf = Node(

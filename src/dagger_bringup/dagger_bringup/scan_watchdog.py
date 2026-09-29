@@ -38,7 +38,7 @@ class ScanWatchdog(Node):
                         history=HistoryPolicy.KEEP_LAST, depth=1)
         now = time.monotonic()
         self.last_scan, self.last_cloud, self.last_kill = now, 0.0, 0.0
-        self.create_subscription(LaserScan, g("scan_topic"), self.on_scan, be)
+        self.create_subscription(LaserScan, g("scan_topic"), self.on_scan, be, raw=True)
         # raw=True: only the arrival time matters, skip deserialising 0.8 MB clouds
         self.create_subscription(PointCloud2, g("cloud_topic"), self.on_cloud, be, raw=True)
         self.create_timer(1.0, self.check)

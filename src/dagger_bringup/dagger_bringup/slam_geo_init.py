@@ -35,6 +35,8 @@ tests). Leave them 0 on the rover.
 import collections
 import math
 
+import numpy as np
+
 import rclpy
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
 from mavros_msgs.msg import GPSRAW
@@ -117,7 +119,8 @@ class SlamGeoInit(Node):
         self.create_subscription(NavSatFix, "/mavros/global_position/global", self.on_fix, sensor)
         self.create_subscription(Imu, "/gps/heading_imu", self.on_heading, sensor)
         self.create_subscription(GPSRAW, "/mavros/gpsstatus/gps1/raw", self.on_raw, sensor)
-        self.create_subscription(Odometry, "/odometry/filtered", self.on_odom, sensor)
+        # only the pre-seed stillness check needs odometry; dropped once seeded
+        self.odom_sub = self.create_subscription(Odometry, "/odometry/filtered", self.on_odom, sensor)
         self.create_subscription(LaserScan, "/scan", self.on_scan, sensor)
         self.create_subscription(PoseWithCovarianceStamped, "/initialpose", self.on_initialpose, 10)
         self.create_subscription(PoseWithCovarianceStamped, "/slam/pose", self.on_slam_pose, 10)
@@ -153,6 +156,11 @@ class SlamGeoInit(Node):
     def on_raw(self, m):
         self.fix_type, self.h_acc = m.fix_type, m.h_acc / 1000.0
 
+    def drop_odom(self):
+        if self.odom_sub is not None:
+            self.destroy_subscription(self.odom_sub)
+            self.odom_sub = None
+
     def on_odom(self, m):
         self.speed = math.hypot(m.twist.twist.linear.x, m.twist.twist.linear.y)
 
@@ -167,7 +175,7 @@ class SlamGeoInit(Node):
         self.slam_pose = m
 
     def on_slam_map(self, m):
-        occupied = sum(1 for v in m.data if v >= 65)
+        occupied = int((np.frombuffer(bytes(m.data), dtype=np.int8) >= 65).sum())
         self.map_ratio = occupied / max(self.matcher.occupied_count, 1)
         ok = self.map_ratio >= self.map_min_ratio
         if ok != self.map_ok:
@@ -179,6 +187,7 @@ class SlamGeoInit(Node):
     def on_initialpose(self, m):
         if not self.seeded:   # someone else (Foxglove) set the pose: stop auto-seeding
             self.seeded = True
+            self.drop_odom()
             self.get_logger().info("initial pose set externally; auto-seeding stopped")
 
     def on_fix(self, m):
@@ -244,6 +253,7 @@ class SlamGeoInit(Node):
         msg.pose.covariance[0] = msg.pose.covariance[7] = 0.1 ** 2
         msg.pose.covariance[35] = math.radians(2) ** 2
         self.seeded = True      # before publishing: on_initialpose sees our own message
+        self.drop_odom()
         self.init_pub.publish(msg)
         self.get_logger().info(f"seeded SLAM: {desc}")
 

@@ -46,8 +46,10 @@ class SystemReady(Node):
         self.create_subscription(
             UInt32, "/mavros/global_position/raw/satellites", self.sat_cb, qos_profile_sensor_data
         )
+        # raw=True: only the arrival time is used; deserialising the 0.8 MB x 10 Hz
+        # cloud in Python cost ~11 % CPU (measured 2026-09-29).
         self.create_subscription(
-            PointCloud2, "/rslidar_points", self.lidar_cb, qos_profile_sensor_data
+            PointCloud2, "/rslidar_points", self.lidar_cb, qos_profile_sensor_data, raw=True
         )
         self.create_subscription(
             Imu, "/mavros/imu/data", self.imu_cb, qos_profile_sensor_data
