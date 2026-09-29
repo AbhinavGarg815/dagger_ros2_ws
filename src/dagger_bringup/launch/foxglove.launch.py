@@ -6,9 +6,14 @@
 Then in Foxglove: Open connection -> Foxglove WebSocket -> ws://<jetson-wifi-ip>:8765
 
 Safety / load choices (2026-09-17):
-- Clients may PUBLISH only /goal_pose (Nav2 NavigateToPose from the 3D panel's
-  publish tool) and /estop (std_msgs/Bool; one `true` latches the twist_mux lock
-  and cmd_vel_safety until `false`). No cmd_vel, no arming.
+- Clients may PUBLISH only /goal_pose_ui and /initialpose_ui (the 3D panel's
+  publish tool: "Pose" and "Pose estimate" -- set those topics in the panel),
+  and /estop (std_msgs/Bool; one `true` latches the twist_mux lock and
+  cmd_vel_safety until `false`). No cmd_vel, no arming. goal_pose_relay forwards
+  the two *_ui topics (2026-09-29): Foxglove stamps the click time, and Nav2
+  re-transforms goals at that stamp every replan -> TF ages out after ~10 s ->
+  abort; the relay sends stamp 0, converts moving frames into map, refuses goals
+  while SLAM is not localized. /goal_pose itself is no longer client-publishable.
 - No /mavros services or parameters exposed: nothing in the UI can arm, change
   mode, or write FCU params. Nav2 params stay editable (live tuning).
 - /rslidar_points (~0.8 MB x 10 Hz) is hidden by default: streaming it over Wi-Fi
@@ -36,7 +41,7 @@ def _bridge(context):
             "port": port,
             "address": "0.0.0.0",
             "topic_whitelist": topics,
-            "client_topic_whitelist": ["^/goal_pose$", "^/estop$"],
+            "client_topic_whitelist": ["^/goal_pose_ui$", "^/initialpose_ui$", "^/estop$"],
             "service_whitelist": ["^(?!/mavros).*"],
             "param_whitelist": ["^(?!/mavros).*"],
             "send_buffer_limit": 10000000,
@@ -44,6 +49,11 @@ def _bridge(context):
                 r"^package://(?:[-\w%]+/)*[-\w%.]+\.(?:dae|fbx|glb|gltf|jpeg|jpg|mtl|obj|png"
                 r"|stl|STL|tif|tiff|urdf|webp|xacro)$"],
         }],
+    ), Node(
+        package="dagger_bringup",
+        executable="goal_pose_relay",
+        name="goal_pose_relay",
+        output="screen",
     )]
 
 
