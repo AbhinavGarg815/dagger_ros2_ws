@@ -18,3 +18,4 @@ float32 bearing_deg             # from base_footprint +x, +left (camera ray)
 float32 range_m                 # LiDAR range from base_footprint; NaN if not ranged
 geometry_msgs/Point position    # in PersonTracks.odom_frame when ranged; NaN otherwise
 float32 appearance_sim          # re-ID similarity to the SELECTED person's appearance; NaN if n/a
+bool ranged                     # LiDAR-ranged at least once (only these can be selected)

@@ -20,6 +20,7 @@ from dagger_bringup.person_tracking import (COASTING, HOLD_LIDAR, LOST, NONE,  #
                                             TRACKING, Detection, iou_matrix,
                                             lidar_cluster, range_at)
 from dagger_bringup.person_tracking import Tracker as NewTracker  # noqa: E402
+from dagger_bringup.person_tracking import SEARCHING, person_sized  # noqa: E402
 
 
 def Tracker(**kw):
@@ -27,6 +28,8 @@ def Tracker(**kw):
     features (confirmation, 2 s survival) are tested separately at the end."""
     kw.setdefault("min_hits", 1)
     kw.setdefault("max_missed", 10)
+    kw.setdefault("select_requires_range", False)
+    kw.setdefault("isolated_hold_timeout", kw.get("lidar_only_timeout", 5.0))
     return NewTracker(**kw)
 
 FX, CX = 606.0, 320.0
@@ -235,6 +238,14 @@ check("target occluded behind a bystander: hold refuses the bystander's cluster"
 px, py = circle_scan([(3.0, 0.0)])
 xy = range_at(px, py, (0.29, 0.0), 0.0, math.radians(5))
 check("range_at finds the person straight ahead", xy is not None and abs(xy[0] - 2.8) < 0.2, str(xy))
+wx = np.full(200, 6.0); wy = np.linspace(-3, 3, 200)           # a wall 6 m ahead
+check("range_at refuses a slice of a wall (surface continues on both sides)",
+      range_at(wx, wy, (0.29, 0.0), 0.0, math.radians(3)) is None)
+px2, py2 = circle_scan([(3.0, 0.0)])
+px2, py2 = np.concatenate([px2, wx]), np.concatenate([py2, wy])
+xy2 = range_at(px2, py2, (0.29, 0.0), 0.0, math.radians(5))
+check("... but a person standing in front of that wall is still ranged",
+      xy2 is not None and abs(xy2[0] - 2.8) < 0.2, str(xy2))
 got, why = lidar_cluster(px, py, (3.0, 0.0), 0.8)
 check("lidar_cluster accepts a person-sized cluster", got is not None and why is None)
 
@@ -325,6 +336,149 @@ d1.xy = (3.02, 0.01)
 NewTracker().update([d1, d2], 0, T0)
 check("same cluster for two boxes -> the smaller (farther) box loses its range",
       d1.xy is None and d2.xy is not None)
+
+# ---------------- round 2: true positives only, never lose, re-identify ----------------
+rng_ = np.random.default_rng(7)
+
+
+def sig(base=None, noise=0.0):
+    v = rng_.normal(size=512) if base is None else base + rng_.normal(size=512) * noise
+    return v / np.linalg.norm(v)
+
+
+def with_emb(d, e):
+    d.emb = e
+    return d
+
+
+# a one-off confident detection + weak ones (the orange sign) never becomes a person
+t = NewTracker()
+t.update([det_at(4.0, 0.5, score=0.6, ranged=False)], 0, T0)
+for k in range(1, 20):
+    t.update([det_at(4.0, 0.5, score=0.3, ranged=False)], k * DT, T0)
+check("1 confident + weak detections never confirm (no id)", t.confirmed() == [])
+t = NewTracker()
+for k in range(5):
+    t.update([det_at(4.0, 0.5, ranged=False)], k * DT, T0)
+check("confirmed but never LiDAR-ranged -> cannot be selected",
+      [x.id for x in t.confirmed()] == [1] and not t.select(1))
+
+FY = 606.0
+box_p = det_at(3.0, 0.0).box                      # a 1.7 m person at 3 m
+check("person_sized: 1.7 m person at 3 m -> yes", person_sized(box_p, 3.0, FX, FY, 480 * 4))
+check("person_sized: same box ranged at 8 m (wall behind) -> no", not person_sized(box_p, 8.0, FX, FY, 480 * 4))
+sign = (300, 200, 360, 260)                       # 0.3 m tall at 3 m
+check("person_sized: a 0.3 m tall object -> no", not person_sized(sign, 3.0, FX, FY, 480))
+cut = (250, 0, 390, 480)                          # fills the frame (cut top+bottom) at 1.2 m
+check("person_sized: cut-off box -> only 'too tall' can reject", person_sized(cut, 1.2, FX, FY, 480))
+
+# too close for the LiDAR but in the camera: stays the target at near_range
+t = NewTracker()
+for k in range(5):
+    t.update([det_at(2.0, 0.1)], k * DT, T0)
+t.select(1)
+nd = det_at(1.2, 0.1, ranged=False)
+nd.near = True
+tr, tgt = t.update([nd], 5 * DT, T0)
+check("too close for the LiDAR (near) -> target at near_range, source 'near', same id",
+      tgt is not None and tgt[2] == "near" and abs(math.hypot(tgt[0], tgt[1]) - 1.0) < 1e-6
+      and t.state() == TRACKING)
+
+# isolated LiDAR hold outlives lidar_only_timeout; a crowded one does not
+def hold_run(extra_pts):
+    t = NewTracker(lidar_only_timeout=2.0, isolated_hold_timeout=4.0)
+    for k in range(5):
+        t.update([det_at(3.0, 0.3)], k * DT, T0)
+    t.select(1)
+    lost = None
+    for k in range(5, 80):
+        f = min(k - 5, 10) / 10.0
+        x, y = 3.0 - 1.0 * f, 0.3 + 2.7 * f           # walks out of view, then stands
+        vis = abs(math.atan2(y, x)) < math.radians(27)
+        px, py = circle_scan([(x, y)] + extra_pts)
+        t.update([det_at(x, y)] if vis else [], k * DT, T0, (px, py))
+        if lost is None and t.state() in (LOST, SEARCHING):
+            lost = k * DT
+    return lost
+iso, crowd = hold_run([]), hold_run([(2.0, 3.8)])      # a post 0.8 m from where they stand
+check("isolated person out of view: held past lidar_only_timeout, until isolated_hold_timeout",
+      iso is not None and iso > 4.0, f"lost at {iso}")
+check("something within 1 m: the hold ends at lidar_only_timeout", crowd is not None and crowd < 3.2,
+      f"lost at {crowd}")
+
+# re-identification of the selected person
+eA, eB = sig(), sig()
+
+
+def reid_scene(newcomers, window=30.0, lost_s=1.0):
+    t = NewTracker(reid_window=window)
+    for k in range(15):                                # A tracked 1.5 s, gallery learns
+        t.update([with_emb(det_at(3.0, 0.2), sig(eA, 0.02))], k * DT, T0)
+    t.select(1)
+    k = 15
+    while t.state() not in (LOST, SEARCHING) and k < 100:   # A vanishes (walked away fast)
+        t.update([], k * DT, T0)
+        k += 1
+    t_lost = k * DT
+    k += int(lost_s / DT)
+    out = []
+    for n in range(12):
+        dl = [with_emb(det_at(x, y), sig(e, 0.03)) for (x, y, e) in newcomers]
+        tr, tgt = t.update(dl, k * DT, T0)
+        out.append((t.state(), t.selected_id, tgt))
+        k += 1
+    return t, out, t_lost
+
+t, out, _ = reid_scene([(4.0, -0.5, eA)])
+check("A returns (new track, same looks) -> re-identified: same id 1, TRACKING, target again",
+      out[-1][0] == TRACKING and out[-1][1] == 1 and out[-1][2] is not None
+      and any(x.id == 1 for x in t.confirmed()), str(out[-1][:2]))
+t, out, _ = reid_scene([(4.0, -0.5, eB)])
+check("a different-looking person is never re-identified as A (stays SEARCHING)",
+      all(o[0] == SEARCHING and o[2] is None for o in out))
+t, out, _ = reid_scene([(4.0, -0.5, eA), (4.5, 1.0, eA)])   # equally similar to A
+check("two equally good look-alikes, no clear margin -> no re-identification",
+      all(o[2] is None for o in out))
+t, out, _ = reid_scene([(4.0, -0.5, eA), (4.5, 1.0, sig(eA, 0.03))])
+check("A and a weaker look-alike -> A (the clear best) is re-identified",
+      out[-1][1] == 1 and out[-1][2] is not None and abs(out[-1][2][0] - 4.0) < 0.3)
+t, out, _ = reid_scene([(4.0, -0.5, eA)], window=0.5, lost_s=1.0)
+check("after the re-identification window -> LOST for good, no re-link",
+      all(o[0] == LOST and o[2] is None for o in out))
+# someone present at the loss is never the target, however similar
+t = NewTracker()
+for k in range(15):
+    t.update([with_emb(det_at(3.0, 0.2), sig(eA, 0.02)),
+              with_emb(det_at(5.0, -1.5), sig(eA, 0.03))], k * DT, T0)
+t.select(1)
+k = 15
+while t.state() not in (LOST, SEARCHING) and k < 100:
+    t.update([with_emb(det_at(5.0, -1.5), sig(eA, 0.03))], k * DT, T0)
+    k += 1
+for n in range(12):
+    tr, tgt = t.update([with_emb(det_at(5.0, -1.5), sig(eA, 0.03))], (k + n) * DT, T0)
+check("a look-alike who was there when A was lost is never re-identified as A",
+      t.state() == SEARCHING and tgt is None)
+
+# appearance veto: an unranged box that looks nothing like the track is not them
+t = NewTracker()
+for k in range(10):
+    t.update([with_emb(det_at(3.0, 0.2, ranged=False), sig(eA, 0.02))], k * DT, T0)
+tr, _ = t.update([with_emb(det_at(3.0, 0.2, ranged=False), sig(eB, 0.02))], 10 * DT, T0)
+check("box-only match vetoed when appearance clearly differs", not tr[0].visible)
+
+# search hint: where the lost person probably is
+t = NewTracker()
+for k in range(15):
+    t.update([with_emb(det_at(3.0, 0.2 + 0.05 * k), sig(eA, 0.02))], k * DT, T0)
+t.select(1)
+k = 15
+while t.state() not in (LOST, SEARCHING):
+    t.update([], k * DT, T0)
+    k += 1
+h = t.search_hint(k * DT)
+check("search hint points where the lost person was heading", h is not None and h[1] > 0.9,
+      str(h))
 
 print(f"\n{sum(results)}/{len(results)} passed")
 sys.exit(0 if all(results) else 1)

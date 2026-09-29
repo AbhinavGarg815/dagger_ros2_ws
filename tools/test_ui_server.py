@@ -32,7 +32,7 @@ from rclpy.node import Node  # noqa: E402
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy  # noqa: E402
 from sensor_msgs.msg import CompressedImage  # noqa: E402
 from std_msgs.msg import Bool, Int32  # noqa: E402
-from vision_msgs.msg import BoundingBox2D, Detection2D, Detection2DArray, ObjectHypothesisWithPose  # noqa: E402
+from dagger_msgs.msg import PersonDetection, PersonDetections  # noqa: E402
 
 PORT = 18080
 LIB = "/home/jetson/ros2_ws/install/dagger_bringup/lib/dagger_bringup"
@@ -47,7 +47,8 @@ def check(name, ok, detail=""):
 env = dict(os.environ)
 procs = [subprocess.Popen([f"{LIB}/{exe}", "--ros-args", *args], env=env, start_new_session=True,
                           stdout=open(f"/tmp/test_ui_{exe}.log", "w"), stderr=subprocess.STDOUT)
-         for exe, args in (("person_tracker", ["-p", "image_rotation_deg:=180"]),
+         for exe, args in (("person_tracker", ["-p", "image_rotation_deg:=180",
+                                               "-p", "select_requires_range:=false"]),
                            ("ui_server", ["-p", f"port:={PORT}", "-p", "allow_follow:=true",
                                           "-p", "deadman_s:=1.5"]))]
 
@@ -55,7 +56,7 @@ rclpy.init()
 n = Node("fake_camera")
 be = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryPolicy.KEEP_LAST, depth=1)
 p_img = n.create_publisher(CompressedImage, "/follow/ui/image/compressed", be)
-p_det = n.create_publisher(Detection2DArray, "/follow/detections", 10)
+p_det = n.create_publisher(PersonDetections, "/follow/person_detections", 10)
 enable_log, select_log = [], []
 n.create_subscription(Bool, "/follow/enable", lambda m: enable_log.append((time.time(), m.data)), 10)
 n.create_subscription(Int32, "/follow/select", lambda m: select_log.append(m.data), 10)
@@ -76,16 +77,12 @@ k = [0]
 def tick():
     k[0] += 1
     st = n.get_clock().now().to_msg()
-    d = Detection2DArray()
+    d = PersonDetections()
     d.header.stamp, d.header.frame_id = st, "d435_color_optical_frame"
+    d.image_width, d.image_height = 640, 480
     for cx in (200 + k[0], 450):                    # one walks right slowly, one stands
-        det = Detection2D()
-        det.bbox = BoundingBox2D()
-        det.bbox.center.position.x, det.bbox.center.position.y = float(cx), 240.0
-        det.bbox.size_x, det.bbox.size_y = 60.0, 160.0
-        h = ObjectHypothesisWithPose()
-        h.hypothesis.class_id, h.hypothesis.score = "0", 0.9
-        det.results.append(h)
+        det = PersonDetection()
+        det.x1, det.y1, det.x2, det.y2, det.score = cx - 30.0, 160.0, cx + 30.0, 320.0, 0.9
         d.detections.append(det)
     im = CompressedImage()
     im.header, im.format = d.header, "jpeg"

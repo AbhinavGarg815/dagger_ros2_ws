@@ -103,6 +103,17 @@ class FollowController(Node):
         # Vanishing dead ahead means occlusion or out of range, and turning would
         # point the camera AWAY from where they still are.
         self.declare_parameter("search_min_bearing_deg", 8.0)
+        # Click-to-follow (person_tracker) only; 0 = the behaviour above, unchanged.
+        # > 0: after losing the target, stay enabled this long and LOOK for them:
+        # turn toward /follow/search_hint (where the tracker thinks they are),
+        # face it for search_face_hold_s, then sweep in place toward where they
+        # were last seen -- ROTATION ONLY. If the tracker re-identifies them (same
+        # track id) following resumes; if not, disable as before. 30 s = the
+        # operator's choice (2026-09-29), matching the tracker's reid_window.
+        self.declare_parameter("resume_window", 0.0)
+        self.declare_parameter("search_face_deg", 10.0)
+        self.declare_parameter("search_face_hold_s", 3.0)
+        self.declare_parameter("hint_timeout", 0.5)
         self.declare_parameter("publish_rate", 20.0)
 
         g = lambda n: self.get_parameter(n).value  # noqa: E731
@@ -123,6 +134,14 @@ class FollowController(Node):
         self.search_timeout = float(g("search_timeout"))
         self.search_w = float(g("search_angular"))
         self.search_min_bearing = math.radians(float(g("search_min_bearing_deg")))
+        self.resume_window = float(g("resume_window"))
+        self.face_tol = math.radians(float(g("search_face_deg")))
+        self.face_hold = float(g("search_face_hold_s"))
+        self.hint_timeout = float(g("hint_timeout"))
+        self.hint = None                   # (bearing, monotonic receipt) from the tracker
+        self.face_since = None
+        self.sweeping = False              # once sweeping, the hint no longer pulls the rover back
+        self.sweep_dir = 1.0
         self.rate = float(g("publish_rate"))
 
         self.enabled = False
@@ -161,6 +180,7 @@ class FollowController(Node):
         self.create_subscription(Bool, g("enable_topic"), self.on_enable, 10)
         self.create_subscription(Bool, g("estop_topic"), self.on_estop, 10)
         self.create_subscription(Int32, "/follow/track_id", self.on_track_id, 10)
+        self.create_subscription(PoseStamped, "/follow/search_hint", self.on_hint, be)
         self.create_timer(1.0 / self.rate, self.tick)
 
         self.get_logger().warn(
@@ -208,6 +228,10 @@ class FollowController(Node):
             self.v_cmd = 0.0
         self.estop = msg.data
 
+    def on_hint(self, msg):
+        p = msg.pose.position
+        self.hint = (math.atan2(p.y, p.x), time.monotonic())
+
     def on_target(self, msg):
         self.target = msg
         self.target_time = time.monotonic()
@@ -234,6 +258,25 @@ class FollowController(Node):
             self.state_pub.publish(String(data=text))
             self.state_sent, self.state_sent_at = text, now
 
+    def search_rate(self, now):
+        """Click-to-follow search: face the tracker's hint, hold, then sweep in ONE
+        direction (the side they were lost on) until found or the window ends."""
+        if not self.sweeping and self.hint is not None and now - self.hint[1] <= self.hint_timeout:
+            b = self.hint[0]
+            if abs(b) > self.face_tol:
+                self.face_since = None
+                self.sweep_dir = math.copysign(1.0, b)
+                return math.copysign(self.search_w, b)
+            if self.face_since is None:
+                self.face_since = now
+            if now - self.face_since < self.face_hold:
+                return 0.0                  # facing where they should be: let the camera look
+        if not self.sweeping:
+            self.sweeping = True
+            self.get_logger().warn("not where the tracker expected -- sweeping in place "
+                                   f"({'left' if self.sweep_dir > 0 else 'right'})")
+        return self.sweep_dir * self.search_w
+
     def tick(self):
         now = time.monotonic()
         have_target = (self.target is not None
@@ -242,7 +285,17 @@ class FollowController(Node):
         # Decide, at the moment the target is lost, whether a search is worth it.
         if self.enabled and not self.estop and not have_target \
                 and self.last_state == "following":
-            if abs(self.last_bearing) >= self.search_min_bearing:
+            if self.resume_window > 0:
+                self.search_until = now + self.resume_window
+                self.face_since = None
+                self.sweeping = False
+                self.sweep_dir = math.copysign(1.0, self.last_bearing)   # the side they left by
+                self.get_logger().warn(
+                    f"target lost at {math.degrees(self.last_bearing):+.1f} deg -- searching "
+                    f"(turn to where the tracker expects them, then sweep) for "
+                    f"{self.resume_window:.0f} s; following resumes if they are re-identified. "
+                    f"No forward motion.")
+            elif abs(self.last_bearing) >= self.search_min_bearing:
                 self.search_until = now + self.search_timeout
                 self.get_logger().warn(
                     f"target lost at {math.degrees(self.last_bearing):+.1f} deg -- "
@@ -266,7 +319,8 @@ class FollowController(Node):
             # Rotate toward the last known bearing. Zero linear, always.
             self.v_cmd = 0.0
             cmd = Twist()
-            cmd.angular.z = math.copysign(self.search_w, self.last_bearing)
+            cmd.angular.z = (self.search_rate(now) if self.resume_window > 0
+                             else math.copysign(self.search_w, self.last_bearing))
             self.pub.publish(cmd)
             return
 

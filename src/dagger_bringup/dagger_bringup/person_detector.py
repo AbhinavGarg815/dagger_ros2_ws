@@ -26,6 +26,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 from sensor_msgs.msg import Image, CompressedImage
+from dagger_msgs.msg import PersonDetection, PersonDetections
 from vision_msgs.msg import (BoundingBox2D, Detection2D, Detection2DArray,
                              ObjectHypothesisWithPose)
 
@@ -61,6 +62,12 @@ class PersonDetector(Node):
         # (the browser rotates). Encoded only while someone subscribes.
         self.declare_parameter("ui_image_topic", "/follow/ui/image/compressed")
         self.declare_parameter("ui_jpeg_quality", 70)
+        # Re-ID appearance signature per person (OSNet TensorRT, reid_trt.py), from
+        # the UPRIGHT frame used for inference, on /follow/person_detections
+        # (dagger_msgs/PersonDetections) for person_tracker. Empty = no signatures.
+        self.declare_parameter("reid_engine", "")
+        self.declare_parameter("person_detections_topic", "/follow/person_detections")
+        self.declare_parameter("reid_min_score", 0.3)
 
         g = lambda n: self.get_parameter(n).value  # noqa: E731
         engine = g("engine_path")
@@ -71,6 +78,16 @@ class PersonDetector(Node):
         self.publish_debug = bool(g("publish_debug_image"))
         self.rot_deg = int(g("image_rotation_deg")) % 360
         self.ui_quality = int(g("ui_jpeg_quality"))
+        self.reid_min_score = float(g("reid_min_score"))
+        self.reid = None
+        if g("reid_engine"):
+            try:
+                from dagger_bringup.reid_trt import ReidTRT
+                self.reid = ReidTRT(g("reid_engine"))
+            except Exception as e:     # a missing engine must not take detection down with it
+                self.get_logger().error(f"re-ID disabled -- cannot load {g('reid_engine')}: {e} "
+                                        "(build it: bash tools/fetch_model.sh reid)")
+        self.reid_ms = []
         if self.rot_deg not in (0, 90, 180, 270):
             raise RuntimeError(f"image_rotation_deg must be 0/90/180/270, got {self.rot_deg}")
 
@@ -91,6 +108,7 @@ class PersonDetector(Node):
         self.debug_pub = (self.create_publisher(Image, g("debug_image_topic"), 1)
                           if self.publish_debug else None)
         self.ui_pub = self.create_publisher(CompressedImage, g("ui_image_topic"), qos)
+        self.pd_pub = self.create_publisher(PersonDetections, g("person_detections_topic"), 10)
         self.create_subscription(Image, g("image_topic"), self.on_image, qos)
 
         self.last_run = 0.0
@@ -117,10 +135,37 @@ class PersonDetector(Node):
         # The driver streams rgb8; YOLOX was calibrated on cv2's BGR ordering.
         frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
         t0 = time.perf_counter()
-        dets = self.detector.detect(self.rotate(frame))
-        dets = [self.unrotate(d, frame.shape[1], frame.shape[0]) for d in dets]
+        upright = self.rotate(frame)
+        dets_up = self.detector.detect(upright)
+        dets = [self.unrotate(d, frame.shape[1], frame.shape[0]) for d in dets_up]
         self.infer_ms.append((time.perf_counter() - t0) * 1e3)
         self.n_frames += 1
+
+        # appearance signatures: crops from the upright frame (the network was
+        # trained on upright people), in the same order as dets
+        embs = [None] * len(dets)
+        if self.reid is not None and self.pd_pub.get_subscription_count() > 0:
+            from dagger_bringup.reid_trt import crop
+            t1 = time.perf_counter()
+            idx, crops = [], []
+            for k, (x1, y1, x2, y2, score, _c) in enumerate(dets_up[:16]):
+                c = crop(upright, (x1, y1, x2, y2)) if score >= self.reid_min_score else None
+                if c is not None:
+                    idx.append(k)
+                    crops.append(c)
+            for k, e in zip(idx, self.reid.embed(crops)):
+                embs[k] = e
+            self.reid_ms.append((time.perf_counter() - t1) * 1e3)
+        pd = PersonDetections()
+        pd.header = msg.header
+        pd.image_width, pd.image_height = frame.shape[1], frame.shape[0]
+        for (x1, y1, x2, y2, score, _c), e in zip(dets, embs):
+            p = PersonDetection()
+            p.x1, p.y1, p.x2, p.y2, p.score = float(x1), float(y1), float(x2), float(y2), float(score)
+            if e is not None:
+                p.embedding = array.array("f", e.astype(np.float32).tobytes())
+            pd.detections.append(p)
+        self.pd_pub.publish(pd)
 
         out = Detection2DArray()
         out.header = msg.header           # capture time + camera optical frame
@@ -191,9 +236,11 @@ class PersonDetector(Node):
         self.get_logger().info(
             f"{self.n_frames / 10.0:.1f} Hz processed ({self.n_skipped} frames skipped "
             f"to hold the rate), detect median {np.median(ms):.1f} ms, p95 "
-            f"{np.percentile(ms, 95):.1f} ms")
+            f"{np.percentile(ms, 95):.1f} ms"
+            + (f", re-ID median {np.median(self.reid_ms):.1f} ms" if self.reid_ms else ""))
         self.n_frames = self.n_skipped = 0
         self.infer_ms = []
+        self.reid_ms = []
 
 
 def main(args=None):

@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Every detected person -> a stable ID and position; the operator's click -> the target.
 
-    /follow/detections (person_detector) + /d435/color/camera_info + /scan_safety
-    + /odometry/filtered + /tf_static
+    /follow/person_detections (person_detector: boxes + re-ID signatures)
+    + /d435/color/camera_info + /scan_safety + /odometry/filtered + /tf_static
         -> /follow/tracks        (dagger_msgs/PersonTracks, one per camera frame, for the UI)
     /follow/select (Int32: track id, -1 = clear, from ui_server)
         -> /follow/target        (PoseStamped, base_footprint)   } only for the SELECTED
            /follow/track_id      (Int32, published first)         } person, and only
-           /follow/target_source ("camera" | "lidar")             } with publish_target
+           /follow/target_source ("camera"|"lidar"|"near")        } with publish_target
+        -> /follow/search_hint   (PoseStamped, base_footprint): where the selected
+           person probably is while unseen (coasting / lost inside the re-ID window)
 
 Replaces target_selector when follow.launch runs with target_source:=tracker.
 Same sensors, same geometry, same parameter values: the camera gives each
@@ -43,9 +45,10 @@ from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPo
 from sensor_msgs.msg import CameraInfo, LaserScan
 from std_msgs.msg import Int32, String
 from tf2_msgs.msg import TFMessage
-from vision_msgs.msg import Detection2DArray
+from dagger_msgs.msg import PersonDetections
 
-from dagger_bringup.person_tracking import Detection, Tracker, range_at, scan_xy
+from dagger_bringup.person_tracking import (Detection, Tracker, person_sized, range_at,
+                                            scan_xy, to_base)
 
 NAN = float("nan")
 
@@ -62,7 +65,7 @@ class PersonTracker(Node):
     def __init__(self):
         super().__init__("person_tracker")
         p = self.declare_parameter
-        p("detections_topic", "/follow/detections")
+        p("detections_topic", "/follow/person_detections")
         p("camera_info_topic", "/d435/color/camera_info")
         p("scan_topic", "/scan_safety")
         p("odom_topic", "/odometry/filtered")
@@ -102,6 +105,15 @@ class PersonTracker(Node):
         p("dup_iou", 0.5)
         p("min_hits", 3)
         p("tentative_max_missed", 2)
+        # never lose a true target / re-identify (person_tracking.Tracker)
+        p("isolated_hold_timeout", 30.0)
+        p("near_range", 1.0)
+        p("near_box_fraction", 0.85)       # box >= this x image height = too close for the LiDAR
+        p("reid_window", 30.0)
+        p("reid_sim", 0.66)
+        p("reid_margin", 0.08)
+        p("reid_frames", 3)
+        p("select_requires_range", True)   # False only for UI tests without a LiDAR
         g = lambda n: self.get_parameter(n).value  # noqa: E731
 
         self.tracker = Tracker(
@@ -115,7 +127,14 @@ class PersonTracker(Node):
             other_person_radius=float(g("other_person_radius")),
             high_score=float(g("high_score")), iou_strong=float(g("iou_strong")),
             dispute_frames=int(g("dispute_frames")), dup_iou=float(g("dup_iou")),
-            min_hits=int(g("min_hits")), tentative_max_missed=int(g("tentative_max_missed")))
+            min_hits=int(g("min_hits")), tentative_max_missed=int(g("tentative_max_missed")),
+            isolated_hold_timeout=float(g("isolated_hold_timeout")),
+            near_range=float(g("near_range")), reid_window=float(g("reid_window")),
+            reid_sim=float(g("reid_sim")), reid_margin=float(g("reid_margin")),
+            reid_frames=int(g("reid_frames")),
+            select_requires_range=bool(g("select_requires_range")))
+        self.near_frac = float(g("near_box_fraction"))
+        self.last_relink = None
         self.base_frame, self.odom_frame = g("base_frame"), g("odom_frame")
         self.rot = int(g("image_rotation_deg")) % 360
         self.publish_target = bool(g("publish_target"))
@@ -135,7 +154,7 @@ class PersonTracker(Node):
         self.pending_state, self.pending_n = None, 0
         self.last_refusal = None
         self.proc_ms, self.lag_ms = [], []
-        self.stats = {"no_range": 0, "held": 0, "targets": 0}
+        self.stats = {"no_range": 0, "held": 0, "targets": 0, "not_person_sized": 0}
 
         self.tf_buffer = tf2_ros.Buffer()
         self.create_subscription(
@@ -148,10 +167,11 @@ class PersonTracker(Node):
         self.target_pub = self.create_publisher(PoseStamped, g("target_topic"), 10)
         self.id_pub = self.create_publisher(Int32, "/follow/track_id", 10)
         self.source_pub = self.create_publisher(String, "/follow/target_source", 10)
+        self.hint_pub = self.create_publisher(PoseStamped, "/follow/search_hint", 10)
         self.create_subscription(CameraInfo, g("camera_info_topic"), self.on_info, be)
         self.create_subscription(LaserScan, g("scan_topic"), self.on_scan, be)
         self.create_subscription(Odometry, g("odom_topic"), self.on_odom, be)
-        self.create_subscription(Detection2DArray, g("detections_topic"), self.on_dets, 10)
+        self.create_subscription(PersonDetections, g("detections_topic"), self.on_dets, 10)
         self.create_subscription(Int32, g("select_topic"), self.on_select, 10)
         self.create_timer(10.0, self.report)
         self.get_logger().info(
@@ -193,7 +213,10 @@ class PersonTracker(Node):
                      if t.range == t.range else " (no LiDAR range yet)")
             self.get_logger().info(f"SELECTED person #{m.data}{where}")
         else:
-            self.get_logger().warn(f"select #{m.data} ignored: no such person")
+            known = any(t.id == m.data for t in self.tracker.confirmed())
+            self.get_logger().warn(
+                f"select #{m.data} ignored: " + ("never ranged by the LiDAR -- not confirmed as "
+                                                  "a person" if known else "no such person"))
 
     # ---------------- geometry ----------------
     def camera_ray(self, u, v, stamp, frame):
@@ -228,11 +251,12 @@ class PersonTracker(Node):
              else None)
         stamp = rclpy.time.Time.from_msg(m.header.stamp)
 
+        img_h = m.image_height or self.height
         dets = []
         for d in m.detections:
-            cx, cy = d.bbox.center.position.x, d.bbox.center.position.y
-            w, h = d.bbox.size_x, d.bbox.size_y
-            score = d.results[0].hypothesis.score if d.results else 0.0
+            cx, cy = (d.x1 + d.x2) / 2.0, (d.y1 + d.y2) / 2.0
+            w, h = d.x2 - d.x1, d.y2 - d.y1
+            score = d.score
             bearing, xy = NAN, None
             if self.K is not None:
                 ray = self.camera_ray(cx, cy, stamp, m.header.frame_id)
@@ -245,14 +269,34 @@ class PersonTracker(Node):
                                       self.cluster_depth, self.min_cluster)
                         if xy is None:
                             self.stats["no_range"] += 1
-            dets.append(Detection((cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2), score,
-                                  bearing, xy))
+                        elif not person_sized((d.x1, d.y1, d.x2, d.y2),
+                                              math.hypot(xy[0] - origin[0], xy[1] - origin[1]),
+                                              self.K[0], self.K[1], img_h):
+                            xy = None                   # that range is not this person's
+                            self.stats["not_person_sized"] += 1
+            emb = np.frombuffer(d.embedding.tobytes(), np.float32) if len(d.embedding) else None
+            dets.append(Detection((d.x1, d.y1, d.x2, d.y2), score, bearing, xy, emb,
+                                  near=h >= self.near_frac * img_h))
 
         tracks, target = self.tracker.update(dets, now, T, pts)
         state = self.tracker.state()
+        if self.tracker.relinked is not None and self.tracker.relinked != self.last_relink:
+            self.last_relink = self.tracker.relinked
+            self.get_logger().warn(
+                f"RE-IDENTIFIED person #{self.tracker.selected_id} (appearance "
+                f"{self.tracker.relinked[2]:.2f}; was shown as #{self.tracker.relinked[1]})")
         self.log_changes(state)
         if target is not None and self.publish_target:
             self.publish(m.header.stamp, target)
+        elif self.publish_target and T is not None:
+            hint = self.tracker.search_hint(now)
+            if hint is not None:
+                hx, hy = to_base(T, *hint)
+                hp = PoseStamped()
+                hp.header.stamp, hp.header.frame_id = m.header.stamp, self.base_frame
+                hp.pose.position.x, hp.pose.position.y = float(hx), float(hy)
+                hp.pose.orientation.w = 1.0
+                self.hint_pub.publish(hp)
         self.publish_tracks(m.header, tracks, state)
         self.proc_ms.append(1000 * (time.perf_counter() - t0))
         if self.K is None:
@@ -299,7 +343,10 @@ class PersonTracker(Node):
                 p.position.x, p.position.y, p.position.z = float(t.pos[0]), float(t.pos[1]), 0.0
             else:
                 p.position.x = p.position.y = p.position.z = NAN
-            p.appearance_sim = NAN
+            sel = self.tracker.selected()
+            p.appearance_sim = (float(np.dot(t.recent[-1], sel.gallery))
+                                if t.recent and sel is not None and sel.gallery is not None else NAN)
+            p.ranged = bool(t.ever_ranged)
             out.tracks.append(p)
         self.tracks_pub.publish(out)
 
@@ -310,11 +357,17 @@ class PersonTracker(Node):
             self.pending_n += 1
         else:
             self.pending_state, self.pending_n = state, 1
-        if state != self.last_state and (self.pending_n >= 3 or state in ("LOST", "NONE")):
+        if state != self.last_state and (self.pending_n >= 3
+                                         or state in ("LOST", "NONE", "SEARCHING")):
             sid = self.tracker.selected_id
             msgs = {"TRACKING": f"person #{sid}: camera has them",
                     "HOLD_LIDAR": f"person #{sid}: camera lost them -- holding on the LiDAR",
                     "COASTING": f"person #{sid}: not seen for 3+ frames",
+                    "SEARCHING": f"person #{sid} LOST"
+                                 + (f" (LiDAR hold refused: {self.tracker.hold_refusal})"
+                                    if self.tracker.hold_refusal else "")
+                                 + f" -- searching: re-identification for "
+                                 f"{self.tracker.reid_window:.0f} s",
                     "LOST": f"person #{sid} LOST"
                             + (f" (LiDAR hold refused: {self.tracker.hold_refusal})"
                                if self.tracker.hold_refusal else "")
@@ -324,13 +377,13 @@ class PersonTracker(Node):
             # changed between calls" if one line logs at two levels -- that crashed
             # this node at the first state change (scene test, 2026-09-29).
             if self.last_state is not None or state != "NONE":
-                if state in ("LOST", "HOLD_LIDAR"):
+                if state in ("LOST", "HOLD_LIDAR", "SEARCHING"):
                     self.get_logger().warn(msgs[state])
                 else:
                     self.get_logger().info(msgs[state])
             self.last_state = state
         r = self.tracker.hold_refusal
-        if r and r != self.last_refusal and state != "LOST":   # the LOST line carries it
+        if r and r != self.last_refusal and state not in ("LOST", "SEARCHING"):   # LOST line has it
             self.get_logger().warn(f"LiDAR hold refused: {r}")
         self.last_refusal = r
 
@@ -341,7 +394,8 @@ class PersonTracker(Node):
             self.get_logger().info(
                 f"{len(p) / 10.0:.1f} Hz, {len(self.tracker.tracks)} person(s), "
                 f"selected #{self.tracker.selected_id} {self.tracker.state()}; "
-                f"{s['targets']} targets ({s['held']} LiDAR-held), {s['no_range']} unranged; "
+                f"{s['targets']} targets ({s['held']} LiDAR-held), {s['no_range']} unranged, "
+                f"{s['not_person_sized']} ranges refused (not person-sized); "
                 f"update median {p[len(p) // 2]:.1f} ms max {p[-1]:.1f} ms; "
                 f"detections {lag[len(lag) // 2]:.0f} ms old on arrival")
         self.proc_ms.clear()

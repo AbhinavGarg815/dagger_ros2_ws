@@ -4,6 +4,9 @@
     python3 tools/replay_tracker.py ~/dagger_bags/track_ids1_<HHMMSS>
     python3 tools/replay_tracker.py <bag> --set max_missed=20 --set iou_min=0.3
     python3 tools/replay_tracker.py <bag> --live          # score what the live tracker did
+    python3 tools/replay_tracker.py <bag> --reid --select-at 30   # appearance from the bag's
+        UI JPEGs (OSNet engine), select the person nearest the image centre at 30 s,
+        and report re-identifications
 
 Re-computes each detection's bearing + LiDAR range exactly like person_tracker
 (camera model + static TF + range_at on the scan nearest in time), feeds the
@@ -51,7 +54,8 @@ def read_bag(path):
     r.open(rosbag2_py.StorageOptions(uri=path, storage_id="mcap"), rosbag2_py.ConverterOptions("", ""))
     types = {t.name: t.type for t in r.get_all_topics_and_types()}
     want = ["/follow/detections", "/scan_safety", "/odometry/filtered", "/tf_static",
-            "/d435/color/camera_info", "/follow/tracks", "/follow/select"]
+            "/d435/color/camera_info", "/follow/tracks", "/follow/select",
+            "/follow/ui/image/compressed"]
     r.set_filter(__import__("rosbag2_py").StorageFilter(topics=[w for w in want if w in types]))
     out = {w: [] for w in want}
     while r.has_next():
@@ -86,6 +90,11 @@ def main():
     ap.add_argument("--min-score", type=float, default=0.0)
     ap.add_argument("--live", action="store_true", help="score the recorded /follow/tracks instead")
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--reid", action="store_true", help="appearance from the bag's UI JPEGs")
+    ap.add_argument("--engine", default="/home/jetson/ros2_ws/models/osnet_x0_25_msmt17_fp16.engine")
+    ap.add_argument("--select-at", type=float, default=None,
+                    help="select the ranged person nearest the image centre at this time (s)")
+    ap.add_argument("--rot", type=int, default=180, help="camera mounting rotation (deg)")
     a = ap.parse_args()
     B = read_bag(os.path.expanduser(a.bag))
     dets = B["/follow/detections"]
@@ -110,7 +119,17 @@ def main():
             k, v = s.split("=")
             kw[k] = float(v) if "." in v else int(v)
         trk = Tracker(**kw)
-        sel_events = sorted((t, m.data) for t, m in B["/follow/select"])
+        sel_events = [] if a.select_at is not None else sorted(
+            (t, m.data) for t, m in B["/follow/select"])
+        imgs = {(m.header.stamp.sec, m.header.stamp.nanosec): bytes(m.data)
+                for _, m in B["/follow/ui/image/compressed"]} if a.reid else {}
+        reid = None
+        if a.reid:
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src", "dagger_bringup"))
+            from dagger_bringup.reid_trt import ReidTRT, crop
+            import cv2
+            reid = ReidTRT(a.engine)
+        selected_done, relinks, sel_hist = False, [], []
         frames = []
         for t, m in dets:
             while sel_events and sel_events[0][0] <= t:
@@ -137,10 +156,43 @@ def main():
                 if pts is not None:
                     half = min(math.radians(25), max(math.radians(2), math.atan((w / 2) / K[0]) * 1.2))
                     xy = range_at(pts[0], pts[1], cam_t[:2], bearing, half, 0.6, 2)
-                dl.append(Detection((cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2), sc_, bearing, xy))
+                dl.append(Detection((cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2), sc_, bearing, xy,
+                                    near=h >= 0.85 * info.height))
+            key = (m.header.stamp.sec, m.header.stamp.nanosec)
+            if reid is not None and key in imgs and dl:
+                fr = cv2.imdecode(np.frombuffer(imgs[key], np.uint8), cv2.IMREAD_COLOR)
+                Hh, Ww = fr.shape[:2]
+                if a.rot == 180:
+                    fr = cv2.rotate(fr, cv2.ROTATE_180)
+                crops, idx = [], []
+                for k, d_ in enumerate(dl):
+                    x1, y1, x2, y2 = d_.box
+                    ub = (Ww - x2, Hh - y2, Ww - x1, Hh - y1) if a.rot == 180 else (x1, y1, x2, y2)
+                    c = crop(fr, ub) if d_.score >= 0.3 else None
+                    if c is not None:
+                        crops.append(c)
+                        idx.append(k)
+                for k, e in zip(idx, reid.embed(crops)):
+                    dl[k].emb = e
             tracks, _ = trk.update(dl, t, T, pts)
+            if a.select_at is not None and not selected_done and t - t0 >= a.select_at:
+                cand = [x for x in tracks if x.visible and x.ever_ranged]
+                if cand:
+                    pick = min(cand, key=lambda x: abs((x.box[0] + x.box[2]) / 2 - info.width / 2))
+                    trk.select(pick.id)
+                    selected_done = True
+                    print(f"  selected #{pick.id} at {t - t0:.1f} s (range {pick.range:.1f} m)")
+            if trk.relinked is not None and (not relinks or relinks[-1] != trk.relinked):
+                relinks.append(trk.relinked)
+                print(f"  RE-IDENTIFIED #{trk.selected_id} at {t - t0:.1f} s "
+                      f"(was new track #{trk.relinked[1]}, appearance {trk.relinked[2]:.2f})")
+            if trk.selected_id >= 0:
+                if not sel_hist or sel_hist[-1][1] != trk.state():
+                    sel_hist.append((t - t0, trk.state()))
             frames.append((t, [(x.id, tuple(x.box), x.visible) for x in tracks],
                            trk.selected_id, trk.state()))
+        if sel_hist:
+            print("  selected-person state changes: " + ", ".join(f"{s_} @{tt:.1f}s" for tt, s_ in sel_hist))
 
     # ---- score ----
     births, last_seen, switches, prev = {}, {}, 0, []

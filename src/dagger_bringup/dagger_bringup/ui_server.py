@@ -182,7 +182,8 @@ class UiServer(Node):
                      tracks=[{"id": t.id, "box": [num(t.x1, 1), num(t.y1, 1), num(t.x2, 1),
                                                   num(t.y2, 1)],
                               "score": num(t.score, 2), "visible": t.visible,
-                              "range": num(t.range_m, 2), "bearing": num(t.bearing_deg, 1)}
+                              "range": num(t.range_m, 2), "bearing": num(t.bearing_deg, 1),
+                              "ranged": t.ranged}
                              for t in trk.tracks])
         else:
             h.update(tracks=None, selected=-1, state="NO_TRACKER")

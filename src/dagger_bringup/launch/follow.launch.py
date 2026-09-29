@@ -44,6 +44,7 @@ def generate_launch_description():
     use_ui = LaunchConfiguration("use_ui")
     target_source = LaunchConfiguration("target_source")
     det_conf = LaunchConfiguration("det_conf")
+    reid_engine = LaunchConfiguration("reid_engine")
     ui_port = LaunchConfiguration("ui_port")
 
     use_sim_time_arg = DeclareLaunchArgument("use_sim_time", default_value="false")
@@ -87,6 +88,10 @@ def generate_launch_description():
     # also publishes weak detections -- side-on / back views score lower -- which
     # the tracker only uses to EXTEND existing tracks, never to start one.
     det_conf_arg = DeclareLaunchArgument("det_conf", default_value="0.45")
+    # Re-ID (appearance) engine: re-identifies the selected person after a loss.
+    # "" = off. Built by tools/fetch_model.sh reid.
+    reid_engine_arg = DeclareLaunchArgument(
+        "reid_engine", default_value="/home/jetson/ros2_ws/models/osnet_x0_25_msmt17_fp16.engine")
     target_source_arg = DeclareLaunchArgument("target_source", default_value="tracker",
                                               choices=["tracker", "selector"])
     is_tracker = PythonExpression(["'", target_source, "' == 'tracker'"])
@@ -130,6 +135,7 @@ def generate_launch_description():
         parameters=[{
             "engine_path": engine_path,
             "conf_threshold": ParameterValue(det_conf, value_type=float),
+            "reid_engine": reid_engine,
             "target_rate": 10.0,
             "publish_debug_image": debug_image,
             "image_rotation_deg": image_rotation,
@@ -163,6 +169,9 @@ def generate_launch_description():
         parameters=[{
             "follow_distance": follow_distance,
             "max_linear": max_linear,
+            # click mode: search for a lost target and resume if re-identified (30 s)
+            "resume_window": ParameterValue(PythonExpression(
+                ["30.0 if '", target_source, "' == 'tracker' else 0.0"]), value_type=float),
             "use_sim_time": use_sim_time,
         }],
     )
@@ -214,6 +223,7 @@ def generate_launch_description():
         use_ui_arg,
         target_source_arg,
         det_conf_arg,
+        reid_engine_arg,
         ui_port_arg,
         collision_monitor_follow,
         lifecycle_manager,

@@ -53,6 +53,7 @@ let decoding = false, pending = null;
 let offset = null, bestRtt = Infinity, rtts = [];
 let drawn = 0, fpsT0 = performance.now();
 let following = false;
+let prevState = "", reidUntil = 0;
 
 function setMsg(t) { $("msg").textContent = t || ""; }
 function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
@@ -77,16 +78,18 @@ function draw(hdr, bmp) {
   const tracks = hdr.tracks || [];
   for (const t of tracks) {
     const [x1, y1, x2, y2] = t.box, sel = t.id === hdr.selected;
+    const ok = t.ranged !== false;           // LiDAR-ranged at least once = selectable
     ctx.setTransform(m);
     ctx.lineWidth = sel ? 5 : 2.5;
-    ctx.strokeStyle = sel ? "#ff1744" : "#00e676";
-    ctx.setLineDash(t.visible ? [] : [8, 6]);
+    ctx.strokeStyle = sel ? "#ff1744" : ok ? "#00e676" : "#9e9e9e";
+    ctx.setLineDash(t.visible && ok ? [] : [8, 6]);
     ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
     // label upright, at the top-left corner of the box as seen on screen
     const c = [new DOMPoint(x1, y1), new DOMPoint(x2, y1), new DOMPoint(x1, y2), new DOMPoint(x2, y2)].map(p => p.matrixTransform(m));
     const lx = Math.min(...c.map(p => p.x)), ly = Math.min(...c.map(p => p.y));
     ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.setLineDash([]);
-    const label = "#" + t.id + (t.range != null ? "  " + t.range.toFixed(1) + " m" : "");
+    const label = "#" + t.id + (t.range != null ? "  " + t.range.toFixed(1) + " m"
+                                                : ok ? "" : "  no LiDAR");
     ctx.font = "bold 18px system-ui"; const tw = ctx.measureText(label).width;
     ctx.fillStyle = sel ? "#ff1744" : "rgba(0,0,0,.65)"; ctx.fillRect(lx, Math.max(0, ly - 24), tw + 10, 24);
     ctx.fillStyle = "#fff"; ctx.fillText(label, lx + 5, Math.max(18, ly - 6));
@@ -108,7 +111,13 @@ function status(hdr) {
   following = fs === "following" || fs === "searching" || fs === "no target";
   $("follow").disabled = !(hdr.allow_follow && hdr.selected >= 0 && st === "TRACKING" && !following);
   const b = $("banner");
-  if (st === "LOST") { b.style.display = "block"; b.style.background = "#c62828";
+  if (prevState === "SEARCHING" && st === "TRACKING") reidUntil = performance.now() + 2500;
+  prevState = st;
+  if (performance.now() < reidUntil) { b.style.display = "block"; b.style.background = "#2e7d32";
+                       b.textContent = "RE-IDENTIFIED #" + hdr.selected; }
+  else if (st === "SEARCHING") { b.style.display = "block"; b.style.background = "#ef6c00";
+                       b.textContent = "#" + hdr.selected + " lost — searching (re-identification, 30 s)"; }
+  else if (st === "LOST") { b.style.display = "block"; b.style.background = "#c62828";
                        b.textContent = "TARGET #" + hdr.selected + " LOST — click a person to reselect"; }
   else if (st === "HOLD_LIDAR") { b.style.display = "block"; b.style.background = "#f9a825";
                        b.textContent = "#" + hdr.selected + " out of camera view — held on LiDAR"; }
@@ -150,9 +159,10 @@ cv.addEventListener("click", ev => {
     const [x1, y1, x2, y2] = t.box;
     if (p.x >= x1 && p.x <= x2 && p.y >= y1 && p.y <= y2) {
       const a = (x2 - x1) * (y2 - y1);
-      if (!best || a < best.a) best = { id: t.id, a };
+      if (!best || a < best.a) best = { id: t.id, a, ok: t.ranged !== false };
     }
   }
+  if (best && !best.ok) { setMsg("#" + best.id + " is not selectable: the LiDAR has not ranged it (not confirmed as a person)"); return; }
   if (best) {
     send({ type: "select", id: best.id });
     setMsg(following && best.id !== last.hdr.selected
