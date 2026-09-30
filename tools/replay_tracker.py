@@ -95,6 +95,7 @@ def main():
     ap.add_argument("--select-at", type=float, default=None,
                     help="select the ranged person nearest the image centre at this time (s)")
     ap.add_argument("--rot", type=int, default=180, help="camera mounting rotation (deg)")
+    ap.add_argument("--why", action="store_true", help="print each LiDAR-hold refusal reason")
     a = ap.parse_args()
     B = read_bag(os.path.expanduser(a.bag))
     dets = B["/follow/detections"]
@@ -129,7 +130,7 @@ def main():
             from dagger_bringup.reid_trt import ReidTRT, crop
             import cv2
             reid = ReidTRT(a.engine)
-        selected_done, relinks, sel_hist = False, [], []
+        selected_done, relinks, sel_hist, why = False, [], [], None
         frames = []
         for t, m in dets:
             while sel_events and sel_events[0][0] <= t:
@@ -186,6 +187,10 @@ def main():
                 relinks.append(trk.relinked)
                 print(f"  RE-IDENTIFIED #{trk.selected_id} at {t - t0:.1f} s "
                       f"(was new track #{trk.relinked[1]}, appearance {trk.relinked[2]:.2f})")
+            if a.why and trk.selected_id >= 0 and trk.hold_refusal != why:
+                why = trk.hold_refusal
+                if why:
+                    print(f"  {t - t0:6.1f} s hold refused: {why}")
             if trk.selected_id >= 0:
                 if not sel_hist or sel_hist[-1][1] != trk.state():
                     sel_hist.append((t - t0, trk.state()))

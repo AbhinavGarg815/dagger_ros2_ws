@@ -6,6 +6,7 @@ simulated world, with a scripted operator. NO ROVER, NO FCU.
     python3 tools/test_click_follow.py cross     # A (3 m) and B (6 m) cross in the image
     python3 tools/test_click_follow.py occlude   # A walks behind B (LiDAR + camera occluded)
     python3 tools/test_click_follow.py wall      # A out of view against a wall
+    python3 tools/test_click_follow.py hug       # A beside the rover, then inside the LiDAR minimum
     python3 tools/test_click_follow.py all
 
 Runs in ROS_DOMAIN_ID 42 (set before rclpy is imported, inherited by the nodes it
@@ -178,6 +179,17 @@ SCENES = {
         (5, 11, lambda f: {"A": (0.8, 0.05)}, "A stands 0.8 m away (inside the LiDAR's 1.0 m minimum)"),
         (11, 13, lambda f: {"A": lerp((0.8, 0.05), (3.0, 0.1), f)}, "A steps back"),
         (13, 15, lambda f: {"A": (3.0, 0.1)}, "A ahead")]),
+    # reid2 (2026-09-30): lost 1.5 m away at +45 deg and the search turned toward them
+    "hug": ([(9.0, -8.0, 9.0, 8.0)], [
+        (0, 3, lambda f: {"A": (3.0, 0.3)}, "A ahead; click A, FOLLOW"),
+        (3, 5, lambda f: {"A": lerp((3.0, 0.3), (0.9, 0.9), f)},
+         "A walks up BESIDE the rover: 1.27 m at +45 deg (out of view, on the LiDAR)"),
+        (5, 9, lambda f: {"A": (0.9, 0.9)}, "A stands there -- inside the 1.03 m corner sweep + margin"),
+        (9, 10, lambda f: {"A": lerp((0.9, 0.9), (0.5, 0.75), f)},
+         "A steps closer: 0.9 m, inside the LiDAR's 1.0 m minimum -> LOST"),
+        (10, 15, lambda f: {"A": (0.5, 0.75)}, "A stays there, invisible to camera and LiDAR"),
+        (15, 18, lambda f: {"A": lerp((0.5, 0.75), (3.0, 0.3), f)}, "A walks back out in front"),
+        (18, 22, lambda f: {"A": (3.0, 0.3)}, "A ahead")]),
     "sign": ([(9.0, -8.0, 9.0, 8.0)], [
         (0, 3, lambda f: {"A": (3.0, 0.3), "SIGN": (500.0, 0.6)}, "A + a sign that scores 0.6 once"),
         (3, 12, lambda f: {"A": (3.0, 0.3), "SIGN": (500.0, 0.3)}, "the sign keeps scoring 0.3")]),
@@ -223,6 +235,8 @@ def run(scen):
     n.create_subscription(Twist, "/cmd_vel_follow_raw", lambda m: LOG.append(
         ("cmd", time.time() - T0[0], m.linear.x, m.angular.z)), 10)
     n.create_subscription(PersonTracks, "/follow/tracks", lambda m: tracks.__setitem__(0, m), 10)
+    n.create_subscription(PoseStamped, "/follow/search_hint", lambda m: LOG.append(
+        ("hint", time.time() - T0[0], m.pose.position.x, m.pose.position.y)), 10)
     n.create_subscription(Log, "/rosout", lambda m: LOG.append(
         ("log", time.time() - T0[0], m.name, m.msg))
         if m.name in ("person_tracker", "follow_controller") and m.level >= 20 else None, 50)
@@ -359,6 +373,28 @@ def evaluate(scen, LOG, truth, sel_id):
         res.append(("never lost", not any("LOST" in m for t, n_, m in logs)))
         drv = [v for t, v, w in cm if v > 0.01 and math.hypot(*at(truth, t)["A"]) < 2.6]
         res.append(("never drives forward while A is closer than 2.6 m", not drv, f"{len(drv)} cmds"))
+
+        turn = [t for t, v, w in cm if abs(w) > 1e-3 and math.hypot(*at(truth, t)["A"]) < 1.4
+                and math.hypot(*at(truth, t - 0.3)["A"]) < 1.4]
+        res.append(("never turns in place while A is within reach (< 1.4 m)", not turn,
+                    f"{len(turn)} cmds"))
+    elif scen == "hug":
+        rng_a = lambda t: math.hypot(*at(truth, t)["A"])  # noqa: E731
+        # 0.3 s of pipeline lag either side of the 1.6 m line
+        turn = [t for t, v, w in cm if abs(w) > 1e-3 and rng_a(t) < 1.4 and rng_a(t - 0.3) < 1.4]
+        hints = [(e[1], math.hypot(e[2], e[3])) for e in LOG if e[0] == "hint"]
+        h_at = lambda t: [r for tt, r in hints if tt <= t][-1:]  # noqa: E731
+        res.append(("never turns in place while A is within reach (< 1.4 m)", not turn,
+                    f"{len(turn)} turning cmds, first at {turn[0]:.1f} s (hint range then "
+                    f"{h_at(turn[0])}, last hint at {hints[-1][0] if hints else None})" if turn else ""))
+        drv = [t for t, v, w in cm if v > 0.01 and rng_a(t) < 2.6]
+        res.append(("never drives forward while A is closer than 2.6 m", not drv, f"{len(drv)} cmds"))
+        lost = [t for t, n_, m in logs if "LOST" in m]
+        res.append(("inside the LiDAR minimum, out of view -> lost (searching, not a guess)", bool(lost)))
+        back = [t for t, n_, m in logs if "RE-IDENTIFIED" in m or "reacquired" in m]
+        s_after = [s_ for t, s_ in st if t > 17.0]
+        res.append(("A walks back out in front -> followed again without a new FOLLOW",
+                    "following" in s_after, f"re-id/reacquire logs {len(back)}"))
     elif scen == "sign":
         ign = [m for t, n_, m in logs if "ignored" in m]
         res.append(("clicking the sign (never LiDAR-ranged) is refused", bool(ign)))

@@ -92,6 +92,7 @@ class PersonTracker(Node):
         p("track_gate", 0.6)
         p("max_person_speed", 1.8)
         p("max_cluster_width", 0.9)
+        p("cluster_link", 0.3)             # scan neighbours this close = one return (one object)
         p("min_track_points", 3)
         # --- tracker ---
         p("iou_min", 0.2)
@@ -123,6 +124,7 @@ class PersonTracker(Node):
             lidar_only_timeout=float(g("lidar_only_timeout")),
             min_track_points=int(g("min_track_points")),
             max_cluster_width=float(g("max_cluster_width")),
+            cluster_link=float(g("cluster_link")),
             min_range=float(g("min_range")), max_range=float(g("max_range")),
             other_person_radius=float(g("other_person_radius")),
             high_score=float(g("high_score")), iou_strong=float(g("iou_strong")),

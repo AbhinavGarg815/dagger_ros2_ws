@@ -109,27 +109,57 @@ def range_at(px, py, origin, bearing, half_width, cluster_depth=0.6, min_cluster
     return float(np.median(sx[body])), float(np.median(sy[body]))
 
 
-def lidar_cluster(ox, oy, pred, gate, min_points=3, max_width=0.9):
-    """Person-sized cluster nearest `pred` (all in ODOM) -> ((x, y), None) or
-    (None, reason). None is the safe answer: anything ambiguous ends the hold
-    rather than guessing. (target_selector.lidar_fix)"""
+def scan_segment(ox, oy, k, link):
+    """Indices of the connected return containing point k: neighbours in scan
+    (angle) order no further than `link` apart, wrapping around 360 deg."""
+    n = len(ox)
+    nxt = np.roll(np.arange(n), -1)
+    brk = np.nonzero(np.hypot(ox[nxt] - ox, oy[nxt] - oy) > link)[0]   # i: no link i -> i+1
+    if len(brk) == 0:
+        return np.arange(n)
+    after = brk[brk >= k]
+    e = after[0] if len(after) else brk[0]
+    before = brk[brk < k]
+    s = ((before[-1] if len(before) else brk[-1]) + 1) % n
+    return np.arange(s, e + 1) if s <= e else np.r_[s:n, 0:e + 1]
+
+
+def lidar_cluster(ox, oy, pred, gate, min_points=3, max_width=0.9, link=0.3):
+    """Person-sized cluster nearest `pred` (all in ODOM, in scan order) ->
+    ((x, y), None) or (None, reason). None is the safe answer: anything ambiguous
+    ends the hold rather than guessing.
+
+    Only what is CONNECTED to the point nearest the prediction counts
+    (scan_segment: scan neighbours <= link apart):
+      * the body -- its points within max_width/2 + 0.1 of that point -- must be
+        <= max_width wide;
+      * the whole connected return must be <= 2 x max_width long: a wall or a
+        car is one long return even where only its corner is near the prediction.
+    Both used to count EVERY point in those radii, connected or not, so whatever
+    stood near the person made them "too wide": live reid2 (2026-09-30) lost the
+    operator 1.5 m from the rover with a wall 1-1.5 m behind them ("2.0-3.2 m
+    wide", 3.5 s of refusals) and beside a separate object ~0.35 m away ("0.92
+    m"). The body radius stays: a person can be chained to a bush by a run of
+    returns (ids1 118.8 s, reid1 110.1 s: 1.0-1.6 m connected)."""
     if len(ox) == 0:
         return None, "no scan points"
     d = np.hypot(ox - pred[0], oy - pred[1])
     sel = d <= gate
     if sel.sum() < min_points:
         return None, "nothing near the prediction"
-    k = np.argmin(np.where(sel, d, np.inf))
-    body = sel & (np.hypot(ox - ox[k], oy - oy[k]) <= max_width / 2 + 0.1)
+    k = int(np.argmin(np.where(sel, d, np.inf)))
+    seg = scan_segment(ox, oy, k, link)
+    sx, sy = ox[seg], oy[seg]
+    body = np.hypot(sx - ox[k], sy - oy[k]) <= max_width / 2 + 0.1
     if body.sum() < min_points:
         return None, "too few points"
-    bx, by = ox[body], oy[body]
+    bx, by = sx[body], sy[body]
     width = math.hypot(bx.max() - bx.min(), by.max() - by.min())
-    near_all = sel & (np.hypot(ox - ox[k], oy - oy[k]) <= 1.5)
-    span = math.hypot(ox[near_all].max() - ox[near_all].min(),
-                      oy[near_all].max() - oy[near_all].min())
-    if width > max_width or span > 2.0 * max_width:
-        return None, f"cluster {max(width, span):.2f} m wide -- not a person"
+    if width > max_width:
+        return None, f"cluster {width:.2f} m wide -- not a person"
+    length = math.hypot(sx.max() - sx.min(), sy.max() - sy.min())
+    if length > 2.0 * max_width:
+        return None, f"part of a {length:.2f} m long return (wall, vehicle) -- not a person"
     return (float(np.median(bx)), float(np.median(by))), None
 
 
@@ -217,7 +247,7 @@ class Tracker:
                  isolated_hold_timeout=30.0, near_range=1.0, gallery_score=0.6,
                  app_veto=0.3, reid_window=30.0, reid_sim=0.66, reid_margin=0.08,
                  reid_frames=3, select_requires_range=True, near_hold_range=3.0,
-                 hold_continuity=0.4):
+                 hold_continuity=0.4, cluster_link=0.3):
         self.iou_min = iou_min                  # without positions, below this is not the same person
         self.new_track_score = new_track_score  # weaker detections only extend tracks
         self.max_missed = max_missed            # camera frames a track survives unseen
@@ -227,6 +257,7 @@ class Tracker:
         self.lidar_only_timeout = lidar_only_timeout
         self.min_track_points = min_track_points
         self.max_cluster_width = max_cluster_width
+        self.cluster_link = cluster_link        # m: scan neighbours this close are one return
         self.min_range, self.max_range = min_range, max_range
         # a hold cluster within this of another person's fresh position is theirs
         self.other_person_radius = other_person_radius
@@ -565,11 +596,14 @@ class Tracker:
             self.hold_refusal = f"on LiDAR alone for > {self.isolated_hold_timeout:.0f} s"
             return None
         px, py = scan
+        o = np.argsort(np.arctan2(py, px), kind="stable")   # scan order (scan_xy already is)
+        px, py = px[o], py[o]
         tx, ty, yaw = T
         c, s = math.cos(yaw), math.sin(yaw)
         ox, oy = tx + c * px - s * py, ty + s * px + c * py
         got, why = lidar_cluster(ox, oy, t.predicted_pos(now), self.gate(now - t.t_pos),
-                                 self.min_track_points, self.max_cluster_width)
+                                 self.min_track_points, self.max_cluster_width,
+                                 self.cluster_link)
         if got is None:
             self.hold_refusal = why
             return None

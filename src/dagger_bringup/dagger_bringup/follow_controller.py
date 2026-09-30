@@ -130,6 +130,15 @@ class FollowController(Node):
         self.declare_parameter("slow_ratio", 0.4)
         self.declare_parameter("slow_min_points", 3)
         self.declare_parameter("slow_scan_timeout", 0.5)
+        # NO TURNING IN PLACE for a person closer than this (m from base_footprint,
+        # the rotation centre) -- following, facing or searching. The footprint's
+        # corners (0.85, 0.58) sweep a 1.03 m circle when the rover turns in place,
+        # and /scan_safety is blind inside 1.0 m (range_min, mast self-returns), so
+        # the collision monitor cannot stop a turn into someone standing there.
+        # Standing still is always safe; the rover turns once they are this far
+        # away. 1.6 = 1.03 + a stride. (live reid2 2026-09-30: the operator was
+        # lost 1.5 m away at +45 deg and the search turned toward them.)
+        self.declare_parameter("min_turn_range", 1.6)
         self.declare_parameter("publish_rate", 20.0)
 
         g = lambda n: self.get_parameter(n).value  # noqa: E731
@@ -147,6 +156,9 @@ class FollowController(Node):
         self.turn_scale = float(g("turn_speed_scale"))
         self.max_drive_bearing = math.radians(float(g("max_drive_bearing_deg")))
         self.timeout = float(g("target_timeout"))
+        self.min_turn_range = float(g("min_turn_range"))
+        self.last_range = math.inf
+        self.close_logged = False          # one log per too-close episode
         self.search_timeout = float(g("search_timeout"))
         self.search_w = float(g("search_angular"))
         self.search_min_bearing = math.radians(float(g("search_min_bearing_deg")))
@@ -159,7 +171,7 @@ class FollowController(Node):
         self.slow_min_points = int(g("slow_min_points"))
         self.slow_scan_timeout = float(g("slow_scan_timeout"))
         self.slow_pts, self.slow_time = 0, 0.0
-        self.hint = None                   # (bearing, monotonic receipt) from the tracker
+        self.hint = None                   # (bearing, monotonic receipt, range) from the tracker
         self.face_since = None
         self.sweeping = False              # once sweeping, the hint no longer pulls the rover back
         self.sweep_dir = 1.0
@@ -265,7 +277,7 @@ class FollowController(Node):
 
     def on_hint(self, msg):
         p = msg.pose.position
-        self.hint = (math.atan2(p.y, p.x), time.monotonic())
+        self.hint = (math.atan2(p.y, p.x), time.monotonic(), math.hypot(p.x, p.y))
 
     def on_target(self, msg):
         self.target = msg
@@ -273,6 +285,7 @@ class FollowController(Node):
         self.had_target = True
         p = msg.pose.position
         self.last_bearing = math.atan2(p.y, p.x)
+        self.last_range = math.hypot(p.x, p.y)
 
     def state(self):
         now = time.monotonic()
@@ -293,10 +306,30 @@ class FollowController(Node):
             self.state_pub.publish(String(data=text))
             self.state_sent, self.state_sent_at = text, now
 
+    def too_close_to_turn(self, rng, now):
+        """True (and says so, once) while the person is inside min_turn_range."""
+        if rng >= self.min_turn_range:
+            self.close_logged = False
+            return False
+        if not self.close_logged:
+            self.close_logged = True
+            self.get_logger().warn(
+                f"person {rng:.1f} m away -- too close to turn in place (corners sweep "
+                f"1.03 m, the safety scan is blind inside 1.0 m): holding still until "
+                f"they are {self.min_turn_range:.1f} m away")
+        return True
+
     def search_rate(self, now):
         """Click-to-follow search: face the tracker's hint, hold, then sweep in ONE
         direction (the side they were lost on) until found or the window ends."""
-        if not self.sweeping and self.hint is not None and now - self.hint[1] <= self.hint_timeout:
+        fresh = self.hint is not None and now - self.hint[1] <= self.hint_timeout
+        # Last SEEN (last target) within min_turn_range, or expected there now: they
+        # are probably still right beside the rover, invisible to the camera (out
+        # of view) and the LiDAR (< 1.0 m). Never turn on the hint alone -- it is
+        # an extrapolation (hug scene: it drifted to 1.9 m while A stood at 0.9 m).
+        if self.too_close_to_turn(min(self.last_range, self.hint[2] if fresh else math.inf), now):
+            return 0.0                      # wait for re-identification without turning
+        if not self.sweeping and fresh:
             b = self.hint[0]
             if abs(b) > self.face_tol:
                 self.face_since = None
@@ -354,8 +387,10 @@ class FollowController(Node):
             # Rotate toward the last known bearing. Zero linear, always.
             self.v_cmd = 0.0
             cmd = Twist()
-            cmd.angular.z = (self.search_rate(now) if self.resume_window > 0
-                             else math.copysign(self.search_w, self.last_bearing))
+            if self.resume_window > 0:
+                cmd.angular.z = self.search_rate(now)
+            elif not self.too_close_to_turn(self.last_range, now):
+                cmd.angular.z = math.copysign(self.search_w, self.last_bearing)
             self.pub.publish(cmd)
             return
 
@@ -388,7 +423,11 @@ class FollowController(Node):
                   else (err - math.copysign(self.dead, err)) / self.close_time)
         v_want = max(0.0, min(self.v_max, v_want))      # never reverse
 
-        if self.turning:
+        close = self.too_close_to_turn(rng, now)
+        if close:
+            self.turning = False
+            v_want = 0.0                            # hold still: no turn, no creeping
+        elif self.turning:
             self.turning = abs(bearing) >= self.b_release
         else:
             self.turning = abs(bearing) >= self.b_dead
@@ -405,6 +444,8 @@ class FollowController(Node):
         # command; the FCU speed loop handles a ramp far better than a jump.
         dv = self.accel / self.rate
         self.v_cmd += max(-dv, min(dv, v_want - self.v_cmd))
+        if close:
+            self.v_cmd = 0.0                        # a stop, like every other stop here
         if self.slowed(now):
             # instant, like the collision monitor's slowdown was; the ramp above
             # then brings the speed back up smoothly once the zone clears

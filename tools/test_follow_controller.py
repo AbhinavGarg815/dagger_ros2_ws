@@ -114,6 +114,13 @@ r_clear = phase("zone clear again", 3.0, 5.0)
 r_id1 = phase("following track 7", 2.0, 4.5, 0.0, track=7)
 r_id2 = phase("track id changes to 8", 2.0, 4.5, 0.0, track=8)
 r_id2b = phase("  ...still track 8", 2.0, 4.5, 0.0, track=8)
+enable()
+phase("1.3 m at +45 deg (settle)", 0.3, *pol(1.3, 45))
+r_hug = phase("  ...1.3 m at +45 deg (inside min_turn_range)", 2.7, *pol(1.3, 45))
+r_hug2 = phase("2.5 m at +45 deg (outside it)", 3.0, *pol(2.5, 45))
+phase("back to 1.3 m at +60 deg (settle)", 0.3, *pol(1.3, 60))
+r_hug3 = phase("  ...1.3 m at +60 deg", 1.2, *pol(1.3, 60))
+r_hugl = phase("lost there: search window", 2.0)
 
 checks = [
     ("silent while disabled", r_dis is None),
@@ -134,6 +141,12 @@ checks = [
     ("zone clear: full speed again", r_clear and r_clear[1] > 0.4),
     ("DISABLES when the track id changes (different person)",
      r_id2b is None or (r_id2b[1] < 1e-6 and abs(r_id2b[3]) < 1e-6)),
+    ("1.3 m away at 45 deg (inside the corner sweep + margin): no turn, no drive",
+     r_hug and r_hug[1] < 1e-6 and abs(r_hug[2]) < 1e-6 and abs(r_hug[3]) < 1e-6),
+    ("2.5 m away at 45 deg: turns in place again", r_hug2 and r_hug2[1] < 1e-6 and r_hug2[3] > 0.3),
+    ("... back to 1.3 m: stops turning", r_hug3 and abs(r_hug3[2]) < 1e-6 and abs(r_hug3[3]) < 1e-6),
+    ("lost 1.3 m away: the search does NOT turn",
+     r_hugl is None or (abs(r_hugl[2]) < 1e-6 and abs(r_hugl[3]) < 1e-6)),
 ]
 print()
 for name, ok in checks:

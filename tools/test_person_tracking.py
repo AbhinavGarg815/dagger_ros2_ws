@@ -18,7 +18,7 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src", "dagger_bringup"))
 from dagger_bringup.person_tracking import (COASTING, HOLD_LIDAR, LOST, NONE,  # noqa: E402
                                             TRACKING, Detection, iou_matrix,
-                                            lidar_cluster, range_at)
+                                            lidar_cluster, range_at, scan_segment)
 from dagger_bringup.person_tracking import Tracker as NewTracker  # noqa: E402
 from dagger_bringup.person_tracking import SEARCHING, person_sized  # noqa: E402
 
@@ -61,6 +61,31 @@ def circle_scan(people, r=0.25, step=0.03):
             px.append(x + r * math.cos(a))
             py.append(y + r * math.sin(a))
     return np.array(px), np.array(py)
+
+
+def lidar(pts, step=0.0087):
+    """A physical scan of these (x, y) surface points, like /scan_safety
+    (pointcloud_to_laserscan): the NEAREST return per step-rad beam, in beam
+    order -- whatever is behind something else is not seen."""
+    pts = np.asarray(pts, dtype=float)
+    a, r = np.arctan2(pts[:, 1], pts[:, 0]), np.hypot(pts[:, 0], pts[:, 1])
+    beam = np.floor((a + math.pi) / step).astype(int)
+    best = {}
+    for i in np.argsort(r):
+        best.setdefault(beam[i], i)
+    keep = [best[b] for b in sorted(best)]
+    return pts[keep, 0], pts[keep, 1]
+
+
+def disc(x, y, r=0.25, n=720):
+    """Surface points of a round body (a person seen from the LiDAR's height band)."""
+    a = np.linspace(0, 2 * math.pi, n, endpoint=False)
+    return np.c_[x + r * np.cos(a), y + r * np.sin(a)]
+
+
+def line(x0, y0, x1, y1, spacing=0.005):
+    n = max(2, int(math.hypot(x1 - x0, y1 - y0) / spacing) + 1)
+    return np.c_[np.linspace(x0, x1, n), np.linspace(y0, y1, n)]
 
 
 def box(cx, cy=240, w=60, h=160):
@@ -186,13 +211,12 @@ for k, (x, y) in enumerate(back, start=16):
 check("back in view -> camera re-confirms the same id (TRACKING)",
       t.state() == TRACKING and t.selected().id == 1)
 
-# hold refuses a wall-sized cluster
+# hold refuses a wall-sized cluster (someone pressed against a wall is one return with it)
 wall_x = np.linspace(0.5, 6.0, 120)
 t = Tracker()
 t.update([det_at(3.0, 0.3)], 0, T0)
 t.select(1)
-_, tgt = t.update([], DT, T0, (np.concatenate([wall_x, [3.0]]),
-                                  np.concatenate([np.full(120, 0.35), [0.3]])))
+_, tgt = t.update([], DT, T0, lidar(np.c_[wall_x, np.full(120, 0.35)]))
 check("LiDAR hold refuses a wall-merged cluster", tgt is None and "not a person" in (t.hold_refusal or ""),
       t.hold_refusal or "")
 
@@ -248,6 +272,24 @@ check("... but a person standing in front of that wall is still ranged",
       xy2 is not None and abs(xy2[0] - 2.8) < 0.2, str(xy2))
 got, why = lidar_cluster(px, py, (3.0, 0.0), 0.8)
 check("lidar_cluster accepts a person-sized cluster", got is not None and why is None)
+# only what is CONNECTED to the person counts (live reid2 2026-09-30)
+got, why = lidar_cluster(*lidar(np.r_[disc(1.5, 0.0), line(2.5, -3, 2.5, 3)]), (1.5, 0.0), 1.6)
+check("person 1 m in front of a wall (gate 1.6 m, 0.6 s unseen): held -- the wall is not them",
+      got is not None and abs(got[0] - 1.3) < 0.15, str(why))
+got, why = lidar_cluster(*lidar(np.r_[disc(2.0, 0.0), disc(2.0, 0.7, r=0.1)]), (2.0, 0.0), 0.8)
+check("person with a separate small object 0.35 m beside them: held on the person",
+      got is not None and abs(got[1]) < 0.1, str(why))
+got, why = lidar_cluster(*lidar(np.r_[disc(2.0, 0.0), line(1.9, 0.25, 1.9, 1.2)]), (2.0, 0.0), 0.8)
+check("person chained to a 1 m hedge by one run of returns: still held (body radius)",
+      got is not None and abs(got[1]) < 0.25, str(why))
+got, why = lidar_cluster(*lidar(line(3.0, 0.3, 3.0, 4.0)), (3.0, 0.0), 0.8)
+check("the END of a long wall near the prediction: refused (one 3.7 m return)",
+      got is None and "long return" in why, str(why))
+bx_, by_ = lidar(disc(-3.0, 0.0))                  # straight behind: the scan wraps at +-180 deg
+seg = scan_segment(bx_, by_, int(np.argmin(np.hypot(bx_ + 3.0, by_))), 0.3)
+got, why = lidar_cluster(bx_, by_, (-3.0, 0.0), 0.8)
+check("a person straight behind (scan wraps at +-180 deg) is one return",
+      len(seg) == len(bx_) and got is not None, f"{len(seg)}/{len(bx_)} {why}")
 
 # ---------------- ID stability (defaults of the real Tracker) ----------------
 t = NewTracker()
