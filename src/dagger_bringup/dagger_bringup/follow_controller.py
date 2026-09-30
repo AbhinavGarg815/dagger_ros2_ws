@@ -139,6 +139,10 @@ class FollowController(Node):
         # away. 1.6 = 1.03 + a stride. (live reid2 2026-09-30: the operator was
         # lost 1.5 m away at +45 deg and the search turned toward them.)
         self.declare_parameter("min_turn_range", 1.6)
+        # ... and once holding, turn again only beyond min_turn_range + this: live
+        # reid3 (2026-09-30) the operator stood ON the 1.6 m line and the rover
+        # toggled hold / turn (0.16-0.32 rad/s bursts at 1.57-1.60 m).
+        self.declare_parameter("min_turn_release", 0.2)
         self.declare_parameter("publish_rate", 20.0)
 
         g = lambda n: self.get_parameter(n).value  # noqa: E731
@@ -157,8 +161,9 @@ class FollowController(Node):
         self.max_drive_bearing = math.radians(float(g("max_drive_bearing_deg")))
         self.timeout = float(g("target_timeout"))
         self.min_turn_range = float(g("min_turn_range"))
+        self.min_turn_release = float(g("min_turn_release"))
         self.last_range = math.inf
-        self.close_logged = False          # one log per too-close episode
+        self.too_close = False             # inside a too-close episode (hysteresis + one log)
         self.search_timeout = float(g("search_timeout"))
         self.search_w = float(g("search_angular"))
         self.search_min_bearing = math.radians(float(g("search_min_bearing_deg")))
@@ -307,16 +312,17 @@ class FollowController(Node):
             self.state_sent, self.state_sent_at = text, now
 
     def too_close_to_turn(self, rng, now):
-        """True (and says so, once) while the person is inside min_turn_range."""
-        if rng >= self.min_turn_range:
-            self.close_logged = False
+        """True (and says so, once) from inside min_turn_range until the person is
+        beyond min_turn_range + min_turn_release."""
+        if rng >= self.min_turn_range + (self.min_turn_release if self.too_close else 0.0):
+            self.too_close = False
             return False
-        if not self.close_logged:
-            self.close_logged = True
+        if not self.too_close:
+            self.too_close = True
             self.get_logger().warn(
                 f"person {rng:.1f} m away -- too close to turn in place (corners sweep "
                 f"1.03 m, the safety scan is blind inside 1.0 m): holding still until "
-                f"they are {self.min_turn_range:.1f} m away")
+                f"they are {self.min_turn_range + self.min_turn_release:.1f} m away")
         return True
 
     def search_rate(self, now):
