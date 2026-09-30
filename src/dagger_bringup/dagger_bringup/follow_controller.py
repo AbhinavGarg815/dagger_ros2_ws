@@ -44,6 +44,7 @@ class FollowController(Node):
         self.declare_parameter("cmd_topic", "/cmd_vel_follow_raw")
         self.declare_parameter("enable_topic", "/follow/enable")
         self.declare_parameter("estop_topic", "/estop")
+        self.declare_parameter("select_topic", "/follow/select")
         self.declare_parameter("follow_distance", 3.0)
         # Inside this band of the set distance the rover simply holds station,
         # so a walking person's natural pace variation does not make it surge.
@@ -218,6 +219,7 @@ class FollowController(Node):
         self.create_subscription(Bool, g("enable_topic"), self.on_enable, 10)
         self.create_subscription(Bool, g("estop_topic"), self.on_estop, 10)
         self.create_subscription(Int32, "/follow/track_id", self.on_track_id, 10)
+        self.create_subscription(Int32, g("select_topic"), self.on_select, 10)
         self.create_subscription(PoseStamped, "/follow/search_hint", self.on_hint, be)
         self.create_subscription(LaserScan, g("slow_scan_topic"), self.on_scan, be)
         self.create_timer(1.0 / self.rate, self.tick)
@@ -251,15 +253,37 @@ class FollowController(Node):
             self.locked_id = msg.data
             return
         if msg.data != self.locked_id:
-            self.enabled = False
-            self.had_target = False
-            self.search_until = 0.0
-            self.v_cmd = 0.0
-            self.stop_until = time.monotonic() + 1.0
-            self.disable_reason = f"target changed (#{self.locked_id} -> #{msg.data})"
+            self.stand_down(f"target changed (#{self.locked_id} -> #{msg.data})")
             self.get_logger().error(
                 f"TARGET CHANGED to a different person / marker (track {self.locked_id} -> "
                 f"{msg.data}) -- FOLLOW DISABLED. Re-enable explicitly to follow them.")
+
+    def stand_down(self, reason):
+        """End this follow session: zero now, then release the twist_mux slot."""
+        self.enabled = False
+        self.had_target = False
+        self.search_until = 0.0
+        self.v_cmd = 0.0
+        self.stop_until = time.monotonic() + 1.0
+        self.disable_reason = reason
+
+    def on_select(self, msg):
+        """The operator's selection, as the page sends it. CLEAR, or a click on
+        someone / something else, ends this follow session AT ONCE -- not when (or
+        if) a new target shows up. Live aruco2 (2026-09-30): CLEAR while following
+        only removed the target; the controller took that for a loss and searched,
+        turning in place for 29 s (two full turns) until STOP was pressed."""
+        if not self.enabled:
+            return
+        if msg.data < 0:
+            self.stand_down("selection cleared")
+            self.get_logger().warn("selection CLEARED by the operator -- FOLLOW DISABLED")
+        elif self.locked_id is not None and msg.data != self.locked_id:
+            old = self.locked_id
+            self.stand_down(f"target changed (#{old} -> #{msg.data})")
+            self.get_logger().error(
+                f"TARGET CHANGED by the operator (track {old} -> {msg.data}) -- FOLLOW "
+                f"DISABLED. Re-enable explicitly to follow them.")
 
     def on_estop(self, msg):
         if msg.data and not self.estop:

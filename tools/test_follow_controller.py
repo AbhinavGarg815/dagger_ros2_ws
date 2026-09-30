@@ -28,6 +28,7 @@ be = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryPolicy
 tgt = n.create_publisher(PoseStamped, "/follow/target", be)
 en = n.create_publisher(Bool, "/follow/enable", 10)
 tid = n.create_publisher(Int32, "/follow/track_id", 10)
+sel = n.create_publisher(Int32, "/follow/select", 10)
 scan_pub = n.create_publisher(LaserScan, "/scan_safety", be)
 obstacle = [False]           # a post 1.8 m ahead in the slow zone?
 
@@ -123,6 +124,41 @@ phase("back to 1.3 m at +60 deg (settle)", 0.3, *pol(1.3, 60))
 r_hug3 = phase("  ...1.3 m at +60 deg", 1.2, *pol(1.3, 60))
 r_hugl = phase("lost there: search window", 2.0)
 
+
+def select(i):
+    for _ in range(3):
+        sel.publish(Int32(data=i)); spin(0.03)
+
+
+# the operator's selection ends the session at once (live aruco2: CLEAR -> 29 s of search turns)
+spin(7.0)                                        # let the search above expire -> disabled
+enable()
+r_cf = phase("following track 7 at 4 m, 60 deg", 1.5, *pol(4.0, 60), track=7)
+select(-1)
+phase("CLEAR while following (settle)", 0.3, *pol(4.0, 60), track=7)
+r_clr = phase("  ...target still published", 1.7, *pol(4.0, 60), track=7)
+enable()
+phase("following track 7 again", 1.5, *pol(4.0, 60), track=7)
+r_cs = phase("target lost: searching", 1.5)
+select(-1)
+phase("CLEAR during the search (settle)", 0.3)
+r_clrs = phase("  ...search window still open", 2.0)
+enable()
+phase("following track 7 again", 1.5, *pol(4.0, 60), track=7)
+select(9)
+phase("operator clicks #9, no target from it yet (settle)", 0.3, *pol(4.0, 60), track=7)
+r_oth = phase("  ...old target still published", 1.7, *pol(4.0, 60), track=7)
+enable()
+phase("following track 7 again", 1.5, *pol(4.0, 60), track=7)
+select(7)
+phase("operator clicks #7 again, the one followed (settle)", 0.3, *pol(4.0, 60), track=7)
+r_same = phase("  ...keeps following", 1.5, *pol(4.0, 60), track=7)
+
+def quiet(r):
+    """No motion commanded: silent, or zeros only."""
+    return r is None or (abs(r[0]) < 1e-6 and abs(r[1]) < 1e-6 and abs(r[2]) < 1e-6 and abs(r[3]) < 1e-6)
+
+
 checks = [
     ("silent while disabled", r_dis is None),
     ("drives forward when too far", r_fwd and r_fwd[1] > 0.05),
@@ -150,6 +186,13 @@ checks = [
     ("... back to 1.3 m: stops turning", r_hug3 and abs(r_hug3[2]) < 1e-6 and abs(r_hug3[3]) < 1e-6),
     ("lost 1.3 m away: the search does NOT turn",
      r_hugl is None or (abs(r_hugl[2]) < 1e-6 and abs(r_hugl[3]) < 1e-6)),
+    ("(following at 60 deg: turning, as a reference)", r_cf and r_cf[3] > 0.3),
+    ("CLEAR while following: stops at once, although the target is still there",
+     quiet(r_clr)),
+    ("(target lost: search turns, as a reference)", r_cs and max(abs(r_cs[2]), abs(r_cs[3])) > 0.2),
+    ("CLEAR during the search: the turning stops (live aruco2: it went on for 29 s)", quiet(r_clrs)),
+    ("click on another target while following: stops before that target even appears", quiet(r_oth)),
+    ("click on the target already followed: keeps following", r_same and r_same[3] > 0.3),
 ]
 print()
 for name, ok in checks:

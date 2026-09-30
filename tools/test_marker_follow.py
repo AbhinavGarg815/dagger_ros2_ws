@@ -72,7 +72,9 @@ SCENES = {
          "carrier 7 turns away: its marker is not visible for 4 s (marker 3 still is)"),
         (12, 17, lambda f: ({"C7": (7, lerp((4.0, 2.4), (5.0, 0.8), f), True), "C3": (3, (6.0, -2.0), True)}, {}),
          "marker 7 visible again"),
-        (17, 19, lambda f: ({"C7": (7, (5.0, 0.8), True), "C3": (3, (6.0, -2.0), True)}, {}), "steady")],
+        (17, 19, lambda f: ({"C7": (7, (5.0, 0.8), True), "C3": (3, (6.0, -2.0), True)}, {}), "steady"),
+        (19, 23, lambda f: ({"C7": (7, (5.0, 0.8), True), "C3": (3, (6.0, -2.0), True)}, {}),
+         "operator presses CLEAR while following (live aruco2: the rover then searched for 29 s)")],
     "switch": [
         (0, 3, lambda f: ({"C7": (7, (5.0, -0.8), True)}, {"A": (3.5, 1.0)}),
          "marker 7 ahead-right, person A ahead-left; click marker 7, FOLLOW"),
@@ -151,6 +153,7 @@ def run(scen):
         LOG.append(("mark", el(), "operator presses FOLLOW"))
 
     truth, done = [], set()
+    LOG.clear()                                        # warm-up entries are on the old clock
     T0[0] = time.time()
     for t0, t1, fn, note in phases:
         LOG.append(("mark", t0, note))
@@ -173,6 +176,8 @@ def run(scen):
                 select(BASE + 7, "operator clicks marker 7"); done.add("click7")
             if "follow" not in done and "click7" in done and e > 1.6:
                 follow(); done.add("follow")
+            if scen == "follow" and "clear" not in done and e > 19.0:
+                select(-1, "operator presses CLEAR"); done.add("clear")
             if scen == "switch":
                 if "clickA" not in done and e > 6.0 and ptracks[0] is not None and ptracks[0].tracks:
                     select(ptracks[0].tracks[0].id, f"operator clicks person #{ptracks[0].tracks[0].id}")
@@ -234,7 +239,15 @@ def evaluate(scen, LOG, truth):
         res.append(("marker 7 back in view -> 'SEEN AGAIN', same id", bool(again)))
         res.append(("following resumes by itself (no new FOLLOW)",
                     "following" in [s for t, s in st if again and t > again[0] + 0.5]))
-        res.append(("controller never disabled", not any(s.startswith("disabled: target") for t, s in st if t > 2)))
+        tc_ = marks.get("operator presses CLEAR", 1e9)
+        tf_ = marks.get("operator presses FOLLOW", 1e9)
+        res.append(("controller never disabled between FOLLOW and CLEAR",
+                    tf_ < tc_ and not any(s.startswith("disabled") for t, s in st if tf_ + 0.5 < t < tc_)))
+        res.append(("CLEAR while following -> controller disabled: selection cleared, within 0.3 s",
+                    any(s == "disabled: selection cleared" for t, s in st if tc_ <= t < tc_ + 0.3)))
+        after = [(t, v, w) for t, v, w in cm if t > tc_ + 0.3 and (abs(v) > 0.01 or abs(w) > 0.01)]
+        res.append(("... and no motion is commanded afterwards (no search for a cleared target)",
+                    not after, f"{len(after)} cmds"))
     else:
         tA = marks.get("operator clicks marker 7 again", 1e9)
         tA0 = next((t for k, t in marks.items() if k.startswith("operator clicks person")), 1e9)
