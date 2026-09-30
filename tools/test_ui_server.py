@@ -60,7 +60,9 @@ p_det = n.create_publisher(PersonDetections, "/follow/person_detections", 10)
 enable_log, select_log = [], []
 n.create_subscription(Bool, "/follow/enable", lambda m: enable_log.append((time.time(), m.data)), 10)
 n.create_subscription(Int32, "/follow/select", lambda m: select_log.append(m.data), 10)
-from dagger_msgs.msg import PersonTracks  # noqa: E402
+from dagger_msgs.msg import MarkerTrack, MarkerTracks, PersonTracks  # noqa: E402
+p_mk = n.create_publisher(MarkerTracks, "/follow/marker_tracks", 10)
+mk_on, mk_sel = [False], [-1]          # a stand-in marker_tracker: one marker (id 7) per frame
 hop = {"tracks": [], "image": []}
 n.create_subscription(PersonTracks, "/follow/tracks", lambda m: hop["tracks"].append(
     time.time() - (m.header.stamp.sec + m.header.stamp.nanosec * 1e-9)), 10)
@@ -89,6 +91,17 @@ def tick():
     im.data = array.array("B", JPG)    # bytes would cost ~30 ms per message in rclpy
     p_img.publish(im)
     p_det.publish(d)
+    if mk_on[0]:
+        mk = MarkerTracks()
+        mk.header, mk.image_width, mk.image_height, mk.image_rotation_deg = d.header, 640, 480, 180
+        mk.id_base, mk.selected_id = 1000000, mk_sel[0]
+        mk.target_state = "TRACKING" if mk_sel[0] >= 0 else "NONE"
+        t = MarkerTrack()
+        t.id, t.marker_id, t.visible, t.confirmed = 1000007, 7, True, True
+        t.corners = [300.0, 200.0, 340.0, 202.0, 338.0, 242.0, 298.0, 240.0]
+        t.range_m, t.bearing_deg, t.heading_deg, t.range_source = 3.2, 1.5, float("nan"), "lidar"
+        mk.tracks.append(t)
+        p_mk.publish(mk)
 
 
 n.create_timer(0.1, tick)
@@ -219,6 +232,34 @@ async def main():
         got = await frames(ws, 1.0)
         check(f"select #{tid} reaches the tracker", tid in select_log and got[-1][1]["selected"] == tid
               and got[-1][1]["state"] == "TRACKING", f"state {got[-1][1].get('state')}")
+
+        # ---- ArUco markers (marker_tracker's tracks, aligned to the same frame) ----
+        mk_on[0] = True
+        await frames(ws, 0.5)
+        got = await frames(ws, 2.0)
+        withm = [h for _, h, _ in got if h.get("markers")]
+        m0 = withm[-1]["markers"][0] if withm else {}
+        check("marker tracker up: every frame carries its markers AND its people",
+              16 <= len(got) <= 23 and len(withm) == len(got)
+              and all(h.get("tracks") is not None for _, h, _ in got), f"{len(withm)}/{len(got)}")
+        check("marker outline, id, range reach the page; NaN heading -> null",
+              m0.get("id") == 1000007 and m0.get("mid") == 7 and len(m0.get("corners", [])) == 8
+              and m0.get("ok") is True and m0.get("range") == 3.2 and m0.get("heading") is None, str(m0))
+        check("a person stays the selection while no marker is selected",
+              got[-1][1]["selected"] == tid, str(got[-1][1]["selected"]))
+        await ws.send(json.dumps({"type": "select", "id": 1000007}))
+        await frames(ws, 0.3)
+        mk_sel[0] = 1000007                       # what marker_tracker does on that select
+        got = await frames(ws, 1.0)
+        check("clicking the marker sends its id; the page then shows the marker as the target",
+              1000007 in select_log and got[-1][1]["selected"] == 1000007
+              and got[-1][1]["state"] == "TRACKING", f"{got[-1][1].get('selected')} {got[-1][1].get('state')}")
+        mk_on[0], mk_sel[0] = False, -1
+        got = await frames(ws, 2.5)
+        tail = [h for t_, h, _ in got if t_ > got[0][0] + 1.5]
+        check("marker tracker stops: video keeps flowing, frames no longer wait for markers",
+              len(got) >= 20 and len(tail) >= 8 and all("markers" not in h for h in tail),
+              f"{len(got)} frames in 2.5 s, {len(tail)} in the last second")
 
         await ws.send(json.dumps({"type": "follow"}))
         await frames(ws, 0.5)

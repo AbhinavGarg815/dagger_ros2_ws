@@ -115,6 +115,9 @@ class PersonTracker(Node):
         p("reid_margin", 0.08)
         p("reid_frames", 3)
         p("select_requires_range", True)   # False only for UI tests without a LiDAR
+        # ids >= this are ArUco markers (marker_tracker): selecting one clears the
+        # person selection here, so only one of the two publishes /follow/target
+        p("marker_id_base", 1000000)
         g = lambda n: self.get_parameter(n).value  # noqa: E731
 
         self.tracker = Tracker(
@@ -136,6 +139,7 @@ class PersonTracker(Node):
             reid_frames=int(g("reid_frames")),
             select_requires_range=bool(g("select_requires_range")))
         self.near_frac = float(g("near_box_fraction"))
+        self.marker_id_base = int(g("marker_id_base"))
         self.last_relink = None
         self.base_frame, self.odom_frame = g("base_frame"), g("odom_frame")
         self.rot = int(g("image_rotation_deg")) % 360
@@ -209,6 +213,10 @@ class PersonTracker(Node):
         if m.data < 0:
             self.tracker.clear()
             self.get_logger().info("selection cleared")
+        elif m.data >= self.marker_id_base:
+            if self.tracker.selected_id >= 0:
+                self.get_logger().info("person selection cleared (a marker was selected)")
+            self.tracker.clear()
         elif self.tracker.select(m.data):
             t = self.tracker.selected()
             where = (f" at {t.range:.1f} m, {math.degrees(t.bearing):+.0f} deg"

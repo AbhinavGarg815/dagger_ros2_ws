@@ -236,7 +236,7 @@ class FollowController(Node):
             self.locked_id = None
             self.search_until = 0.0
             self.get_logger().warn("FOLLOW ENABLED -- the rover will now drive itself "
-                                   "toward the tracked person")
+                                   "toward the selected target")
         else:
             self.v_cmd = 0.0
             self.stop_until = time.monotonic() + 1.0
@@ -258,7 +258,7 @@ class FollowController(Node):
             self.stop_until = time.monotonic() + 1.0
             self.disable_reason = f"target changed (#{self.locked_id} -> #{msg.data})"
             self.get_logger().error(
-                f"TARGET CHANGED to a different person (track {self.locked_id} -> "
+                f"TARGET CHANGED to a different person / marker (track {self.locked_id} -> "
                 f"{msg.data}) -- FOLLOW DISABLED. Re-enable explicitly to follow them.")
 
     def on_estop(self, msg):

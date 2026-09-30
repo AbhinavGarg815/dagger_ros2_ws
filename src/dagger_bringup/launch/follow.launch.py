@@ -45,6 +45,10 @@ def generate_launch_description():
     target_source = LaunchConfiguration("target_source")
     det_conf = LaunchConfiguration("det_conf")
     reid_engine = LaunchConfiguration("reid_engine")
+    marker_dictionary = LaunchConfiguration("marker_dictionary")
+    marker_size = LaunchConfiguration("marker_size")
+    marker_ids = LaunchConfiguration("marker_ids")
+    detect_people = LaunchConfiguration("detect_people")
     ui_port = LaunchConfiguration("ui_port")
 
     use_sim_time_arg = DeclareLaunchArgument("use_sim_time", default_value="false")
@@ -98,6 +102,21 @@ def generate_launch_description():
     # "" = off. Built by tools/fetch_model.sh reid.
     reid_engine_arg = DeclareLaunchArgument(
         "reid_engine", default_value="/home/jetson/ros2_ws/models/osnet_x0_25_msmt17_fp16.engine")
+    # ArUco-marker following (a marker on a car, a rover, a person's back): markers
+    # show in the same page as people and are clicked the same way.
+    #   marker_dictionary  "" = markers off (default). The dictionary the marker
+    #                      was printed from, e.g. DICT_4X4_50 -- python3
+    #                      tools/marker_probe.py finds it, with the id and the size.
+    #   marker_size        side of the black square, metres. 0 = range from the
+    #                      LiDAR only (a marker the LiDAR cannot range is shown
+    #                      but cannot be selected).
+    #   marker_ids         "7" or "3,7": the only ids tracked. "" = any.
+    #   detect_people      false = markers only (YOLOX not loaded).
+    marker_dictionary_arg = DeclareLaunchArgument("marker_dictionary", default_value="")
+    marker_size_arg = DeclareLaunchArgument("marker_size", default_value="0.0")
+    marker_ids_arg = DeclareLaunchArgument("marker_ids", default_value="")
+    detect_people_arg = DeclareLaunchArgument("detect_people", default_value="true")
+    use_markers = PythonExpression(["'", marker_dictionary, "' != ''"])
     target_source_arg = DeclareLaunchArgument("target_source", default_value="tracker",
                                               choices=["tracker", "selector"])
     is_tracker = PythonExpression(["'", target_source, "' == 'tracker'"])
@@ -142,6 +161,8 @@ def generate_launch_description():
             "engine_path": engine_path,
             "conf_threshold": ParameterValue(det_conf, value_type=float),
             "reid_engine": reid_engine,
+            "marker_dictionary": ParameterValue(marker_dictionary, value_type=str),
+            "detect_people": ParameterValue(detect_people, value_type=bool),
             "target_rate": 10.0,
             "publish_debug_image": debug_image,
             "image_rotation_deg": image_rotation,
@@ -198,6 +219,24 @@ def generate_launch_description():
             "use_sim_time": use_sim_time,
         }],
     )
+    # Every ArUco marker -> a track; the operator's click selects one. Same
+    # /follow/target interface as person_tracker; a selection belongs to one of them.
+    marker_tracker = Node(
+        package="dagger_bringup",
+        executable="marker_tracker",
+        name="marker_tracker",
+        output="screen",
+        respawn=True,          # a crash restarts it; the selection is then gone -> no target
+        respawn_delay=1.0,
+        condition=IfCondition(use_markers),
+        parameters=[{
+            "image_rotation_deg": image_rotation,
+            "marker_size": ParameterValue(marker_size, value_type=float),
+            "marker_ids": ParameterValue(marker_ids, value_type=str),
+            "publish_target": ParameterValue(is_tracker, value_type=bool),
+            "use_sim_time": use_sim_time,
+        }],
+    )
     # Video + boxes to the browser, clicks back (tornado, latest-frame-only).
     ui_server = Node(
         package="dagger_bringup",
@@ -230,6 +269,10 @@ def generate_launch_description():
         target_source_arg,
         det_conf_arg,
         reid_engine_arg,
+        marker_dictionary_arg,
+        marker_size_arg,
+        marker_ids_arg,
+        detect_people_arg,
         ui_port_arg,
         collision_monitor_follow,
         lifecycle_manager,
@@ -237,5 +280,6 @@ def generate_launch_description():
         target_selector,
         follow_controller,
         person_tracker,
+        marker_tracker,
         ui_server,
     ])

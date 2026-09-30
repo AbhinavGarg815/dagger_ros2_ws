@@ -11,6 +11,10 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/PersonDetections.msg"
   "msg/PersonTrack.msg"
   "msg/PersonTracks.msg"
+  "msg/MarkerDetection.msg"
+  "msg/MarkerDetections.msg"
+  "msg/MarkerTrack.msg"
+  "msg/MarkerTracks.msg"
   DEPENDENCIES std_msgs geometry_msgs
 )
 

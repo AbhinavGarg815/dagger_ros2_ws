@@ -14,4 +14,5 @@ echo "recording -> $out   (Ctrl-C to stop)"
 exec ros2 bag record -s mcap -o "$out" \
   /follow/detections /follow/person_detections /follow/search_hint /scan_safety /odometry/filtered /tf_static /d435/color/camera_info \
   /follow/tracks /follow/select /follow/state /follow/target /follow/track_id \
-  /follow/target_source /follow/ui/image/compressed
+  /follow/target_source /follow/ui/image/compressed \
+  /follow/marker_detections /follow/marker_tracks

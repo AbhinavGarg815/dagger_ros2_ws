@@ -71,6 +71,47 @@ function canvasPoint(ev) {
   return new DOMPoint((ev.clientX - r.left) * cv.width / r.width, (ev.clientY - r.top) * cv.height / r.height);
 }
 
+// ---------- ArUco markers: track ids >= MARKER_BASE (marker_tracker id_base) ----------
+const MARKER_BASE = 1000000;
+const isMarker = id => id >= MARKER_BASE;
+const tname = id => isMarker(id) ? "marker " + (id - MARKER_BASE) : "#" + id;
+function quad(k) { const c = k.corners; return [0, 1, 2, 3].map(i => new DOMPoint(c[2 * i], c[2 * i + 1])); }
+function inQuad(p, q) {                    // convex: the point is on the same side of all 4 edges
+  let sign = 0;
+  for (let i = 0; i < 4; i++) {
+    const a = q[i], b = q[(i + 1) % 4], cr = (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+    if (cr !== 0) { if (sign !== 0 && Math.sign(cr) !== sign) return false; sign = Math.sign(cr); }
+  }
+  return true;
+}
+function quadArea(q) {
+  let a = 0;
+  for (let i = 0; i < 4; i++) { const p = q[i], n = q[(i + 1) % 4]; a += p.x * n.y - n.x * p.y; }
+  return Math.abs(a) / 2;
+}
+function drawMarkers(hdr, m) {
+  for (const k of hdr.markers || []) {
+    const sel = k.id === hdr.selected;
+    if (!k.visible && !sel) continue;       // an old outline would only mislead
+    const q = quad(k);
+    ctx.setTransform(m);
+    ctx.lineWidth = sel ? 5 : 3;
+    ctx.strokeStyle = sel ? "#ff1744" : k.ok ? "#00e5ff" : "#9e9e9e";
+    ctx.setLineDash(k.visible && k.ok ? [] : [8, 6]);
+    ctx.beginPath(); ctx.moveTo(q[0].x, q[0].y);
+    for (let i = 1; i < 4; i++) ctx.lineTo(q[i].x, q[i].y);
+    ctx.closePath(); ctx.stroke();
+    const c = q.map(p => p.matrixTransform(m));
+    const lx = Math.min(...c.map(p => p.x)), ly = Math.min(...c.map(p => p.y));
+    ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.setLineDash([]);
+    const label = "M" + k.mid + (k.range != null ? "  " + k.range.toFixed(1) + " m" : "  no range")
+                + (k.ok ? "" : " ?");
+    ctx.font = "bold 18px system-ui"; const tw = ctx.measureText(label).width;
+    ctx.fillStyle = sel ? "#ff1744" : "rgba(0,60,70,.8)"; ctx.fillRect(lx, Math.max(0, ly - 24), tw + 10, 24);
+    ctx.fillStyle = "#fff"; ctx.fillText(label, lx + 5, Math.max(18, ly - 6));
+  }
+}
+
 // ---------- drawing ----------
 function draw(hdr, bmp) {
   const m = viewMatrix(hdr);
@@ -94,13 +135,16 @@ function draw(hdr, bmp) {
     ctx.fillStyle = sel ? "#ff1744" : "rgba(0,0,0,.65)"; ctx.fillRect(lx, Math.max(0, ly - 24), tw + 10, 24);
     ctx.fillStyle = "#fff"; ctx.fillText(label, lx + 5, Math.max(18, ly - 6));
   }
+  drawMarkers(hdr, m);
   ctx.setTransform(1, 0, 0, 1, 0, 0);
 }
 
 function status(hdr) {
-  $("npeople").textContent = hdr.tracks ? hdr.tracks.length : "no tracker";
+  const nm = (hdr.markers || []).filter(k => k.visible).length;
+  $("npeople").textContent = (hdr.tracks ? hdr.tracks.length : "no tracker")
+                           + (hdr.markers ? " + " + nm + " marker" + (nm === 1 ? "" : "s") : "");
   const st = hdr.state || "NONE";
-  let tgt = st === "NONE" ? "none" : "#" + hdr.selected + " " + st;
+  let tgt = st === "NONE" ? "none" : tname(hdr.selected) + " " + st;
   if (hdr.range != null && st !== "NONE") tgt += " " + hdr.range.toFixed(1) + " m";
   if (hdr.source) tgt += " (" + hdr.source + ")";
   $("target").textContent = tgt;
@@ -114,11 +158,12 @@ function status(hdr) {
   if (prevState === "SEARCHING" && st === "TRACKING") reidUntil = performance.now() + 2500;
   prevState = st;
   if (performance.now() < reidUntil) { b.style.display = "block"; b.style.background = "#2e7d32";
-                       b.textContent = "RE-IDENTIFIED #" + hdr.selected; }
+                       b.textContent = (isMarker(hdr.selected) ? "SEEN AGAIN: " : "RE-IDENTIFIED ") + tname(hdr.selected); }
   else if (st === "SEARCHING") { b.style.display = "block"; b.style.background = "#ef6c00";
-                       b.textContent = "#" + hdr.selected + " lost — searching (re-identification, 30 s)"; }
+                       b.textContent = tname(hdr.selected) + " lost — searching (resumes if "
+                                     + (isMarker(hdr.selected) ? "seen again" : "re-identified") + " within 30 s)"; }
   else if (st === "LOST") { b.style.display = "block"; b.style.background = "#c62828";
-                       b.textContent = "TARGET #" + hdr.selected + " LOST — click a person to reselect"; }
+                       b.textContent = "TARGET " + tname(hdr.selected) + " LOST — click to reselect"; }
   else if (st === "HOLD_LIDAR") { b.style.display = "block"; b.style.background = "#f9a825";
                        b.textContent = "#" + hdr.selected + " out of camera view — held on LiDAR"; }
   else b.style.display = "none";
@@ -152,24 +197,37 @@ async function decodeNext() {
 
 // ---------- input ----------
 cv.addEventListener("click", ev => {
-  if (!last || !last.hdr.tracks) return;
+  if (!last || !(last.hdr.tracks || last.hdr.markers)) return;
   const p = canvasPoint(ev).matrixTransform(viewMatrix(last.hdr).inverse());   // -> native pixels
-  let best = null;
-  for (const t of last.hdr.tracks) {
+  let best = null;                          // the SMALLEST shape under the click wins
+  for (const k of last.hdr.markers || []) {
+    if (!k.visible) continue;
+    const q = quad(k);
+    if (inQuad(p, q)) {
+      const a = quadArea(q);
+      if (!best || a < best.a) best = { id: k.id, a, ok: k.ok };
+    }
+  }
+  for (const t of last.hdr.tracks || []) {
     const [x1, y1, x2, y2] = t.box;
     if (p.x >= x1 && p.x <= x2 && p.y >= y1 && p.y <= y2) {
       const a = (x2 - x1) * (y2 - y1);
       if (!best || a < best.a) best = { id: t.id, a, ok: t.ranged !== false };
     }
   }
-  if (best && !best.ok) { setMsg("#" + best.id + " is not selectable: the LiDAR has not ranged it (not confirmed as a person)"); return; }
+  if (best && !best.ok) {
+    setMsg(isMarker(best.id)
+      ? tname(best.id) + " is not selectable yet: not confirmed, or no range (marker size not set and no LiDAR return)"
+      : "#" + best.id + " is not selectable: the LiDAR has not ranged it (not confirmed as a person)");
+    return;
+  }
   if (best) {
     send({ type: "select", id: best.id });
     setMsg(following && best.id !== last.hdr.selected
-      ? "selected #" + best.id + " — following STOPS (different person); press FOLLOW to follow them"
-      : "selected #" + best.id);
+      ? "selected " + tname(best.id) + " — following STOPS (different target); press FOLLOW to follow it"
+      : "selected " + tname(best.id));
   }
-  else setMsg("no person under the click");
+  else setMsg("no person or marker under the click");
 });
 $("follow").onclick = () => send({ type: "follow" });
 $("stop").onclick = () => { send({ type: "stop" }); setMsg("STOP sent"); };

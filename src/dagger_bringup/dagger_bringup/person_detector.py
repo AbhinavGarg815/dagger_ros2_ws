@@ -26,7 +26,8 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 from sensor_msgs.msg import Image, CompressedImage
-from dagger_msgs.msg import PersonDetection, PersonDetections
+from dagger_msgs.msg import (MarkerDetection, MarkerDetections, PersonDetection,
+                             PersonDetections)
 from vision_msgs.msg import (BoundingBox2D, Detection2D, Detection2DArray,
                              ObjectHypothesisWithPose)
 
@@ -68,10 +69,21 @@ class PersonDetector(Node):
         self.declare_parameter("reid_engine", "")
         self.declare_parameter("person_detections_topic", "/follow/person_detections")
         self.declare_parameter("reid_min_score", 0.3)
+        # ArUco markers on the SAME frame (marker_tracking.aruco_detector, ~6 ms on
+        # the CPU), on /follow/marker_detections for marker_tracker. "" = off.
+        # The dictionary must be the one the marker was printed from
+        # (tools/marker_probe.py tells). Detected on the frame as the driver
+        # delivers it: ArUco does not care about rotation.
+        self.declare_parameter("marker_dictionary", "")
+        self.declare_parameter("markers_topic", "/follow/marker_detections")
+        # False = markers only: YOLOX is not loaded and no people are reported
+        # (empty detections are still published, so the UI keeps its frames).
+        self.declare_parameter("detect_people", True)
 
         g = lambda n: self.get_parameter(n).value  # noqa: E731
         engine = g("engine_path")
-        if not engine:
+        self.detect_people = bool(g("detect_people"))
+        if self.detect_people and not engine:
             raise RuntimeError(
                 "engine_path is required -- build one with tools/fetch_model.sh")
         self.period = 1.0 / float(g("target_rate"))
@@ -80,7 +92,14 @@ class PersonDetector(Node):
         self.ui_quality = int(g("ui_jpeg_quality"))
         self.reid_min_score = float(g("reid_min_score"))
         self.reid = None
-        if g("reid_engine"):
+        self.marker_dict, self.marker_detect, self.marker_ms = g("marker_dictionary"), None, []
+        if self.marker_dict:
+            try:
+                from dagger_bringup.marker_tracking import aruco_detector
+                self.marker_detect = aruco_detector(self.marker_dict)
+            except Exception as e:     # a bad dictionary name must not take detection down
+                self.get_logger().error(f"marker detection disabled: {e}")
+        if g("reid_engine") and self.detect_people:
             try:
                 from dagger_bringup.reid_trt import ReidTRT
                 self.reid = ReidTRT(g("reid_engine"))
@@ -94,7 +113,7 @@ class PersonDetector(Node):
         self.detector = YoloxTRT(engine,
                                  conf_thres=float(g("conf_threshold")),
                                  nms_thres=float(g("nms_threshold")),
-                                 classes=(COCO_PERSON,))
+                                 classes=(COCO_PERSON,)) if self.detect_people else None
 
         from cv_bridge import CvBridge
         self.bridge = CvBridge()
@@ -109,6 +128,7 @@ class PersonDetector(Node):
                           if self.publish_debug else None)
         self.ui_pub = self.create_publisher(CompressedImage, g("ui_image_topic"), qos)
         self.pd_pub = self.create_publisher(PersonDetections, g("person_detections_topic"), 10)
+        self.mk_pub = self.create_publisher(MarkerDetections, g("markers_topic"), 10)
         self.create_subscription(Image, g("image_topic"), self.on_image, qos)
 
         self.last_run = 0.0
@@ -118,8 +138,10 @@ class PersonDetector(Node):
         self.create_timer(10.0, self.report)
         self.get_logger().info(
             f"person_detector: {g('image_topic')} -> {g('detections_topic')} at "
-            f"{g('target_rate')} Hz, conf {g('conf_threshold')}, "
-            f"engine {engine.split('/')[-1]}, input {self.detector.input_hw}")
+            f"{g('target_rate')} Hz, "
+            + (f"conf {g('conf_threshold')}, engine {engine.split('/')[-1]}, input "
+               f"{self.detector.input_hw}" if self.detect_people else "people OFF (markers only)")
+            + (f"; ArUco {self.marker_dict} -> {g('markers_topic')}" if self.marker_detect else ""))
 
     def on_image(self, msg):
         now = time.monotonic()
@@ -136,10 +158,27 @@ class PersonDetector(Node):
         frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
         t0 = time.perf_counter()
         upright = self.rotate(frame)
-        dets_up = self.detector.detect(upright)
+        dets_up = self.detector.detect(upright) if self.detector is not None else []
         dets = [self.unrotate(d, frame.shape[1], frame.shape[0]) for d in dets_up]
         self.infer_ms.append((time.perf_counter() - t0) * 1e3)
         self.n_frames += 1
+
+        if self.marker_detect is not None:
+            import cv2
+            t1 = time.perf_counter()
+            mk = MarkerDetections()
+            mk.header = msg.header
+            mk.image_width, mk.image_height = frame.shape[1], frame.shape[0]
+            mk.dictionary = self.marker_dict
+            try:
+                for mid, corners in self.marker_detect(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)):
+                    m = MarkerDetection()
+                    m.marker_id, m.corners = mid, corners
+                    mk.markers.append(m)
+            except Exception as e:     # never let a marker problem stop person detection
+                self.get_logger().error(f"marker detection failed: {e}", throttle_duration_sec=5.0)
+            self.mk_pub.publish(mk)        # every frame, also empty: marker_tracker's clock
+            self.marker_ms.append((time.perf_counter() - t1) * 1e3)
 
         # appearance signatures: crops from the upright frame (the network was
         # trained on upright people), in the same order as dets
@@ -237,10 +276,12 @@ class PersonDetector(Node):
             f"{self.n_frames / 10.0:.1f} Hz processed ({self.n_skipped} frames skipped "
             f"to hold the rate), detect median {np.median(ms):.1f} ms, p95 "
             f"{np.percentile(ms, 95):.1f} ms"
-            + (f", re-ID median {np.median(self.reid_ms):.1f} ms" if self.reid_ms else ""))
+            + (f", re-ID median {np.median(self.reid_ms):.1f} ms" if self.reid_ms else "")
+            + (f", markers median {np.median(self.marker_ms):.1f} ms" if self.marker_ms else ""))
         self.n_frames = self.n_skipped = 0
         self.infer_ms = []
         self.reid_ms = []
+        self.marker_ms = []
 
 
 def main(args=None):
@@ -250,7 +291,8 @@ def main(args=None):
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
-    node.detector.close()
+    if node.detector is not None:
+        node.detector.close()
     node.destroy_node()
     # ros2 run's signal handler may already have shut the context down; calling
     # again raises and makes a clean Ctrl-C look like a crash in the logs.

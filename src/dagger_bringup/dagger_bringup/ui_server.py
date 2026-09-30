@@ -44,7 +44,7 @@ import rclpy
 import tornado.web
 import tornado.websocket
 from ament_index_python.packages import get_package_share_directory
-from dagger_msgs.msg import PersonTracks
+from dagger_msgs.msg import MarkerTracks, PersonTracks
 from geometry_msgs.msg import PoseStamped
 from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from rclpy.node import Node
@@ -109,6 +109,8 @@ class UiServer(Node):
         self.lock = threading.Lock()
         self.images = collections.OrderedDict()   # stamp -> (msg, arrival)
         self.tracks = collections.OrderedDict()   # stamp -> msg
+        self.markers = collections.OrderedDict()  # stamp -> MarkerTracks (marker_tracker, optional)
+        self.marker_seen = -1e9                   # last MarkerTracks arrival: is marker_tracker up?
         self.follow_enabled = None
         self.follow_state = ""                     # follow_controller's /follow/state
         self.target_source = ""
@@ -119,6 +121,7 @@ class UiServer(Node):
                         history=HistoryPolicy.KEEP_LAST, depth=1)
         self.create_subscription(CompressedImage, g("image_topic"), self.on_image, be)
         self.create_subscription(PersonTracks, g("tracks_topic"), self.on_tracks, 10)
+        self.create_subscription(MarkerTracks, "/follow/marker_tracks", self.on_markers, 10)
         self.create_subscription(Bool, g("enable_topic"),
                                  lambda m: setattr(self, "follow_enabled", m.data), 10)
         self.create_subscription(String, "/follow/state", self.on_state, 10)
@@ -153,24 +156,37 @@ class UiServer(Node):
                 self.tracks.popitem(last=False)
             self.pair(stamp_s(m.header))
 
+    def on_markers(self, m):
+        with self.lock:
+            self.marker_seen = time.monotonic()
+            self.markers[stamp_s(m.header)] = m
+            while len(self.markers) > 5:
+                self.markers.popitem(last=False)
+            self.pair(stamp_s(m.header))
+
     def pair(self, st):
-        """Caller holds the lock. Emit the frame at stamp st once both halves exist."""
-        if st in self.images and st in self.tracks:
+        """Caller holds the lock. Emit the frame at stamp st once all parts exist:
+        the image, its person tracks and -- while marker_tracker is publishing --
+        its marker tracks."""
+        want_markers = time.monotonic() - self.marker_seen < 1.0
+        if st in self.images and st in self.tracks and (st in self.markers or not want_markers):
             img, _ = self.images.pop(st)
             trk = self.tracks.pop(st)
-            for d in (self.images, self.tracks):      # anything older can no longer pair
+            mk = self.markers.pop(st, None)
+            for d in (self.images, self.tracks, self.markers):   # anything older can no longer pair
                 for k in [k for k in d if k < st]:
                     del d[k]
-            self.emit(img, trk)
+            self.emit(img, trk, mk)
 
     def flush_unpaired(self):
         now = time.monotonic()
         with self.lock:
             for st in [k for k, (_, t0) in self.images.items() if now - t0 > self.pair_timeout]:
                 img, _ = self.images.pop(st)
-                self.emit(img, None)
+                # a part that never came is shown as missing, the rest as they are
+                self.emit(img, self.tracks.pop(st, None), self.markers.pop(st, None))
 
-    def emit(self, img, trk):
+    def emit(self, img, trk, mk=None):
         h = {"type": "frame", "stamp": stamp_s(img.header),
              "follow": self.follow_enabled, "follow_state": self.follow_state,
              "allow_follow": self.allow_follow,
@@ -187,6 +203,18 @@ class UiServer(Node):
                              for t in trk.tracks])
         else:
             h.update(tracks=None, selected=-1, state="NO_TRACKER")
+        if mk is not None:
+            # corners: the marker's outline in native image pixels, like the boxes
+            h["markers"] = [{"id": t.id, "mid": t.marker_id,
+                             "corners": [num(v, 1) for v in t.corners],
+                             "visible": t.visible, "ok": t.confirmed,
+                             "range": num(t.range_m, 2), "bearing": num(t.bearing_deg, 1),
+                             "heading": num(t.heading_deg, 0), "src": t.range_source}
+                            for t in mk.tracks]
+            if trk is None:
+                h.update(w=mk.image_width, h=mk.image_height, rot=mk.image_rotation_deg)
+            if mk.selected_id >= 0:                # a marker is the selection: its state counts
+                h.update(selected=mk.selected_id, state=mk.target_state)
         self.loop.call_soon_threadsafe(self.hub.publish, h, bytes(img.data))
 
     # ---------------- commands (loop thread; rclpy publish is thread-safe) ----------------
@@ -201,7 +229,7 @@ class UiServer(Node):
         if t == "select":
             tid = int(msg["id"])
             self.select_pub.publish(Int32(data=tid))
-            self.get_logger().info(f"UI: select person #{tid}")
+            self.get_logger().info(f"UI: select #{tid}")
             return None
         if t == "clear":
             self.select_pub.publish(Int32(data=-1))
