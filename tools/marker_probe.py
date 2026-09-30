@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Which ArUco marker is in front of the camera? READ-ONLY, no motion.
 
-    python3 tools/marker_probe.py            # watch for 8 s
+    python3 tools/marker_probe.py            # wait (up to 3 min) for a marker, then measure 8 s
+    python3 tools/marker_probe.py --wait 600 # wait up to 10 min
+    python3 tools/marker_probe.py --wait 0   # no waiting: measure the next 8 s as they are
     python3 tools/marker_probe.py --secs 15 --size 0.15
 
-Needs T1 with use_camera:=true (and T2 for the LiDAR size estimate). Hold the
-marker 1.5-3 m in front of the rover, facing the camera, and keep it still.
+Needs T1 with use_camera:=true (and T2 for the LiDAR size estimate). Start it,
+THEN walk to the rover: it waits until a marker is held steadily in view (read in
+most frames for 1.5 s), beeps, and only then measures. Hold the marker 1.5-3 m
+in front of the rover, facing the camera, and keep it still until it reports.
 
 Tries every predefined ArUco dictionary on each frame and reports, per marker:
 the dictionary and id, how large it appears, and -- from the LiDAR range at its
@@ -36,7 +40,9 @@ DICTS = ["DICT_4X4_50", "DICT_4X4_100", "DICT_4X4_250", "DICT_4X4_1000",
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--secs", type=float, default=8.0)
+    ap.add_argument("--secs", type=float, default=8.0, help="measuring time once a marker is steady")
+    ap.add_argument("--wait", type=float, default=180.0,
+                    help="how long to wait for a marker to appear (s); 0 = measure at once")
     ap.add_argument("--size", type=float, default=0.0, help="printed side (m) to check against the LiDAR")
     ap.add_argument("--image", default="/d435/color/image_raw")
     a = ap.parse_args()
@@ -75,10 +81,32 @@ def main():
                                      durability=DurabilityPolicy.TRANSIENT_LOCAL))
     dets = {d: aruco_detector(d) for d in DICTS}
     seen = {}                       # (dict, id) -> [side px, LiDAR depth or None, pnp range, lidar range]
-    frames, end = 0, time.time() + a.secs
-    print(f"watching {a.image} for {a.secs:.0f} s -- hold the marker still, facing the camera ...")
+    # Two phases: WAIT until a marker is steadily in view (the operator has to
+    # walk to the rover with it), then MEASURE for --secs from a clean start.
+    waiting = a.wait > 0
+    t_start = time.time()
+    frames, end = 0, t_start + (a.wait if waiting else a.secs)
+    recent, next_note = [], t_start + 5.0      # recent: (time, {(bits, id)} read at >= 15 px)
+    if waiting:
+        print(f"waiting up to {a.wait:.0f} s for a marker on {a.image} -- bring it 1.5-3 m in front "
+              f"of the rover, facing the camera (Ctrl-C to cancel) ...", flush=True)
+    else:
+        print(f"watching {a.image} for {a.secs:.0f} s -- hold the marker still, facing the camera ...",
+              flush=True)
     while time.time() < end:
-        rclpy.spin_once(n, timeout_sec=0.05)
+        try:
+            rclpy.spin_once(n, timeout_sec=0.05)
+        except KeyboardInterrupt:
+            n.destroy_node()
+            rclpy.try_shutdown()
+            sys.exit("\ncancelled")
+        now = time.time()
+        if waiting and now >= next_note:
+            next_note = now + 5.0
+            last = sorted(recent[-1][1]) if recent else []
+            print(f"  ... {end - now:4.0f} s left, " + ("no camera frames yet -- is T1 up with use_camera:=true?"
+                  if not frames else f"in view now: {', '.join(f'{b} id {i}' for b, i in last) or 'no marker'}"),
+                  flush=True)
         if st["img"] is None:
             continue
         img, st["img"] = st["img"], None
@@ -118,6 +146,31 @@ def main():
                             p = cam[1] @ pose[0] + cam[0]
                             r_pnp = math.hypot(p[0] - cam[0][0], p[1] - cam[0][1])
                 seen.setdefault((name, mid), []).append((float(sides.max()), depth, r_pnp, r_lidar))
+                if waiting and sides.max() >= 15.0:
+                    if not recent or recent[-1][0] != now:
+                        recent.append((now, set()))
+                    recent[-1][1].add((name.split("_")[1], mid))
+        if waiting:
+            if not recent or recent[-1][0] != now:
+                recent.append((now, set()))           # a frame with nothing in it counts too
+            recent = [r for r in recent if now - r[0] <= 1.5]
+            keys = set().union(*(r[1] for r in recent))
+            steady = [k for k in keys if sum(k in r[1] for r in recent) >= 0.7 * len(recent)]
+            if len(recent) >= 6 and now - recent[0][0] >= 1.2 and steady:
+                waiting = False
+                seen.clear()                          # measure from a clean start
+                frames, end = 0, now + a.secs
+                print(f"\a  marker in view ({', '.join(f'{b} id {i}' for b, i in sorted(steady))}) after "
+                      f"{now - t_start:.0f} s -- HOLD IT STILL, measuring for {a.secs:.0f} s ...", flush=True)
+    if waiting:
+        n.destroy_node()
+        rclpy.shutdown()
+        sys.exit(f"no marker held steadily in view within {a.wait:.0f} s"
+                 + (f" ({frames} frames seen)" if frames else f" -- and no frames on {a.image}: is T1 up "
+                    f"with use_camera:=true?")
+                 + ". It must be flat, facing the camera, 1.5-3 m away, with a white margin around "
+                   "the black square. Longer: --wait 600")
+    print("\a  done measuring -- you can move.", flush=True)
     n.destroy_node()
     rclpy.shutdown()
 
