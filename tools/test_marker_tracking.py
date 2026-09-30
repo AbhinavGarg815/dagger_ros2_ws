@@ -97,18 +97,36 @@ obs = locate(render([(7, 0.15, (3.0, 0.0, 1.0), 180.0), (3, 0.15, (4.0, -1.5, 1.
 check("two markers in one frame: both located with their own ids",
       sorted(o.marker_id for o in obs if o.reject is None) == [3, 7])
 
-# LiDAR: a body behind the marker at the same range -> LiDAR range; a wall 2 m
-# behind -> the marker's own range
-frame = render([(7, 0.15, (4.0, 0.0, 1.0), 180.0)])
+# Range source. Well resolved (>= 20 px): the marker's own range, whatever the
+# LiDAR says -- it ranges what is behind or around the marker.
 a = np.linspace(-0.3, 0.3, 40)
+frame = render([(7, 0.175, (1.25, 0.0, 1.0), 180.0)])                      # hand-held, ~110 px
+held = (1.38 + 0.2 * (1 - np.cos(a)), 0.2 * np.sin(a) * 1.5)               # the body 0.13 m behind it
+o = locate(frame, size=0.175, pts=held)[0]
+check("hand-held marker at 1.25 m, body 0.13 m behind on the LiDAR: the MARKER's range (live 09-30)",
+      o.reject is None and o.source == "marker" and abs(o.xy[0] - 1.25) < 0.03, f"{o.source} {o.xy} {o.reject}")
+frame = render([(7, 0.15, (4.0, 0.0, 1.0), 180.0)])                        # ~24 px
 body = (4.02 + 0.2 * (1 - np.cos(a)), 0.2 * np.sin(a) * 1.5)
 o = locate(frame, pts=body)[0]
-check("LiDAR return at the marker's range -> range source 'lidar'",
-      o.source == "lidar" and abs(o.xy[0] - 4.0) < 0.15, f"{o.source} {o.xy}")
-wall = (np.full(80, 6.0), np.linspace(-2, 2, 80))
-o = locate(frame, pts=wall)[0]
-check("LiDAR return 2 m behind the marker (disagrees) -> the marker's own range",
+check("marker at 4 m (24 px), LiDAR agrees: still the marker's own range",
       o.source == "marker" and abs(o.xy[0] - 4.0) < 0.15, f"{o.source} {o.xy}")
+# small (< 20 px, far): the LiDAR's range, if it agrees
+far = render([(7, 0.15, (6.0, 0.0, 1.0), 180.0)])                          # ~16 px
+fbody = (6.02 + 0.2 * (1 - np.cos(a)), 0.2 * np.sin(a) * 1.5)
+o = locate(far, pts=fbody)[0]
+check("marker at 6 m (16 px), LiDAR return at its range -> range source 'lidar'",
+      o.reject is None and o.source == "lidar" and abs(o.xy[0] - 6.0) < 0.1, f"{o.source} {o.xy} {o.reject}")
+wall = (np.full(80, 8.5), np.linspace(-2, 2, 80))
+o = locate(far, pts=wall)[0]
+check("... LiDAR return 2.5 m behind it (disagrees) -> the marker's own range",
+      o.source == "marker" and abs(o.xy[0] - 6.0) < 0.4, f"{o.source} {o.xy}")
+# OpenCV's too-close-candidates filter lost a 6x6 marker with a one-cell margin
+det6 = aruco_detector("DICT_6X6_50")
+n6 = sum(any(mid == 0 for mid, _ in det6(cv2.cvtColor(
+    render([(0, 0.175, (x, 0.0, 1.0), 180.0 + t)], 1, dictionary="DICT_6X6_50"), cv2.COLOR_BGR2GRAY)))
+    for x in (1.2, 1.5, 2.0, 2.5, 4.0, 6.0) for t in (-16.0, 0.0, 16.0))
+check("6x6 marker, 17.5 cm, one-cell white margin: read at 1.2-6 m (18 of 18)", n6 == 18, f"{n6}/18")
+frame = render([(7, 0.15, (4.0, 0.0, 1.0), 180.0)])
 o = locate(frame, size=0.0, pts=body)[0]
 check("marker size not set: LiDAR range only", o.source == "lidar" and o.xy is not None)
 o = locate(frame, size=0.0)[0]

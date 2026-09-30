@@ -17,10 +17,14 @@ same ID seen again. What needs care is TRUE POSITIVES:
     print of the same ID elsewhere) unless it persists for jump_frames frames;
   * after a loss, following resumes only after resume_hits sightings.
 
-Range: from the marker's printed size (PnP, IPPE_SQUARE), or -- where the LiDAR
-has a return at the marker's bearing that agrees with it (lidar_tol) -- the
-LiDAR's, which stays accurate far away where the marker is a few pixels. With
-size 0 (not set) only a LiDAR range counts, unchecked.
+Range: from the marker's printed size (PnP, IPPE_SQUARE) while the marker is
+well resolved (side >= lidar_below_px: error <= 2 %). Smaller than that -- far
+away, where it is a few pixels and the error grows to 3-6 % -- the LiDAR's range
+is used if it has a return at the marker's bearing that agrees (lidar_tol).
+Not the LiDAR whenever it agrees: it ranges whatever is BEHIND or around the
+marker (live 2026-09-30: a hand-held marker at 0.95 m, the LiDAR read the body
+0.13 m behind it, spread 0.01 m). With size 0 (not set) only a LiDAR range
+counts, unchecked.
 
 No LiDAR hold (v1): the carrier may be a car, and a car-sized return is exactly
 what the person hold refuses as a wall. Out of view = lost -> SEARCHING -> the
@@ -51,6 +55,14 @@ def aruco_detector(dictionary):
     # (rendered through this rover's camera, 2026-09-30). Window = half a cell,
     # 1..5 px: +0.2 % at 1.2 m, +1 % at 3 m, +2 % at 5 m.
     p.cornerRefinementMethod = A.CORNER_REFINE_NONE
+    # OpenCV 4.5.4 drops the SMALLER of two candidate squares whose corners are
+    # closer than this x perimeter. At the default 0.05 (= 14 % of the side) the
+    # outline of a narrow white margin on a darker background wins and the marker
+    # itself is dropped: a 6x6 marker with a one-cell margin (12.5 %) was not read
+    # at all closer than 2.5 m (rendered, 2026-09-30); 4x4 (16.7 %) was. 0.03
+    # reads both at every distance; 0.02 starts returning the same marker twice.
+    # Still: leave >= 2 cm of white around the black square.
+    p.minMarkerDistanceRate = 0.03
     cells = int(d.markerSize) + 2                           # bits + the black border
     crit = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.01)
 
@@ -147,7 +159,8 @@ class MarkerTracker:
 
     def __init__(self, id_base=1_000_000, allowed_ids=None, min_hits=3, confirm_window=1.0,
                  min_side_px=10.0, max_reproj_px=2.0, max_tilt_deg=75.0, min_range=0.3,
-                 max_range=15.0, lidar_tol=0.3, lidar_tol_rel=0.1, max_speed=3.0,
+                 max_range=15.0, lidar_tol=0.3, lidar_tol_rel=0.1, lidar_below_px=20.0,
+                 max_speed=3.0,
                  track_gate=1.0, jump_frames=3, lost_after=0.5, reid_window=30.0,
                  resume_hits=2, forget_after=10.0):
         self.id_base = id_base
@@ -156,8 +169,10 @@ class MarkerTracker:
         self.min_side_px, self.max_reproj_px = min_side_px, max_reproj_px
         self.max_tilt = math.radians(max_tilt_deg)
         self.min_range, self.max_range = min_range, max_range
-        # LiDAR range replaces the marker's when they agree within this
+        # a marker smaller than lidar_below_px takes the LiDAR's range, if the two
+        # agree within lidar_tol + lidar_tol_rel x range
         self.lidar_tol, self.lidar_tol_rel = lidar_tol, lidar_tol_rel
+        self.lidar_below_px = lidar_below_px
         # a marker's carrier may be a car: faster than a person
         self.max_speed, self.track_gate, self.jump_frames = max_speed, track_gate, jump_frames
         # unseen this long -> SEARCHING (the controller tolerates 0.6 s gaps)
@@ -213,7 +228,7 @@ class MarkerTracker:
         b_cam = math.atan2(d[1], d[0])                   # bearing from the CAMERA
         xy = xy_m
         o.source = "marker" if xy_m is not None else ""
-        if pts is not None and len(pts[0]):
+        if pts is not None and len(pts[0]) and (xy_m is None or side < self.lidar_below_px):
             half = max(math.radians(1.0), math.atan(side / 2.0 / fx) * 1.5)
             xl = range_at(pts[0], pts[1], (cam_t[0], cam_t[1]), b_cam, half, 0.5, 2,
                           reject_extended=False)

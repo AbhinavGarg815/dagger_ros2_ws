@@ -35,7 +35,7 @@ def project(P, s=1.0):
     return (uv + 0.5) * s - 0.5
 
 
-def render(markers, seed=0, blur=0.7, noise=3.0):
+def render(markers, seed=0, blur=0.7, noise=3.0, dictionary=DICT):
     """markers: [(marker_id, size m, centre (x, y, z) base, normal yaw deg)] ->
     BGR frame. The normal points out of the printed face; yaw 180 = facing the
     rover. Each marker has a one-cell white margin (quiet zone), as printed.
@@ -44,9 +44,10 @@ def render(markers, seed=0, blur=0.7, noise=3.0):
     bg = cv2.GaussianBlur((rng.random((H, W)) * 200 + 30).astype(np.uint8), (0, 0), 2.5)
     img = cv2.resize(bg, (W * SS, H * SS), interpolation=cv2.INTER_LINEAR)
     A = cv2.aruco
-    d = A.getPredefinedDictionary(getattr(A, DICT))
+    d = A.getPredefinedDictionary(getattr(A, dictionary))
+    px = (int(d.markerSize) + 2) * 40              # 40 px per cell, black border included
     for mid, size, c, yaw in markers:
-        m = A.drawMarker(d, mid, 240)              # 6 cells x 40 px (black border included)
+        m = A.drawMarker(d, mid, px)
         board = cv2.copyMakeBorder(m, 40, 40, 40, 40, cv2.BORDER_CONSTANT, value=255)
         n = np.array([math.cos(math.radians(yaw)), math.sin(math.radians(yaw)), 0.0])
         up = np.array([0.0, 0.0, 1.0])
@@ -56,11 +57,12 @@ def render(markers, seed=0, blur=0.7, noise=3.0):
         P = np.array([c - right * h + up * h, c + right * h + up * h,
                       c + right * h - up * h, c - right * h - up * h])
         dst = project(P, SS).astype(np.float32)
-        src = np.float32([[39.5, 39.5], [279.5, 39.5], [279.5, 279.5], [39.5, 279.5]])
+        e = 39.5 + px
+        src = np.float32([[39.5, 39.5], [e, 39.5], [e, e], [39.5, e]])
         Hm = cv2.getPerspectiveTransform(src, dst)
         size_ss = (W * SS, H * SS)
         warped = cv2.warpPerspective(board, Hm, size_ss, flags=cv2.INTER_NEAREST)
-        mask = cv2.warpPerspective(np.full((320, 320), 255, np.uint8), Hm, size_ss,
+        mask = cv2.warpPerspective(np.full((px + 80, px + 80), 255, np.uint8), Hm, size_ss,
                                    flags=cv2.INTER_NEAREST) > 0
         img[mask] = warped[mask]
     img = cv2.resize(img, (W, H), interpolation=cv2.INTER_AREA)

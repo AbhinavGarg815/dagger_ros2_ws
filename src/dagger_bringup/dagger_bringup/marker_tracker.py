@@ -81,6 +81,7 @@ class MarkerTrackerNode(Node):
         p("max_tilt_deg", 75.0)
         p("min_range", 0.3)
         p("max_range", 15.0)
+        p("lidar_below_px", 20.0)          # smaller than this: the LiDAR's range, if it agrees
         p("lost_after", 0.5)
         p("reid_window", 30.0)             # = follow_controller resume_window
         p("resume_hits", 2)
@@ -93,7 +94,8 @@ class MarkerTrackerNode(Node):
             id_base=int(g("id_base")), allowed_ids=ids or None, min_hits=int(g("min_hits")),
             min_side_px=float(g("min_side_px")), max_reproj_px=float(g("max_reproj_px")),
             max_tilt_deg=float(g("max_tilt_deg")), min_range=float(g("min_range")),
-            max_range=float(g("max_range")), lost_after=float(g("lost_after")),
+            max_range=float(g("max_range")), lidar_below_px=float(g("lidar_below_px")),
+            lost_after=float(g("lost_after")),
             reid_window=float(g("reid_window")), resume_hits=int(g("resume_hits")))
         self.size = float(g("marker_size"))
         self.base_frame, self.odom_frame = g("base_frame"), g("odom_frame")
