@@ -63,9 +63,15 @@ def generate_launch_description():
     max_linear_arg = DeclareLaunchArgument("max_linear", default_value="0.6")
     # Engines are built for one GPU + TensorRT version, so models/ is gitignored
     # and this points into the source tree rather than the install share dir.
+    # YOLOX-S (640 input) since 2026-09-30: on the reid1 recording (894 frames,
+    # tools/compare_detectors.py) Nano called a flowering plant a person in 40-67 %
+    # of its frames; S and Tiny never did (not even at 0.2), with the same 100 %
+    # recall on the operator and higher scores on people 9-11 m away (S 0.86 vs
+    # Nano 0.65-0.80). S: 27.7 ms/frame whole pipeline, +4 ms CPU vs Nano.
+    # Nano stays available: engine_path:=.../yolox_nano_fp16.engine
     engine_path_arg = DeclareLaunchArgument(
         "engine_path",
-        default_value="/home/jetson/ros2_ws/models/yolox_nano_fp16.engine",
+        default_value="/home/jetson/ros2_ws/models/yolox_s_fp16.engine",
         description="TensorRT engine from tools/fetch_model.sh",
     )
     # Annotated frames for Foxglove. Off while driving -- Foxglove already

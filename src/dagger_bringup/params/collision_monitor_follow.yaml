@@ -42,7 +42,12 @@ collision_monitor_follow:
     source_timeout: 0.5
     base_shift_correction: true
     stop_pub_timeout: 2.0
-    polygons: ["PolygonStop", "PolygonSlow", "FootprintApproach"]
+    # PolygonSlow is NOT listed (2026-09-30): Humble's slowdown scales the whole
+    # twist including rotation, which crippled the in-place search turn next to
+    # any plant or wall. follow_controller applies the same zone and ratio to
+    # FORWARD speed only. STOP and the footprint approach (which simulates the
+    # rotating footprint) still act here, unchanged.
+    polygons: ["PolygonStop", "FootprintApproach"]
 
     # 0.6 m ahead of the bumper. Well inside the ~3 m follow distance, so in
     # normal following this never fires -- it is the last resort, not a control

@@ -15,6 +15,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from geometry_msgs.msg import PoseStamped, Twist
+from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, Int32
 
 SRC = ("export ROS_DOMAIN_ID=42 && source /opt/ros/humble/setup.bash && "
@@ -27,6 +28,21 @@ be = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryPolicy
 tgt = n.create_publisher(PoseStamped, "/follow/target", be)
 en = n.create_publisher(Bool, "/follow/enable", 10)
 tid = n.create_publisher(Int32, "/follow/track_id", 10)
+scan_pub = n.create_publisher(LaserScan, "/scan_safety", be)
+obstacle = [False]           # a post 1.8 m ahead in the slow zone?
+
+
+def scan():
+    s = LaserScan(); s.header.frame_id = "base_footprint"
+    s.header.stamp = n.get_clock().now().to_msg()
+    s.angle_min, s.angle_increment, s.range_min, s.range_max = -math.pi, 0.0087, 1.0, 20.0
+    nb = int(2 * math.pi / 0.0087)
+    s.ranges = [1.8 if obstacle[0] and abs(-math.pi + i * 0.0087) < 0.08 else float("inf")
+                for i in range(nb)]
+    scan_pub.publish(s)
+
+
+n.create_timer(0.1, scan)
 cmds = []
 n.create_subscription(Twist, "/cmd_vel_follow_raw", lambda m: cmds.append(m), 10)
 
@@ -89,6 +105,12 @@ for k in range(60):
 ws = [abs(c.angular.z) > 1e-3 for c in cmds]
 toggles = sum(1 for a, b in zip(ws, ws[1:]) if a != b)
 print(f"  {'bearing dithering 4.5/5.5 deg':44s} -> yaw on/off toggles: {toggles}")
+obstacle[0] = True
+spin(0.3)                    # let a scan with the obstacle arrive (scans are 10 Hz)
+r_slowzone = phase("5 m ahead, obstacle IN the slow zone", 3.0, 5.0)
+r_slowturn = phase("  ...target at 60 deg (turn in place)", 3.0, *pol(4.0, 60))
+obstacle[0] = False
+r_clear = phase("zone clear again", 3.0, 5.0)
 r_id1 = phase("following track 7", 2.0, 4.5, 0.0, track=7)
 r_id2 = phase("track id changes to 8", 2.0, 4.5, 0.0, track=8)
 r_id2b = phase("  ...still track 8", 2.0, 4.5, 0.0, track=8)
@@ -106,6 +128,10 @@ checks = [
     ("does not resume on its own", r_noauto is None),
     ("resumes after explicit re-enable", r_reen and r_reen[1] > 0.05),
     ("no yaw chatter when bearing dithers across 5 deg", toggles <= 2),
+    ("slow zone occupied: forward speed <= 0.4 x", r_slowzone and r_slowzone[1] <= 0.4 * 0.6 + 1e-6
+     and r_slowzone[1] > 0.05),
+    ("slow zone occupied: turning in place NOT slowed", r_slowturn and r_slowturn[3] > 0.3),
+    ("zone clear: full speed again", r_clear and r_clear[1] > 0.4),
     ("DISABLES when the track id changes (different person)",
      r_id2b is None or (r_id2b[1] < 1e-6 and abs(r_id2b[3]) < 1e-6)),
 ]

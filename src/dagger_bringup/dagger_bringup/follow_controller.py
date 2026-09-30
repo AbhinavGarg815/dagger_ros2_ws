@@ -24,11 +24,14 @@ wrong about where the person is; the layers below it do not trust it.
 import math
 import time
 
+import numpy as np
+
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 from geometry_msgs.msg import PoseStamped, Twist
+from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, Int32, String
 
 
@@ -114,6 +117,19 @@ class FollowController(Node):
         self.declare_parameter("search_face_deg", 10.0)
         self.declare_parameter("search_face_hold_s", 3.0)
         self.declare_parameter("hint_timeout", 0.5)
+        # SLOW ZONE for FORWARD speed, applied here instead of in
+        # collision_monitor_follow: Nav2 Humble's slowdown scales the WHOLE twist,
+        # so any plant or wall 0.85-2.6 m ahead cut the in-place search turn to
+        # 0.16 rad/s (reid1 test 2026-09-30: 0.41-0.46 with the zone clear).
+        # Rotation in place is covered by the monitor's approach check (footprint
+        # simulated 1.5 s ahead); the monitor keeps its STOP zone and approach.
+        # Same zone, same ratio as the old PolygonSlow; a stale scan counts as
+        # occupied.
+        self.declare_parameter("slow_scan_topic", "/scan_safety")
+        self.declare_parameter("slow_zone", [0.85, 2.60, 0.85])   # x_min, x_max, half width (m)
+        self.declare_parameter("slow_ratio", 0.4)
+        self.declare_parameter("slow_min_points", 3)
+        self.declare_parameter("slow_scan_timeout", 0.5)
         self.declare_parameter("publish_rate", 20.0)
 
         g = lambda n: self.get_parameter(n).value  # noqa: E731
@@ -138,6 +154,11 @@ class FollowController(Node):
         self.face_tol = math.radians(float(g("search_face_deg")))
         self.face_hold = float(g("search_face_hold_s"))
         self.hint_timeout = float(g("hint_timeout"))
+        self.slow_zone = [float(v) for v in g("slow_zone")]
+        self.slow_ratio = float(g("slow_ratio"))
+        self.slow_min_points = int(g("slow_min_points"))
+        self.slow_scan_timeout = float(g("slow_scan_timeout"))
+        self.slow_pts, self.slow_time = 0, 0.0
         self.hint = None                   # (bearing, monotonic receipt) from the tracker
         self.face_since = None
         self.sweeping = False              # once sweeping, the hint no longer pulls the rover back
@@ -181,6 +202,7 @@ class FollowController(Node):
         self.create_subscription(Bool, g("estop_topic"), self.on_estop, 10)
         self.create_subscription(Int32, "/follow/track_id", self.on_track_id, 10)
         self.create_subscription(PoseStamped, "/follow/search_hint", self.on_hint, be)
+        self.create_subscription(LaserScan, g("slow_scan_topic"), self.on_scan, be)
         self.create_timer(1.0 / self.rate, self.tick)
 
         self.get_logger().warn(
@@ -227,6 +249,19 @@ class FollowController(Node):
             self.get_logger().error("E-STOP -- follow controller standing down")
             self.v_cmd = 0.0
         self.estop = msg.data
+
+    def on_scan(self, msg):
+        r = np.asarray(msg.ranges, dtype=np.float32)
+        a = msg.angle_min + np.arange(len(r), dtype=np.float32) * msg.angle_increment
+        ok = np.isfinite(r) & (r >= msg.range_min) & (r <= msg.range_max)
+        x, y = r * np.cos(a), r * np.sin(a)
+        x0, x1, hw = self.slow_zone
+        self.slow_pts = int((ok & (x >= x0) & (x <= x1) & (np.abs(y) <= hw)).sum())
+        self.slow_time = time.monotonic()
+
+    def slowed(self, now):
+        return (self.slow_pts >= self.slow_min_points
+                or now - self.slow_time > self.slow_scan_timeout)
 
     def on_hint(self, msg):
         p = msg.pose.position
@@ -370,6 +405,10 @@ class FollowController(Node):
         # command; the FCU speed loop handles a ramp far better than a jump.
         dv = self.accel / self.rate
         self.v_cmd += max(-dv, min(dv, v_want - self.v_cmd))
+        if self.slowed(now):
+            # instant, like the collision monitor's slowdown was; the ramp above
+            # then brings the speed back up smoothly once the zone clears
+            self.v_cmd = min(self.v_cmd, max(v_want, 0.0) * self.slow_ratio)
 
         cmd = Twist()
         cmd.linear.x = self.v_cmd

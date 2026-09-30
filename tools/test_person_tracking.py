@@ -403,8 +403,34 @@ def hold_run(extra_pts):
 iso, crowd = hold_run([]), hold_run([(2.0, 3.8)])      # a post 0.8 m from where they stand
 check("isolated person out of view: held past lidar_only_timeout, until isolated_hold_timeout",
       iso is not None and iso > 4.0, f"lost at {iso}")
-check("something within 1 m: the hold ends at lidar_only_timeout", crowd is not None and crowd < 3.2,
-      f"lost at {crowd}")
+check("far (3.6 m) with something within 1 m: the hold ends at lidar_only_timeout",
+      crowd is not None and crowd < 3.2, f"lost at {crowd}")
+
+
+def near_run(clutter, vanish_at=None):
+    """Person walks to 1.8 m BESIDE the rover (out of view) next to clutter; held?"""
+    t = NewTracker(lidar_only_timeout=2.0, isolated_hold_timeout=6.0)
+    for k in range(5):
+        t.update([det_at(3.0, 0.3)], k * DT, T0)
+    t.select(1)
+    lost, held_at_post = None, False
+    for k in range(5, 90):
+        f = min(k - 5, 10) / 10.0
+        x, y = 3.0 - 2.6 * f, 0.3 + 1.5 * f                # ends at (0.4, 1.8): beside the rover
+        vis = abs(math.atan2(y, x)) < math.radians(27)
+        people = [(x, y)] if (vanish_at is None or k * DT < vanish_at) else []
+        _, tgt = t.update([det_at(x, y)] if vis else [], k * DT, T0, circle_scan(people + clutter))
+        if tgt is not None and math.hypot(tgt[0] - clutter[0][0], tgt[1] - clutter[0][1]) < 0.3:
+            held_at_post = True
+        if lost is None and t.state() in (LOST, SEARCHING):
+            lost = k * DT
+    return lost, held_at_post
+nl, _ = near_run([(0.9, 2.5)])                           # a post 0.86 m from them
+check("beside the rover (1.8 m) next to clutter: held past lidar_only_timeout",
+      nl is not None and nl > 6.0, f"lost at {nl}")
+vl, post = near_run([(1.2, 2.3)], vanish_at=3.0)         # they vanish; a post 0.9 m away remains
+check("... but if they vanish, the hold does NOT slide onto the post (jump -> lost)",
+      vl is not None and not post, f"lost at {vl}, held the post: {post}")
 
 # re-identification of the selected person
 eA, eB = sig(), sig()

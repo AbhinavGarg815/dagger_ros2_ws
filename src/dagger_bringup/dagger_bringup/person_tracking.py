@@ -216,7 +216,8 @@ class Tracker:
                  dup_iou=0.5, min_hits=3, tentative_max_missed=2,
                  isolated_hold_timeout=30.0, near_range=1.0, gallery_score=0.6,
                  app_veto=0.3, reid_window=30.0, reid_sim=0.66, reid_margin=0.08,
-                 reid_frames=3, select_requires_range=True):
+                 reid_frames=3, select_requires_range=True, near_hold_range=3.0,
+                 hold_continuity=0.4):
         self.iou_min = iou_min                  # without positions, below this is not the same person
         self.new_track_score = new_track_score  # weaker detections only extend tracks
         self.max_missed = max_missed            # camera frames a track survives unseen
@@ -250,6 +251,7 @@ class Tracker:
         # cluster is ISOLATED (nothing else within ~1 m) and person-sized: someone
         # standing beside the rover, out of the camera's 55 deg, was dropped at 5 s.
         self.isolated_hold_timeout = isolated_hold_timeout
+        self.near_hold_range, self.hold_continuity = near_hold_range, hold_continuity
         # Too close for the LiDAR (range_min 1.0 m) but filling the camera: stay the
         # target at this range -> the controller holds and faces, never drives.
         self.near_range = near_range
@@ -575,16 +577,34 @@ class Tracker:
             if math.hypot(got[0] - o[0], got[1] - o[1]) < self.other_person_radius:
                 self.hold_refusal = "nearest cluster is another tracked person"
                 return None
-        # Past lidar_only_timeout only an ISOLATED person-sized cluster may be held:
-        # nothing else within ~1 m that the track could slide onto.
-        dd = np.hypot(ox - got[0], oy - got[1])
-        isolated = int(((dd > self.max_cluster_width / 2 + 0.15) & (dd < 1.2)).sum()) <= 2
-        if now - t.t_cam > self.lidar_only_timeout and not isolated:
-            self.hold_refusal = (f"on LiDAR alone for > {self.lidar_only_timeout:.0f} s and "
-                                 "something else is within 1 m")
-            return None
         bx, by = to_base(T, *got)
         rng = math.hypot(bx, by)
+        # Past lidar_only_timeout the hold continues (up to isolated_hold_timeout)
+        # only where it cannot slide onto something else:
+        #   * the cluster is ISOLATED (nothing within ~1 m), or it is within
+        #     near_hold_range of the rover, where the 360 deg LiDAR sees a person
+        #     densely and a person does not simply vanish -- the live 'something
+        #     else within 1 m' losses (reid1, 2026-09-30) were a small object and a
+        #     plant-bed edge 0.6-0.9 m from someone standing 1.7-2.6 m away;
+        #   * AND it moves CONTINUOUSLY: if the person leaves the LiDAR's view, the
+        #     nearest remaining cluster is somewhere else -- a jump -- and the hold
+        #     ends instead of sliding onto it.
+        if now - t.t_cam > self.lidar_only_timeout:
+            dd = np.hypot(ox - got[0], oy - got[1])
+            isolated = int(((dd > self.max_cluster_width / 2 + 0.15) & (dd < 1.2)).sum()) <= 2
+            pred = t.predicted_pos(now)
+            jump = math.hypot(got[0] - pred[0], got[1] - pred[1])
+            if not (isolated or rng <= self.near_hold_range):
+                self.hold_refusal = (f"on LiDAR alone for > {self.lidar_only_timeout:.0f} s, "
+                                     f"{rng:.1f} m away and something else is within 1 m")
+                return None
+            if jump > self.hold_continuity:
+                self.hold_refusal = (f"on LiDAR alone for > {self.lidar_only_timeout:.0f} s and "
+                                     f"the held cluster jumped {jump:.2f} m")
+                return None
+        else:
+            dd = np.hypot(ox - got[0], oy - got[1])
+            isolated = int(((dd > self.max_cluster_width / 2 + 0.15) & (dd < 1.2)).sum()) <= 2
         if not (self.min_range <= rng <= self.max_range):
             self.hold_refusal = f"out of range ({rng:.1f} m)"
             return None
