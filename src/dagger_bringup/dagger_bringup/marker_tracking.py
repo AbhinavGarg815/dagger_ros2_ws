@@ -39,9 +39,13 @@ from dagger_bringup.person_tracking import LOST, NONE, SEARCHING, TRACKING, rang
 NAN = float("nan")
 
 
-def aruco_detector(dictionary):
+def aruco_detector(dictionary, want_ids=None, second_pass=True, idle_after=20, idle_every=3):
     """'DICT_4X4_50' etc. -> a detect(gray) function returning [(marker_id, corners
-    as 8 floats)], sub-pixel corners in ArUco order. OpenCV 4.5.4 (Jammy) API."""
+    as 8 floats)], sub-pixel corners in ArUco order. OpenCV 4.5.4 (Jammy) API.
+    detect() is stateful (it remembers which ids it read lately): one per stream.
+
+    want_ids: the ids being looked for (None = any). second_pass, idle_after,
+    idle_every: see SECOND PASS below (frames; the detector runs at 10 Hz)."""
     import cv2
     A = cv2.aruco
     if not hasattr(A, dictionary) or not dictionary.startswith("DICT_"):
@@ -63,20 +67,58 @@ def aruco_detector(dictionary):
     # reads both at every distance; 0.02 starts returning the same marker twice.
     # Still: leave >= 2 cm of white around the black square.
     p.minMarkerDistanceRate = 0.03
+    # SECOND PASS, run only when the first did not find what is wanted: a higher
+    # threshold constant and wider windows. With OpenCV's default (pixel is dark
+    # if < local mean - 7) a marker at 2-4 m whose white margin is only 3-4 px,
+    # held against a mid-dark shirt, was read in HALF the frames (live aruco1,
+    # 2026-09-30: margin ~1.7 cm on a 17.5 cm marker): the shirt beside the
+    # margin also thresholds dark, so one thin line separates it from the black
+    # square, and a hand on the corner or slight blur joins them. At 25 the shirt
+    # stays light: 87 -> 171 of 175 frames, longest gap 44 -> 3 frames. Not as
+    # the only pass: it reads nothing beyond ~5 m (0 of 199 at 7-8.5 m, where the
+    # default reads 171).
+    # It costs as much as the first (+5.6 ms offline, ~10 ms live), so it runs
+    #   * on every frame in which a wanted id read within the last idle_after
+    #     frames is missing -- bridging the gaps, where it matters;
+    #   * otherwise only on every idle_every-th frame in which something wanted
+    #     is missing: a marker the first pass cannot read at all is still found
+    #     within 0.3 s, and from then on it counts as read lately.
+    # Whole aruco1 recording in sequence: 170 of 175 at 2.2-4 m, longest gap
+    # 0.3 s; 3332 marker-free frames: no false decode, +1.4 ms mean per frame
+    # (+5.4 ms unthrottled).
+    p2 = A.DetectorParameters_create()
+    p2.cornerRefinementMethod = A.CORNER_REFINE_NONE
+    p2.minMarkerDistanceRate = 0.03
+    p2.adaptiveThreshConstant = 25
+    p2.adaptiveThreshWinSizeMax = 53
+    want = set(want_ids) if want_ids else None
     cells = int(d.markerSize) + 2                           # bits + the black border
     crit = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.01)
 
+    seen_at, frame = {}, [0]                                # id -> frame it was last read in
+
     def detect(gray):
-        corners, ids, _ = A.detectMarkers(gray, d, parameters=p)
-        if ids is None:
-            return []
+        frame[0] += 1
+        n, found = frame[0], {}
+        for params in (p, p2):
+            if params is p2:
+                lately = any(n - at <= idle_after and i not in found for i, at in seen_at.items())
+                missing = not want <= set(found) if want is not None else not found
+                if not second_pass or not (lately or (missing and n % idle_every == 0)):
+                    break
+            corners, ids, _ = A.detectMarkers(gray, d, parameters=params)
+            for i, c in zip(ids.ravel() if ids is not None else (), corners):
+                found.setdefault(int(i), c)                 # the first pass's corners win
+        for i in found:
+            if want is None or i in want:
+                seen_at[i] = n
         out = []
-        for i, c in zip(ids.ravel(), corners):
+        for i, c in found.items():
             c = c.reshape(4, 2).astype(np.float32)
             side = float(np.mean(np.linalg.norm(c - np.roll(c, -1, axis=0), axis=1)))
             w = int(max(1, min(5, round(side / cells * 0.5))))
             c = cv2.cornerSubPix(gray, c.reshape(-1, 1, 2).copy(), (w, w), (-1, -1), crit)
-            out.append((int(i), [float(v) for v in c.reshape(8)]))
+            out.append((i, [float(v) for v in c.reshape(8)]))
         return out
     return detect
 

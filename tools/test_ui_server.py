@@ -257,9 +257,12 @@ async def main():
         mk_on[0], mk_sel[0] = False, -1
         got = await frames(ws, 2.5)
         tail = [h for t_, h, _ in got if t_ > got[0][0] + 1.5]
-        check("marker tracker stops: video keeps flowing, frames no longer wait for markers",
-              len(got) >= 20 and len(tail) >= 8 and all("markers" not in h for h in tail),
-              f"{len(got)} frames in 2.5 s, {len(tail)} in the last second")
+        stall = max(b_[0] - a_[0] for a_, b_ in zip(got, got[1:])) if len(got) > 1 else 9.9
+        # no stall is the point; the exact count depends on the harness's own 10 Hz
+        # timer under load (7-10 in the last second at load average 6, 2026-09-30)
+        check("marker tracker stops: video keeps flowing (no gap > 0.5 s), frames no longer wait for markers",
+              len(got) >= 18 and stall < 0.5 and len(tail) >= 5 and all("markers" not in h for h in tail),
+              f"{len(got)} frames in 2.5 s, longest gap {stall:.2f} s, {len(tail)} in the last second")
 
         await ws.send(json.dumps({"type": "follow"}))
         await frames(ws, 0.5)
@@ -271,14 +274,22 @@ async def main():
         check("DEADMAN: no heartbeat -> enable=false within ~1.7 s", bool(off) and off[0] - t0 < 2.0,
               f"after {off[0] - t0:.2f} s" if off else "never")
 
+        # Heartbeats first: FOLLOW from a page whose heartbeat is still stale (it was
+        # just silent for 2.5 s) is switched off again at once by the deadman --
+        # fail-safe, and it made this check race (follow was already off at the
+        # disconnect, 2026-09-30). A browser sends heartbeats all the time.
+        await frames(ws, 0.6)
+        enable_log.clear()
         await ws.send(json.dumps({"type": "follow"}))
         await frames(ws, 0.5)
+        armed = bool(enable_log) and enable_log[-1][1] is True
         ws.close()
     enable_log.clear()
     t0 = time.time()
     await asyncio.sleep(1.0)
     off = [t for t, v in enable_log if v is False]
-    check("DEADMAN: page disconnects -> enable=false", bool(off), f"after {off[0] - t0:.2f} s" if off else "never")
+    check("DEADMAN: page disconnects while following -> enable=false", armed and bool(off),
+          (f"after {off[0] - t0:.2f} s" if off else "never") + ("" if armed else " (follow was not on)"))
 
     loop = asyncio.get_event_loop()
     age0, drained, burst = await loop.run_in_executor(None, raw_slow_client, 2.0)

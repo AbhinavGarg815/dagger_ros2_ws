@@ -22,6 +22,7 @@ import time
 
 import numpy as np
 import rclpy
+from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
@@ -76,6 +77,10 @@ class PersonDetector(Node):
         # delivers it: ArUco does not care about rotation.
         self.declare_parameter("marker_dictionary", "")
         self.declare_parameter("markers_topic", "/follow/marker_detections")
+        # The ids being looked for ("7" or "3,7"; "" = any): the detector's second
+        # pass runs only while one of them is missing (marker_tracker has the same
+        # list and does the filtering).
+        self.declare_parameter("marker_ids", "", ParameterDescriptor(dynamic_typing=True))
         # False = markers only: YOLOX is not loaded and no people are reported
         # (empty detections are still published, so the UI keeps its frames).
         self.declare_parameter("detect_people", True)
@@ -96,7 +101,8 @@ class PersonDetector(Node):
         if self.marker_dict:
             try:
                 from dagger_bringup.marker_tracking import aruco_detector
-                self.marker_detect = aruco_detector(self.marker_dict)
+                ids = [int(i) for i in str(g("marker_ids")).replace(";", ",").split(",") if i.strip()]
+                self.marker_detect = aruco_detector(self.marker_dict, want_ids=ids or None)
             except Exception as e:     # a bad dictionary name must not take detection down
                 self.get_logger().error(f"marker detection disabled: {e}")
         if g("reid_engine") and self.detect_people:

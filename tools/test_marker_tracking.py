@@ -7,6 +7,10 @@ Geometry: ArUco markers are RENDERED into 640x480 frames through the rover's
 real D435 model and upside-down mount (K and base->optical TF from the reid3
 recording, 2026-09-30), detected with the same detector the node uses, and
 located -- range, bearing and carrier heading against the known pose.
+Real frames: tools/fixtures/aruco_narrow_margin.npz -- 12 crops (112 px, native
+orientation) from the live aruco1 recording (2026-09-30: the user's 17.5 cm
+DICT_6X6_50 id 0, hand-held at 2.2-4 m, white margin ~1.7 cm against a shirt)
+that OpenCV's default thresholding does not read.
 Tracking: synthetic sightings -- confirmation, allowed ids, loss -> search ->
 resume, motion gate, detector stall, one target at a time.
 """
@@ -126,6 +130,31 @@ n6 = sum(any(mid == 0 for mid, _ in det6(cv2.cvtColor(
     render([(0, 0.175, (x, 0.0, 1.0), 180.0 + t)], 1, dictionary="DICT_6X6_50"), cv2.COLOR_BGR2GRAY)))
     for x in (1.2, 1.5, 2.0, 2.5, 4.0, 6.0) for t in (-16.0, 0.0, 16.0))
 check("6x6 marker, 17.5 cm, one-cell white margin: read at 1.2-6 m (18 of 18)", n6 == 18, f"{n6}/18")
+
+# REAL frames the default thresholding cannot read (narrow margin against a shirt)
+crops = np.load(os.path.join(os.path.dirname(__file__), "fixtures", "aruco_narrow_margin.npz"))["crops"]
+has0 = lambda det_, g: any(mid == 0 for mid, _ in det_(g))  # noqa: E731
+one = aruco_detector("DICT_6X6_50", want_ids=[0], second_pass=False)
+two = aruco_detector("DICT_6X6_50", want_ids=[0], idle_every=1)
+n1, n2 = sum(has0(one, c) for c in crops), sum(has0(two, c) for c in crops)
+check("12 real frames of the hand-held marker at 2.2-4 m: default thresholding reads none",
+      n1 == 0, f"{n1}/12")
+check("... the second pass (threshold constant 25) reads all 12", n2 == 12, f"{n2}/12")
+# the second pass is throttled while the marker has not been read lately
+blank = np.full_like(crops[1], 120)
+thr = aruco_detector("DICT_6X6_50", want_ids=[0])            # idle_after 20, idle_every 3
+first = [has0(thr, crops[1]) for _ in range(6)]
+check("not read lately: second pass on every 3rd frame -> found on frame 3, then on every frame",
+      first == [False, False, True, True, True, True], str(first))
+gap = [has0(thr, blank) for _ in range(5)] + [has0(thr, crops[2])]
+check("missing for 0.5 s and back: read at once (it was read lately)", gap[-1] and not any(gap[:-1]), str(gap))
+idle = [has0(thr, blank) for _ in range(24)]                # frames 13..36 (last read: frame 12)
+back = [has0(thr, crops[3]) for _ in range(3)]              # frames 37, 38, 39
+check("not read for 2.4 s: throttled again (found on the next 3rd frame, within 0.3 s)",
+      not any(idle) and back == [False, False, True], str(back))
+anyid = aruco_detector("DICT_6X6_50")                        # no id list: whatever was read lately counts
+seq = [bool(anyid(c)) for c in (crops[4], crops[4], crops[4], crops[5])]
+check("no id list: same rule (3rd frame, then every frame)", seq == [False, False, True, True], str(seq))
 frame = render([(7, 0.15, (4.0, 0.0, 1.0), 180.0)])
 o = locate(frame, size=0.0, pts=body)[0]
 check("marker size not set: LiDAR range only", o.source == "lidar" and o.xy is not None)

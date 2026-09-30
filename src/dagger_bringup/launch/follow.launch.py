@@ -162,6 +162,7 @@ def generate_launch_description():
             "conf_threshold": ParameterValue(det_conf, value_type=float),
             "reid_engine": reid_engine,
             "marker_dictionary": ParameterValue(marker_dictionary, value_type=str),
+            "marker_ids": ParameterValue(marker_ids, value_type=str),
             "detect_people": ParameterValue(detect_people, value_type=bool),
             "target_rate": 10.0,
             "publish_debug_image": debug_image,
