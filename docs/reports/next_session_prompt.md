@@ -1,4 +1,4 @@
-# Dagger UGV — session hand-off prompt (written 2026-10-02)
+# Dagger UGV — session hand-off prompt (written 2026-10-02 wrap-up, for 2026-10-03)
 
 Paste everything below the line into a new session.
 
@@ -7,20 +7,21 @@ Paste everything below the line into a new session.
 Continue the Dagger UGV project: a 350 kg tracked rover, outdoor only. ROS 2 Humble on a Jetson Orin
 Nano 8 GB, ArduPilot Rover on a Cube Orange+ over MAVROS, RS-Helios-16P LiDAR, RealSense D435
 (colour only, mounted upside down), dual-antenna GNSS. Workspace `/home/jetson/ros2_ws`
-(git, private remote github.com/AbhinavGarg815/dagger_ros2_ws, in sync at `15206ff`).
+(git, private remote github.com/AbhinavGarg815/dagger_ros2_ws, pushed at the 2026-10-02 wrap-up).
 
-**This session's goal: close the obstacle-avoidance gaps.** Plan first, get my OK, then build.
+**This session's goal: obstacle-avoidance gap 2 — low obstacles forgotten inside ~3.3 m (P14).**
+Gap 1 (near field) was closed yesterday. Plan first, get my OK, then build.
 
 ## Read first, in this order
 
 1. `/home/jetson/ros2_ws/COMMANDS.md` — every command (bring-up, stop, tests, debugging).
-2. `/home/jetson/ros2_ws/docs/reports/issues_and_fixes.md` (the old `/home/jetson/dagger_reports/`
-   paths are symlinks to `docs/reports/`; edit the repo files), these entries in full:
-   N7 + N8 (collision monitor, braking) · Q29–Q32 (ground segmentation, low obstacles erased,
-   low-obstacle memory shelved) · Q58 (near-field blind zone found) · "Open items" (P13, P14).
-3. Your memory index (`MEMORY.md`) and the files it points to.
-4. `git log --oneline -15` and `git status` (an interrupted session once left uncommitted edits —
-   review any diff you find before building on it).
+2. `/home/jetson/ros2_ws/docs/reports/issues_and_fixes.md`, these entries in full: **Q65** (near field,
+   done yesterday — safety_scan, bench + armed results, limits) · Q29–Q32 (ground segmentation, low
+   obstacles erased, low-obstacle memory shelved) · section **"Next session plan — obstacle avoidance
+   day 2"** · "Open items" (P13, P14, **P18 drop-offs**).
+3. Your memory index (`MEMORY.md`) and the files it points to — especially the obstacle-avoidance
+   project file and the feedback on drop-offs.
+4. `git log --oneline -15` and `git status` (review any diff you find before building on it).
 
 ## Standing rules (from me, still in force)
 
@@ -32,103 +33,88 @@ Nano 8 GB, ArduPilot Rover on a Cube Orange+ over MAVROS, RS-Helios-16P LiDAR, R
   `/scan_safety`, anything the stop path depends on).
 - I start the terminals (T1 `drive_bringup`, T2 `nav2_gps`, T3 `foxglove`, T4 `follow`, T5 `slam`).
   Before any drive `python3 tools/preflight.py` must PASS. RC transmitter in my hand = E-stop.
+- **Start T2 with `near_field:=true`** (default is still false until a normal drive shows no false
+  stops — then flip the default in `nav2.launch.py` and `nav2_gps.launch.py`, with my OK).
+- **Never pick a test line, heading or goal from the costmap alone** — it cannot see drop-offs.
+  Ask me what bounds the site. The test lane has a wall on the right and **steps (a drop-off) along
+  the whole left side** (the "obstacles" on the left are plants).
 - While I run a timed test, don't poll or block — wait for "done", then read the bag. Stop the
   recorder before reading a bag.
 - Update the issues report and `COMMANDS.md` **in the same session** as each fix, finding or new
   command. Commit as Abhinav with **no co-author trailer**. At each session wrap-up: run
-  `bash tools/sync_learnings.sh`, commit the reports + learnings, and push — I want GitHub to hold
-  the code, reports and learnings, kept current. Ask before pushing at other times.
-- Kill by PID, never `pkill -f <pattern>` (it has matched the calling shell).
+  `bash tools/sync_learnings.sh`, commit the reports + learnings, and push. Ask before pushing at
+  other times.
+- Kill by PID, never `pkill -f <pattern>` — and list before killing: a `pgrep -f` pattern also
+  matches the shell that runs it.
 - I want a plan before implementation; recommend one option rather than listing all of them.
 
-## Where the project stands (my estimate, 2026-10-02)
+## Where the project stands
 
 | Capability | State |
 |---|---|
-| Object following ~80 % | Person (click-to-select in crowds, LiDAR + appearance re-ID, search/resume) and ArUco marker following DRIVEN live; browser page also on the SIYI MK32 handset (~100 ms video). |
-| SLAM ~70 % | 2D slam_toolbox maps of the test lanes; localization owns map->odom, seeded by GPS + scan match; Nav2 and lat/lon goals in the map work live (0.23 / 0.38 m). |
-| Waypoint following ~70 % | Nav2 path following tuned; relative, lat/lon, FCU-mission and Foxglove-click goals work live. |
-| **Obstacle avoidance ~55 %** | Emergency layer solid; low and near-field obstacles are the gaps (below). |
+| Object following ~80 % | Person + ArUco following driven live; page on the SIYI MK32 handset. |
+| SLAM ~70 % | 2D maps of the test lanes; localization + Nav2 goals in the map work live. |
+| Waypoint following ~70 % | Nav2 path following tuned; relative, lat/lon, mission and click goals live. |
+| **Obstacle avoidance ~65 %** (my estimate after 10-02) | Emergency layer + **near field closed** (Q65). Gaps: low obstacles inside ~3.3 m (P14), drop-offs (P18), no detour test on record, follow path is stop-only. |
 | Road route following 0 % | Not started. |
 
-## The task: obstacle-avoidance gaps, in this order
+## Done yesterday (gap 1, Q65) — don't rebuild
 
-**What already works (don't rebuild):** `nav2_collision_monitor` on the Nav2 path (stop 0.6 m ahead of
-the bumper ±0.70, slow ×0.4 to 1.75 m ±0.85, footprint approach 1.5 s) and a second instance on the
-follow path, both fed by `/scan_safety`; live: stops 0.56 m from a person, rolls 0.01 m.
-`cmd_vel_safety` zeroes all output if `/scan_safety` is > 0.5 s stale (Humble treats a stale source
-as "no obstacles"). Costmaps: `/scan` from Patchwork++ ground segmentation (floor 0.12 m, 17 % of a
-core) plus the old band `/scan_band` (0.35–0.75 m); `expected_update_rate` 1.0 s on both, so a dead
-scan fails closed. Theta* planner replans around costmap obstacles.
+`safety_scan` (C++, new package `dagger_perception`) replaces p2l_safety with T2 `near_field:=true`:
+body box x −0.90…0.50, y ±0.60 (the rover's own frame and GNSS posts, measured from captures) +
+range_min 0.3; bit-identical to p2l with the box off; 6.3 vs 13.0 % CPU. PolygonStop starts at x 0.50
+in both monitors. Live: 10 min parked no false trigger; operator beside the hull → turn cut / STOP;
+**armed Nav2 turn into a box stopped after 22° with 13 cm to spare**, no coasting. Limits: a zone needs
+> 3 rays (things < ~3 cm wide at 1 m ignored); mixed-pixel phantom points off the rails' edges when an
+object is just beyond them (conservative); low objects / children beside the hull invisible.
 
-### 1. Near-field blind zone (P13) — safety, needs my OK before applying
+## Today: gap 2 (P14), the plan I approved in outline
 
-`/scan_safety` (pointcloud_to_laserscan `p2l_safety` in `nav2.launch.py`, frame base_footprint,
-band 0.30–1.60 m, angle increment 0.0087) has **range_min 1.0 m** to drop the mast/mount
-self-returns (r ≤ 0.96 m). The footprint is ±0.85 × ±0.58 m, so the corners sweep a 1.03 m circle
-when the rover turns in place: the first 0.15 m in front of the bumper (inside the STOP polygon,
-which starts at x = 0.85) and the whole corner-sweep ring are invisible to BOTH collision monitors.
-Follow-me has a controller-side mitigation only (no turning in place within 1.6 m of the target);
-Nav2 in-place rotations and anyone who isn't the target are unprotected.
-- Proposed: I record the raw cloud parked with nobody near (`/rslidar_points` + `/tf_static`, a few
-  seconds; no motion); find the self-returns in base_footprint; replace range_min 1.0 with a body
-  filter around hull + mast and range_min ~0.3. `src/dagger_bringup/dagger_bringup/self_filter.py`
-  (box filter, currently UNUSED; box x −0.90…0.45, y ±0.60, z −0.30…1.30) is a starting point —
-  verify it against the data. Patchwork++ also uses min_range 1.0 for the mast.
-- **Everything else reading `/scan_safety` changes with it** — check each and re-run its tests:
-  both collision monitors, `scan_safety_watchdog`, follow_controller's forward slow zone
-  ([0.85, 2.6] × ±0.85) and its `min_turn_range` comment ("blind inside 1.0 m"), person_tracker
-  (`min_range` 1.0, `near_range` 1.0 — the "too close for the LiDAR" target exists because of this
-  blind zone), marker_tracker (`min_range` 0.3).
-- Validate: static walk test like N7 (no false triggers over ~10 min parked; a person at the
-  corner while Nav2 turns in place → stop), then the offline suites in COMMANDS.md §11.
-
-### 2. Low obstacles forgotten inside ~3.3 m (P14, my "task 2")
-
-The LiDAR is 1.12 m up with its lowest beam at −15°: it meets flat ground ~3.9–4.5 m out, and a
-20 cm box is cleanly visible only in windows (~3.7–4.0, 4.3–4.6, 5.0–5.4 m from the rover centre).
-Measured live (Q30): box marked at 4.36 m, lost at ~3.5 m, **ERASED at 3.23 m** by empty rays.
-- Tried and shelved (Q30–Q32, code kept, `low_obstacle_memory:=true`): a separate
-  `low_obstacle_layer` fed by `/scan_low` (low-only returns), ray-clearing only beyond 4 m. Failed
-  because **a person walking past left a blob that stayed**. Ideas recorded then: widen the
-  "tall return above it" check to ±2 rays, and require a low return to persist N scans at the same
-  odom cell before it enters memory (people move, boxes don't). Also consider clearing a remembered
-  cell only when the beam geometry says that cell is actually observable.
-- Related gap (Q32): negative obstacles — a clean drop-off with nothing at its edge is not marked.
-  Note it; don't solve it here unless cheap.
-
-### 3. A dedicated live detour test
-
-No deliberate "drive around a placed obstacle" test is on record. Tall box first, then a low box.
-**Compute the beam geometry before telling me where to put a low object** (Q30: the first box was
-placed inside the blind band). Record with `bash tools/pf_record.sh <name>`; analyse with
-`pf_analyze.py`; `tools/low_obstacle_approach.py`, `scan_ahead.py` and `costmap_audit.py` exist.
-
-### 4. Later: obstacle avoidance on the follow path
-
-Following is stop-only today (collision monitor + forward slow zone); it never plans around.
+1. **Approach-and-stop baseline in the lane (no detour — the lane is too narrow and the step side is
+   invisible to Nav2):** cardboard box 20–25 cm tall, 40–60 cm wide, 8 m ahead of the rover's centre
+   at the rover's distance from the wall (~2.2 m); recorder `bash tools/detour_record.sh approach_low`;
+   goal 6 m along the lane, parallel to the wall (`send_goal.py 6 --left <correction>` — re-measure
+   the rover's heading against the wall first); the rover stops ~2 m before the box. Confirm with me
+   that the step edge is ≥ 1 m from the rover's left side. Purpose: see when the box is erased from
+   both costmaps, and get real clouds to replay.
+2. **Build low-obstacle memory v2:** C++ node `low_scan` in dagger_perception on
+   `/patchworkpp/nonground` (same /tf_static + body box approach as safety_scan): low-only scan in one
+   pass (12–35 cm returns, dropped where something 40–160 cm is within ±2 bearings) + a **persistence
+   gate** (a low return counts only after ~0.5 s in the same ~15 cm odom cell — people move, boxes
+   don't; odometry from /odometry/filtered, no TF listener) → `/scan_low` → the existing
+   `low_obstacle_layer` (clears only beyond 4 m), replacing p2l_low_all + p2l_tall + low_scan_filter.
+   Behind `low_obstacle_memory:=true`, default off until validated.
+3. **Offline tests:** synthetic; replay the 10-02 walk-around capture (`body_walk_132959`, the
+   operator circling the rover → must leave NO mark); replay the approach bag (the box must stay in the
+   costmap down to the stop).
+4. **Live:** someone walks past at 2–5 m (no blob); approach-and-stop again with memory on.
+5. **Later:** the real detour test (gap 3) needs a site with room on both sides or the step side
+   blocked with tall markers; drop-off detection (P18); avoidance on the follow path.
 
 ## Lessons that cost time before
 
-- Humble's collision monitor: an approach polygon whose footprint topic never arrives fails OPEN,
-  silently; a stale observation source counts as "no obstacles".
-- rclpy: one source line logging at two severities crashes the node ("Logger severity cannot be
-  changed between calls"). Assigning `bytes` to a uint8[] field costs ~30 ms per 160 KB — use
-  `array.array('B', …)`. A Python TF listener costs 16–25 % CPU — use /tf_static + odometry.
-- Test in an isolated ROS domain (the existing tests use 42 and 77). Run timing-sensitive scene tests
-  with the live stack down. With the stack up only ~1.2 GB RAM is free — don't load a second GPU
-  model beside it.
-- Verify with data before concluding: e.g. an "odometry rolls backward" signal turned out to be
-  estimator slide when checked against a LiDAR scan match; a "SEARCHING" episode turned out to be
-  the marker cut by the image edge. Define analysis windows from the physics of the test.
+- Humble's collision monitor: an approach polygon whose footprint topic never arrives fails OPEN;
+  a stale source counts as "no obstacles"; after a stop it publishes zeros for `stop_pub_timeout`
+  (2 s) and then goes silent (cmd_vel_safety then holds the FCU setpoint at 0). Its approach scaling
+  is one 0.1 s step more conservative than a straight model; PolygonSlow scales turns too.
+- To reproduce pointcloud_to_laserscan exactly, compute range/bearing in **float** (its unqualified
+  `hypot`/`atan2` on floats pick the float overloads) — in double 93 of 1.1 M bins differed.
+- A Python node only *receiving* the 0.8 MB / 10 Hz cloud costs ~10 % of a core — cloud work goes
+  in C++. rclpy: one source line at two log severities crashes the node; assign `array.array('B', …)`
+  to uint8[] fields, never bytes; a Python TF listener costs 16–25 % — use /tf_static + odometry.
+- A thin "object" the operator cannot see may be a LiDAR **mixed pixel** (one ring, one azimuth
+  window, ranges between a near edge and the object behind it).
+- Test in an isolated ROS domain (42, 77, 78 used). Run timing-sensitive scene tests with the live
+  stack down. With the stack up only ~1.2 GB RAM is free.
+- Verify with data before concluding; define analysis windows from the physics of the test.
 - A stale ros2 daemon reports 0 publishers: `ros2 daemon stop; ros2 daemon start`.
 - Foxglove `with_cloud:=true` eats a core; leave it off while driving.
 
-## Also open, not this session (details in the report's Open items)
+## Also open (details in the report's Open items)
 
-Crowd test with 2–3 helpers (P12) · LiDAR hold for a marker's carrier · re-test CLEAR live ·
-handset latency/CPU options (P17) · GPS waypoints in open sky vs Mission Planner AUTO (P6) ·
-track imbalance SERVO1_MAX (P5) · FS_THR_ENABLE (P4) · odometry slide after stops (P10/P16) ·
-road route following.
+Crowd test (P12) · LiDAR hold for a marker's carrier · re-test CLEAR live · handset latency/CPU
+(P17) · GPS waypoints in open sky (P6) · SERVO1_MAX (P5) · FS_THR_ENABLE (P4) · odometry slide
+(P10/P16) · road route following.
 
-Start by reading, then give me the plan for gap 1 with the exact data-capture command for me to run.
+Start by reading, then confirm the site with me and give me the approach-and-stop test with the
+exact commands.

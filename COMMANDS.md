@@ -1,7 +1,7 @@
 # Dagger UGV — command reference
 
 Every command used to build, run, test and debug the rover, in the order you need them.
-Last updated: 2026-10-02 (near-field safety scan: `near_field`, safety_scan, test_safety_scan).
+Last updated: 2026-10-02 (near-field safety scan: `near_field`, safety_scan, test_safety_scan; detour_record.sh).
 
 **Conventions**
 
@@ -162,6 +162,7 @@ target is within 1.6 m, and searches by turning for 30 s if it loses the target.
 | `bash tools/pf_record.sh <name>` | Path following and follow commands, odometry, FCU I/O, TF, logs. No point clouds. | `pf_analyze.py`, `stop_distance.py` |
 | `bash tools/track_record.sh <name>` | Everything the people / marker trackers see and output, the page's video, follow commands. | `replay_tracker.py`, `compare_detectors.py` |
 | `bash tools/slam_record.sh <name> [clouds]` | Scans, odometry, GPS, TF for re-mapping. | `slam_replay.sh` |
+| `bash tools/detour_record.sh <name>` | Obstacle approach / detour tests: raw cloud, Patchwork++ output, all scans, both costmaps, plan, commands (~7 MB/s). | offline replay of the low-obstacle pipeline |
 | `bash record_drive.sh` | Full drive including raw point clouds (large). | `test_ground_seg.py` |
 | `timeout -s INT 40 ros2 bag record -s mcap -o ~/dagger_bags/body_empty_$(date +%H%M%S) /rslidar_points /tf_static /scan_safety /odometry/filtered` | Parked, disarmed, nothing within 2 m: the rover's own LiDAR returns. Repeat after mounting anything on top. | `test_safety_scan.py --empty <bag>` |
 

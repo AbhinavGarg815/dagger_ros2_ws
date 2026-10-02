@@ -16,3 +16,4 @@ Since 2026-09-29 `/home/jetson/ros2_ws` has `origin` = `git@github.com:AbhinavGa
 - Repo contains site lat/lon (maps/*_geo.yaml, commit messages) and the author Gmail — reasons it is private; don't make it public without rewriting that.
 - Pushing policy: user has not said to auto-push — ask (see [[feedback-git-and-issues-report]]).
 - 2026-09-30 wrap-up: user said "update our github" → pushed 15 commits, origin/main = 652cd4e (includes COMMANDS.md, ArUco following, tools/fixtures/aruco_narrow_margin.npz = 12 grayscale crops of the marker held by the user).
+- 2026-10-02 obstacle-avoidance wrap-up: pushed the near-field work (safety_scan / dagger_perception, Q65), reports, learnings and tomorrow's hand-off prompt — origin/main = the "wrap-up 2026-10-02" commit (see `git log`).
