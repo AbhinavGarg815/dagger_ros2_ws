@@ -92,7 +92,7 @@ def main():
         for i, r in enumerate(m.ranges):
             if math.isfinite(r) and m.range_min <= r <= m.range_max:
                 a = m.angle_min + i * m.angle_increment
-                if 0.85 <= r * math.cos(a) <= 1.45 and abs(r * math.sin(a)) <= 0.70:
+                if 0.50 <= r * math.cos(a) <= 1.45 and abs(r * math.sin(a)) <= 0.70:   # = PolygonStop
                     k += 1
         if k > 3:
             fail.append(f"{k} points already in the STOP zone")

@@ -7,12 +7,19 @@
 # Teleop (/cmd_vel_teleop) is NOT gated -- the RC transmitter is the manual override.
 #
 # Geometry (base_footprint = hull centre; hull +-0.85 x +-0.58 m; LiDAR at x 0.29,
-# z 1.12). Source = /scan_safety, a dedicated pointcloud_to_laserscan instance
-# (band 0.30-1.60 m, range_min 1.0 m to drop the mast self-returns at r <= 0.96 m).
+# z 1.12). Source = /scan_safety (band 0.30-1.60 m), from nav2.launch.py:
+#   near_field:=true  -- safety_scan: the rover's own frame removed by a body box
+#                        (x -0.90..0.50, y +-0.60), range_min 0.3. Sees a standing person
+#                        beside the hull, inside the 1.03 m circle the corners sweep.
+#   near_field:=false -- p2l_safety: range_min 1.0 to drop the frame (r <= 0.96 m), so
+#                        BLIND within 1.0 m of the centre: the first 0.15 m ahead of the
+#                        bumper and the whole corner-sweep ring (report Q58, Q65).
 #
 # LIDAR NEAR-FIELD BLIND ZONE -- this monitor cannot see what the LiDAR cannot see.
 # The lowest beam (-15 deg) from 1.12 m only reaches height h beyond
 # (1.12 - h) / tan(15 deg) from the sensor. Shortest detectable obstacle:
+#   beside the hull (near_field, walk capture Q65): ~0.93 m at the front half,
+#                            ~0.8 m at the rear (a standing adult: yes; a child: no)
 #   at the bumper (x 0.85)  -> ~0.97 m tall     (a standing person: yes; a box: no)
 #   end of stop zone (1.45) -> ~0.81 m tall
 #   end of slow zone (2.60) -> ~0.50 m tall
@@ -40,9 +47,13 @@ collision_monitor:
     # 0.6 m ahead of the bumper, a little wider than the hull. At 0.4 m/s the
     # chain latency (~0.3 s) + braking of a 350 kg tracked hull is ~0.3-0.4 m.
     # Also blocks in-place rotation while something is this close ahead.
+    # Starts at x 0.50 (the body box's front edge), not at the bumper: someone leaning
+    # over the front deck becomes each bearing's nearest return and hides their legs
+    # in front of the bumper (walk capture Q65: stop-zone rays 29 -> 8). Covering the
+    # deck makes that a STOP without depending on FootprintApproach's footprint topic.
     PolygonStop:
       type: "polygon"
-      points: [1.45, 0.70, 1.45, -0.70, 0.85, -0.70, 0.85, 0.70]
+      points: [1.45, 0.70, 1.45, -0.70, 0.50, -0.70, 0.50, 0.70]
       action_type: "stop"
       max_points: 3          # trigger needs MORE than this many scan points inside
       visualize: true

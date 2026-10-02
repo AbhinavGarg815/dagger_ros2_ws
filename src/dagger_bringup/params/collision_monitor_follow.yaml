@@ -8,9 +8,9 @@
 #
 # Zones, source and geometry are deliberately IDENTICAL to the Nav2 monitor, so
 # the rover behaves the same way near a person whichever path is driving. See
-# collision_monitor.yaml for the derivation of the polygon dimensions and for the
-# LiDAR near-field blind zone (at the bumper only obstacles taller than ~0.97 m
-# are visible; a standing adult yes, a crouching one no).
+# collision_monitor.yaml for the derivation of the polygon dimensions, the two
+# sources of /scan_safety (near_field) and the LiDAR near-field limits (at the
+# bumper only obstacles taller than ~0.97 m; a standing adult yes, a crouching one no).
 #
 # TWO THINGS THIS DOES NOT COVER:
 #
@@ -52,9 +52,10 @@ collision_monitor_follow:
     # 0.6 m ahead of the bumper. Well inside the ~3 m follow distance, so in
     # normal following this never fires -- it is the last resort, not a control
     # input. It fires when the target turns and walks back into the rover.
+    # From x 0.50 over the front deck, as in collision_monitor.yaml (Q65).
     PolygonStop:
       type: "polygon"
-      points: [1.45, 0.70, 1.45, -0.70, 0.85, -0.70, 0.85, 0.70]
+      points: [1.45, 0.70, 1.45, -0.70, 0.50, -0.70, 0.50, 0.70]
       action_type: "stop"
       max_points: 3
       visualize: true
@@ -88,8 +89,8 @@ collision_monitor_follow:
       polygon_pub_topic: "/collision_monitor_follow/footprint"
       enabled: true
 
-    # Shared with the Nav2 monitor: the p2l_safety instance launched by
-    # nav2.launch.py (band 0.30-1.60 m, range_min 1.0 m to drop mast self-returns).
+    # Shared with the Nav2 monitor: launched by nav2.launch.py, safety_scan with
+    # near_field:=true (body box, range_min 0.3) or p2l_safety (range_min 1.0).
     observation_sources: ["scan"]
     scan:
       type: "scan"

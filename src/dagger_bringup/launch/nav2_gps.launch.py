@@ -35,6 +35,10 @@ def generate_launch_description():
     map_source = LaunchConfiguration("map_source")
     map_source_arg = DeclareLaunchArgument("map_source", default_value="gps",
                                            choices=["gps", "slam"])
+    # Source of /scan_safety (both collision monitors): see nav2.launch.py.
+    near_field = LaunchConfiguration("near_field")
+    near_field_arg = DeclareLaunchArgument("near_field", default_value="false",
+                                           choices=["true", "false"])
 
     localization = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -65,7 +69,9 @@ def generate_launch_description():
             os.path.join(bringup_dir, "launch", "nav2.launch.py")),
         launch_arguments={
             "extra_params": os.path.join(bringup_dir, "params", "nav2_odom_test.yaml"),
+            "near_field": near_field,
         }.items(),
     )
 
-    return LaunchDescription([tau_xy_arg, tau_yaw_arg, map_source_arg, localization, gps_map_odom, nav2])
+    return LaunchDescription([tau_xy_arg, tau_yaw_arg, map_source_arg, near_field_arg,
+                              localization, gps_map_odom, nav2])

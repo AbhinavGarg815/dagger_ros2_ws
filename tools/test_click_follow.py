@@ -18,6 +18,9 @@ from base_footprint, and camera detections exist for people inside the 55.7 deg
 field of view who are not hidden behind a nearer person. The rover stays at the
 odom origin. The operator clicks the track nearest person A's true position,
 then presses FOLLOW -- exactly what the browser UI sends.
+
+The scan's range_min is 1.0 (p2l_safety). SCAN_RANGE_MIN=0.3 gives the near-field
+scan (safety_scan, near_field:=true): people inside 1.0 m then reach the nodes.
 """
 import json
 import math
@@ -28,6 +31,7 @@ import sys
 import time
 
 os.environ["ROS_DOMAIN_ID"] = "42"
+SCAN_RANGE_MIN = float(os.environ.get("SCAN_RANGE_MIN", "1.0"))
 import numpy as np  # noqa: E402
 import rclpy  # noqa: E402
 import tf2_ros  # noqa: E402
@@ -89,7 +93,7 @@ def world(node, people, walls):
     stamp = node.get_clock().now().to_msg()
     s = LaserScan(); s.header.stamp = stamp; s.header.frame_id = "base_footprint"
     s.angle_min, s.angle_max, s.angle_increment = -math.pi, math.pi, 0.0087
-    s.range_min, s.range_max = 1.0, 20.0
+    s.range_min, s.range_max = SCAN_RANGE_MIN, 20.0
     rng = []
     for i in range(int(2 * math.pi / 0.0087)):
         a = -math.pi + i * 0.0087

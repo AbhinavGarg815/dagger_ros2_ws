@@ -1,7 +1,7 @@
 # Dagger UGV — command reference
 
 Every command used to build, run, test and debug the rover, in the order you need them.
-Last updated: 2026-10-02 (reports + learnings in the repo).
+Last updated: 2026-10-02 (near-field safety scan: `near_field`, safety_scan, test_safety_scan).
 
 **Conventions**
 
@@ -36,6 +36,7 @@ Engines in `models/` are tied to this GPU and TensorRT version: rebuild them aft
 | `colcon build --packages-select dagger_bringup` | Rebuild our nodes, launch files, params, web page (seconds). |
 | `colcon build --packages-select dagger_msgs dagger_bringup` | After changing a message definition (about 1 min). |
 | `colcon build --packages-select dagger_description` | After changing the URDF or its launch files. |
+| `colcon build --packages-select dagger_perception` | After changing `safety_scan` (C++, about 50 s). |
 
 A running node keeps its old code: restart the terminal that runs it after a build.
 The install is not symlinked — an edit in `src/` does nothing until built.
@@ -45,7 +46,7 @@ The install is not symlinked — an edit in `src/` does nothing until built.
 | Terminal | Command | What it starts |
 |---|---|---|
 | T1 | `ros2 launch dagger_bringup drive_bringup.launch.py` | FCU link (mavros), LiDAR, robot model. Add `use_camera:=true` for following. |
-| T2 | `ros2 launch dagger_bringup nav2_gps.launch.py` | Odometry, GPS map frame, Nav2, costmaps, collision monitor, command path to the FCU. Add `map_source:=slam` when T5 localizes. |
+| T2 | `ros2 launch dagger_bringup nav2_gps.launch.py` | Odometry, GPS map frame, Nav2, costmaps, collision monitor, command path to the FCU. Add `map_source:=slam` when T5 localizes. `near_field:=true`: the collision monitors' scan also sees a person beside the hull (safety_scan instead of p2l_safety). |
 | T3 | `ros2 launch dagger_bringup foxglove.launch.py` | Foxglove bridge on `ws://<rover-ip>:8765`. Add `with_cloud:=true` for the raw point cloud (not while driving). |
 | T4 | `ros2 launch dagger_bringup follow.launch.py …` | Person / marker following and its web page (section 7). |
 | T5 | `ros2 launch dagger_bringup slam.launch.py …` | 2D SLAM (section 6). |
@@ -151,7 +152,6 @@ target is within 1.6 m, and searches by turning for 30 s if it loses the target.
 | `python3 tools/marker_probe.py --size 0.175` | Identify a marker: waits until it is held in view, then prints dictionary, id, size check and the launch line. `--wait 600` waits longer. |
 | `python3 tools/follow_check.py` | Wiring check of the follow safety path (collision monitor active, scan fresh, single command path). |
 | `python3 tools/follow_status.py` | One line per tick for the whole chain: detections, target, command, gate. |
-| `python3 tools/follow_gate_test.py` | Bench test of the follow collision monitor. **Disarmed only** — it refuses otherwise. |
 | `ros2 launch dagger_bringup follow.launch.py target_source:=selector` | Old automatic mode: follows whoever is ahead, no page. |
 | `bash tools/follow_solo.sh <bag> 14:05:00 14:07:00` | **[MOTION]** Solo test of the automatic mode: enables follow at a clock slot if the gate passes. |
 
@@ -163,6 +163,7 @@ target is within 1.6 m, and searches by turning for 30 s if it loses the target.
 | `bash tools/track_record.sh <name>` | Everything the people / marker trackers see and output, the page's video, follow commands. | `replay_tracker.py`, `compare_detectors.py` |
 | `bash tools/slam_record.sh <name> [clouds]` | Scans, odometry, GPS, TF for re-mapping. | `slam_replay.sh` |
 | `bash record_drive.sh` | Full drive including raw point clouds (large). | `test_ground_seg.py` |
+| `timeout -s INT 40 ros2 bag record -s mcap -o ~/dagger_bags/body_empty_$(date +%H%M%S) /rslidar_points /tf_static /scan_safety /odometry/filtered` | Parked, disarmed, nothing within 2 m: the rover's own LiDAR returns. Repeat after mounting anything on top. | `test_safety_scan.py --empty <bag>` |
 
 Names are timestamped automatically; start the recorder before the test and stop it with Ctrl-C.
 
@@ -192,6 +193,7 @@ Names are timestamped automatically; start the recorder before the test and stop
 | A node's parameter | `ros2 param get <node> <name>` · `ros2 param list <node>` |
 | Obstacles in the costmap that are not there | `python3 tools/costmap_audit.py [local\|global]` |
 | Does the costmap see a low object ahead? | `python3 tools/scan_ahead.py` · `python3 tools/low_obstacle_approach.py` |
+| Does a collision monitor stop / slow / cut a turn? (**disarmed only**, it refuses otherwise) | `python3 tools/follow_gate_test.py --path nav` (or `follow`) — walk in ahead; `--vx 0 --wz 0.45`: turn in place, stand beside the hull; `--expect-clear -t 600`: nobody near, no false trigger |
 | Which nodes are up? | `ros2 node list` |
 | Is the SIYI handset reachable? | `ping 192.168.144.20` (about 5 ms round trip over the radio) |
 | `ros2` commands hang or list stale nodes | `ros2 daemon stop; ros2 daemon start` |
@@ -211,6 +213,7 @@ stack — because the scene tests are timing-sensitive under load.
 |---|---|---|
 | `python3 tools/test_person_tracking.py` | 64/64 | Person tracker rules |
 | `python3 tools/test_marker_tracking.py` | 43/43 | Marker geometry, detection on real frames, tracker rules |
+| `python3 tools/test_safety_scan.py` | 25/25 | `/scan_safety` node: body box, band, bins; identical to p2l on the 10-02 captures; parked + walk-around captures |
 | `python3 tools/test_follow_controller.py` | 26/26 | Follow controller: speeds, search, close-range hold, CLEAR |
 | `python3 tools/test_click_follow.py all` | 53/53 | Person following scenes (or one of `main cross occlude reid beside close hug sign wall`) |
 | `python3 tools/test_marker_follow.py all` | 25/25 | Marker following scenes (`follow`, `switch`) |
@@ -219,6 +222,9 @@ stack — because the scene tests are timing-sensitive under load.
 | `python3 tools/test_follow_lidar.py main` / `wall` | 4/4, 3/3 | Old automatic follow mode |
 | `python3 tools/test_odom_zupt.py [bag]` | — | Odometry zero-velocity update on a recorded stop |
 | `python3 tools/test_ground_seg.py [bag]` · `test_ground_scan.py [bag]` | — | Ground segmentation on a recorded cloud |
+
+`SCAN_RANGE_MIN=0.3` before `test_click_follow.py` / `test_follow_controller.py` gives their simulated scan the
+near-field range (`near_field:=true`); the default 1.0 is p2l_safety's.
 
 ## 12. FCU parameters
 

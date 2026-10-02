@@ -4,7 +4,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.conditions import IfCondition
+from launch.conditions import IfCondition, UnlessCondition
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
@@ -51,6 +51,12 @@ def generate_launch_description():
     low_min_height = PythonExpression(["0.12 if '", ground_seg, "' == 'true' else 9.0"])
     low_max_height = PythonExpression(["0.35 if '", ground_seg, "' == 'true' else 8.0"])
     autostart_arg = DeclareLaunchArgument("autostart", default_value="true")
+    # Near field of the safety scan (P13, report Q65). true: /scan_safety from
+    # safety_scan (dagger_perception) -- the rover's own frame removed by a body box,
+    # range_min 0.3, so a person beside the hull (inside the 1.03 m circle the corners
+    # sweep) is seen. false: p2l_safety with range_min 1.0, blind inside 1.0 m.
+    near_field = LaunchConfiguration("near_field")
+    near_field_arg = DeclareLaunchArgument("near_field", default_value="false")
 
     nav2_params = [params_file, extra_params]
 
@@ -240,8 +246,43 @@ def generate_launch_description():
 
     # ---- Collision monitor: independent last gate on the Nav2 command path ----
     # Dedicated scan for the safety layer, separate from the costmap /scan: taller
-    # band (0.30-1.60 m, a person is seen right up to the bumper) and range_min
-    # 1.0 m in base_footprint to drop the mast/mount self-returns (r <= 0.96 m).
+    # band (0.30-1.60 m, a person is seen right up to the bumper). Two sources,
+    # chosen by near_field, with the same band, bins and range_max:
+    #  safety_scan -- drops the rover's own top frame and GNSS posts with a body box
+    #    in base_footprint (all of it lies inside x -0.85..0.42, y +-0.56; Q65),
+    #    then range_min 0.3. Bin for bin identical to p2l with the box off.
+    #  p2l_safety -- range_min 1.0 m to drop those returns (r <= 0.96 m), which also
+    #    hides everything else within 1.0 m of the centre.
+    safety_scan = Node(
+        package="dagger_perception",
+        executable="safety_scan",
+        name="safety_scan",
+        output="screen",
+        respawn=True,
+        respawn_delay=1.0,
+        condition=IfCondition(near_field),
+        remappings=[("cloud_in", "/rslidar_points"), ("scan", "/scan_safety")],
+        parameters=[{
+            "target_frame": "base_footprint",
+            "min_height": 0.30,
+            "max_height": 1.60,
+            "angle_min": -3.14159,
+            "angle_max": 3.14159,
+            "angle_increment": 0.0087,
+            "scan_time": 0.1,
+            "range_min": 0.3,
+            "range_max": 20.0,
+            "use_inf": True,
+            "inf_epsilon": 1.0,
+            # x_min, x_max, y_min, y_max (m, base_footprint, all heights). Margins >= 4 cm
+            # over the frame; the front deck (x 0.50-0.85) stays visible. Re-check with
+            # the empty capture (COMMANDS.md section 8) after mounting anything on top.
+            "body_filter": True,
+            "body_box": [-0.90, 0.50, -0.60, 0.60],
+            "use_sim_time": use_sim_time,
+        }],
+    )
+
     p2l_safety = Node(
         package="pointcloud_to_laserscan",
         executable="pointcloud_to_laserscan_node",
@@ -249,6 +290,7 @@ def generate_launch_description():
         output="screen",
         respawn=True,
         respawn_delay=1.0,
+        condition=UnlessCondition(near_field),
         remappings=[("cloud_in", "/rslidar_points"), ("scan", "/scan_safety")],
         parameters=[{
             "target_frame": "base_footprint",
@@ -278,7 +320,9 @@ def generate_launch_description():
         output="screen",
         parameters=[{
             "scan_topic": "/scan_safety",
-            "process_pattern": "__node:=p2l_safety( |$)",
+            "process_pattern": PythonExpression(
+                ["'__node:=safety_scan( |$)' if '", near_field,
+                 "' == 'true' else '__node:=p2l_safety( |$)'"]),
         }],
     )
 
@@ -350,6 +394,7 @@ def generate_launch_description():
         autostart_arg,
         ground_seg_arg,
         low_memory_arg,
+        near_field_arg,
         patchworkpp,
         p2l_band,
         p2l_low_all,
@@ -357,6 +402,7 @@ def generate_launch_description():
         low_scan_filter,
         pointcloud_to_laserscan,
         scan_watchdog,
+        safety_scan,
         p2l_safety,
         scan_safety_watchdog,
         collision_monitor,

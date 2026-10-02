@@ -6,11 +6,13 @@
 Runs in ROS_DOMAIN_ID 42 (set before rclpy is imported, inherited by the node it
 starts), so it cannot reach a live stack: a second follow_controller on the live
 domain WILL drive an armed rover. Feeds synthetic targets, enable and track ids,
-and checks what the controller commands.
+and checks what the controller commands. SCAN_RANGE_MIN=0.3 gives the scan the
+near-field range_min (default 1.0).
 """
 import os
 os.environ["ROS_DOMAIN_ID"] = "42"
 import math, signal, subprocess, sys, time
+SCAN_RANGE_MIN = float(os.environ.get("SCAN_RANGE_MIN", "1.0"))
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
@@ -36,7 +38,7 @@ obstacle = [False]           # a post 1.8 m ahead in the slow zone?
 def scan():
     s = LaserScan(); s.header.frame_id = "base_footprint"
     s.header.stamp = n.get_clock().now().to_msg()
-    s.angle_min, s.angle_increment, s.range_min, s.range_max = -math.pi, 0.0087, 1.0, 20.0
+    s.angle_min, s.angle_increment, s.range_min, s.range_max = -math.pi, 0.0087, SCAN_RANGE_MIN, 20.0
     nb = int(2 * math.pi / 0.0087)
     s.ranges = [1.8 if obstacle[0] and abs(-math.pi + i * 0.0087) < 0.08 else float("inf")
                 for i in range(nb)]

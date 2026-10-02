@@ -283,8 +283,9 @@ class Tracker:
         # standing beside the rover, out of the camera's 55 deg, was dropped at 5 s.
         self.isolated_hold_timeout = isolated_hold_timeout
         self.near_hold_range, self.hold_continuity = near_hold_range, hold_continuity
-        # Too close for the LiDAR (range_min 1.0 m) but filling the camera: stay the
-        # target at this range -> the controller holds and faces, never drives.
+        # Closer than min_range (1.0 m: the scan's own limit before near_field, Q65)
+        # but filling the camera: stay the target at this range -> the controller
+        # holds and faces, never drives.
         self.near_range = near_range
         # --- appearance (OSNet re-ID) ---
         self.gallery_score = gallery_score      # only confident, unoccluded views teach a gallery

@@ -134,11 +134,13 @@ class FollowController(Node):
         # NO TURNING IN PLACE for a person closer than this (m from base_footprint,
         # the rotation centre) -- following, facing or searching. The footprint's
         # corners (0.85, 0.58) sweep a 1.03 m circle when the rover turns in place,
-        # and /scan_safety is blind inside 1.0 m (range_min, mast self-returns), so
-        # the collision monitor cannot stop a turn into someone standing there.
-        # Standing still is always safe; the rover turns once they are this far
-        # away. 1.6 = 1.03 + a stride. (live reid2 2026-09-30: the operator was
-        # lost 1.5 m away at +45 deg and the search turned toward them.)
+        # and with near_field:=false /scan_safety is blind inside 1.0 m, so the
+        # collision monitor cannot stop a turn into someone standing there. With
+        # near_field:=true it can (Q65); this stays as the second layer -- the rover
+        # does not turn into its own target. Standing still is always safe; the rover
+        # turns once they are this far away. 1.6 = 1.03 + a stride. (live reid2
+        # 2026-09-30: the operator was lost 1.5 m away at +45 deg and the search
+        # turned toward them.)
         self.declare_parameter("min_turn_range", 1.6)
         # ... and once holding, turn again only beyond min_turn_range + this: live
         # reid3 (2026-09-30) the operator stood ON the 1.6 m line and the rover
@@ -345,7 +347,7 @@ class FollowController(Node):
             self.too_close = True
             self.get_logger().warn(
                 f"person {rng:.1f} m away -- too close to turn in place (corners sweep "
-                f"1.03 m, the safety scan is blind inside 1.0 m): holding still until "
+                f"a 1.03 m circle): holding still until "
                 f"they are {self.min_turn_range + self.min_turn_release:.1f} m away")
         return True
 
