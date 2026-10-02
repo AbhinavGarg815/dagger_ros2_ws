@@ -223,7 +223,7 @@ stack — because the scene tests are timing-sensitive under load.
 | `python3 tools/test_odom_zupt.py [bag]` | — | Odometry zero-velocity update on a recorded stop |
 | `python3 tools/test_ground_seg.py [bag]` · `test_ground_scan.py [bag]` | — | Ground segmentation on a recorded cloud |
 
-`SCAN_RANGE_MIN=0.3` before `test_click_follow.py` / `test_follow_controller.py` gives their simulated scan the
+`SCAN_RANGE_MIN=0.3` before `test_click_follow.py` / `test_marker_follow.py` / `test_follow_controller.py` gives their simulated scan the
 near-field range (`near_field:=true`); the default 1.0 is p2l_safety's.
 
 ## 12. FCU parameters
