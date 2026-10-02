@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>Dagger follow</title>
 <style>
   :root { --bg:#111; --fg:#eee; --muted:#999; --ok:#2e7d32; --warn:#f9a825; --bad:#c62828; }
@@ -13,15 +13,29 @@
   #bar { display:flex; flex-wrap:wrap; gap:6px 14px; align-items:center; padding:6px 10px; background:#1b1b1b; }
   #bar .k { color:var(--muted); }
   #conn.ok { color:#69f0ae; } #conn.bad { color:#ff5252; }
-  #stage { position:relative; flex:1; min-height:0; display:flex; align-items:center; justify-content:center; }
-  canvas { max-width:100%; max-height:100%; cursor:crosshair; background:#000; }
+  #main { flex:1; min-height:0; display:flex; flex-direction:column; }
+  #stage { position:relative; flex:1; min-height:0; min-width:0; display:flex; align-items:center; justify-content:center; }
+  canvas { max-width:100%; max-height:100%; cursor:crosshair; background:#000; touch-action:none; }
   #banner { position:absolute; top:10px; left:50%; transform:translateX(-50%); padding:6px 14px; border-radius:6px;
             font-weight:700; display:none; }
   #controls { display:flex; gap:10px; padding:8px 10px; background:#1b1b1b; }
   button { font:inherit; font-weight:700; border:0; border-radius:8px; padding:14px 18px; color:#fff; cursor:pointer; }
   button:disabled { opacity:.35; cursor:not-allowed; }
   #follow { background:var(--ok); } #stop { background:var(--bad); flex:1; font-size:20px; } #clear { background:#555; }
-  #msg { color:var(--warn); padding:0 10px 6px; min-height:1.3em; background:#1b1b1b; }
+  #lite, #full { background:#37474f; } #lite.on { background:#0277bd; }
+  #msg { position:absolute; left:8px; bottom:8px; max-width:75%; color:var(--warn); background:rgba(0,0,0,.7);
+         border-radius:6px; padding:4px 8px; }
+  #msg:empty { display:none; }
+  /* HANDSET (touch screen, e.g. the SIYI MK32): video fills the screen, big buttons
+     in a column on the right, no page zoom or scroll, no keyboard hints */
+  body.handset { font-size:16px; -webkit-user-select:none; user-select:none; -webkit-tap-highlight-color:transparent;
+                 overscroll-behavior:none; touch-action:none; }
+  body.handset #bar { padding:4px 10px; gap:4px 12px; }
+  body.handset #main { flex-direction:row; }
+  body.handset #controls { flex-direction:column; width:150px; padding:8px; }
+  body.handset #controls button { flex:1; padding:6px; font-size:20px; }
+  body.handset #stop { flex:2.2; font-size:28px; }
+  body.handset .key { display:none; }
 </style>
 </head>
 <body>
@@ -35,12 +49,15 @@
     <span><span class="k">target</span> <b id="target">none</b></span>
     <span><span class="k">follow</span> <b id="followst">–</b></span>
   </div>
-  <div id="stage"><canvas id="cv" width="640" height="480"></canvas><div id="banner"></div></div>
-  <div id="msg"></div>
-  <div id="controls">
-    <button id="follow" disabled>FOLLOW</button>
-    <button id="stop">STOP (space)</button>
-    <button id="clear">CLEAR (esc)</button>
+  <div id="main">
+    <div id="stage"><canvas id="cv" width="640" height="480"></canvas><div id="banner"></div><div id="msg"></div></div>
+    <div id="controls">
+      <button id="stop">STOP<span class="key"> (space)</span></button>
+      <button id="follow" disabled>FOLLOW</button>
+      <button id="clear">CLEAR<span class="key"> (esc)</span></button>
+      <button id="lite" title="half-size video for a slow link">LITE</button>
+      <button id="full" title="full screen">FULL</button>
+    </div>
   </div>
 </div>
 <script>
@@ -56,26 +73,46 @@ let following = false;
 let prevState = "", reidUntil = 0;
 
 function setMsg(t) { $("msg").textContent = t || ""; }
+
+// Handset layout: a touch screen (the SIYI MK32), or forced with ?handset=1 / ?handset=0.
+const qs = new URLSearchParams(location.search);
+const handset = qs.has("handset") ? qs.get("handset") !== "0"
+              : !!(window.matchMedia && matchMedia("(pointer: coarse)").matches);
+if (handset) document.body.classList.add("handset");
+function store(k, v) { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { return null; } }
+let lite = qs.has("video") ? qs.get("video") === "lite" : store("video") === "lite";
 function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
 
 // ---------- geometry: native camera pixels <-> upright canvas ----------
+// Own 2D affine instead of DOMMatrix / DOMPoint, which older Android WebViews
+// lack. x' = a x + c y + e, y' = b x + d y + f (canvas setTransform order).
+function pt(x, y) { return { x: x, y: y }; }
+function Aff(a, b, c, d, e, f) { this.a = a; this.b = b; this.c = c; this.d = d; this.e = e; this.f = f; }
+Aff.prototype.apply = function (p) { return pt(this.a * p.x + this.c * p.y + this.e, this.b * p.x + this.d * p.y + this.f); };
+Aff.prototype.inverse = function () {
+  const k = this.a * this.d - this.b * this.c;
+  return new Aff(this.d / k, -this.b / k, -this.c / k, this.a / k,
+                 (this.c * this.f - this.d * this.e) / k, (this.b * this.e - this.a * this.f) / k);
+};
+function setT(m) { ctx.setTransform(m.a, m.b, m.c, m.d, m.e, m.f); }
 function viewMatrix(h) {
   const W = h.w || 640, H = h.h || 480, rot = ((h.rot || 0) % 360 + 360) % 360;
   const upW = (rot === 90 || rot === 270) ? H : W, upH = (rot === 90 || rot === 270) ? W : H;
   if (cv.width !== upW || cv.height !== upH) { cv.width = upW; cv.height = upH; }
-  // rotate about the image centre, clockwise by rot, into the upright canvas
-  return new DOMMatrix().translate(upW / 2, upH / 2).rotate(rot).translate(-W / 2, -H / 2);
+  // rotate about the image centre, clockwise by rot (multiples of 90: exact), into the upright canvas
+  const co = Math.round(Math.cos(rot * Math.PI / 180)), si = Math.round(Math.sin(rot * Math.PI / 180));
+  return new Aff(co, si, -si, co, upW / 2 - (co * W / 2 - si * H / 2), upH / 2 - (si * W / 2 + co * H / 2));
 }
 function canvasPoint(ev) {
   const r = cv.getBoundingClientRect();
-  return new DOMPoint((ev.clientX - r.left) * cv.width / r.width, (ev.clientY - r.top) * cv.height / r.height);
+  return pt((ev.clientX - r.left) * cv.width / r.width, (ev.clientY - r.top) * cv.height / r.height);
 }
 
 // ---------- ArUco markers: track ids >= MARKER_BASE (marker_tracker id_base) ----------
 const MARKER_BASE = 1000000;
 const isMarker = id => id >= MARKER_BASE;
 const tname = id => isMarker(id) ? "marker " + (id - MARKER_BASE) : "#" + id;
-function quad(k) { const c = k.corners; return [0, 1, 2, 3].map(i => new DOMPoint(c[2 * i], c[2 * i + 1])); }
+function quad(k) { const c = k.corners; return [0, 1, 2, 3].map(i => pt(c[2 * i], c[2 * i + 1])); }
 function inQuad(p, q) {                    // convex: the point is on the same side of all 4 edges
   let sign = 0;
   for (let i = 0; i < 4; i++) {
@@ -94,14 +131,14 @@ function drawMarkers(hdr, m) {
     const sel = k.id === hdr.selected;
     if (!k.visible && !sel) continue;       // an old outline would only mislead
     const q = quad(k);
-    ctx.setTransform(m);
+    setT(m);
     ctx.lineWidth = sel ? 5 : 3;
     ctx.strokeStyle = sel ? "#ff1744" : k.ok ? "#00e5ff" : "#9e9e9e";
     ctx.setLineDash(k.visible && k.ok ? [] : [8, 6]);
     ctx.beginPath(); ctx.moveTo(q[0].x, q[0].y);
     for (let i = 1; i < 4; i++) ctx.lineTo(q[i].x, q[i].y);
     ctx.closePath(); ctx.stroke();
-    const c = q.map(p => p.matrixTransform(m));
+    const c = q.map(p => m.apply(p));
     const lx = Math.min(...c.map(p => p.x)), ly = Math.min(...c.map(p => p.y));
     ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.setLineDash([]);
     const label = "M" + k.mid + (k.range != null ? "  " + k.range.toFixed(1) + " m" : "  no range")
@@ -115,18 +152,19 @@ function drawMarkers(hdr, m) {
 // ---------- drawing ----------
 function draw(hdr, bmp) {
   const m = viewMatrix(hdr);
-  ctx.setTransform(m); ctx.drawImage(bmp, 0, 0);
+  // into NATIVE pixel size: a LITE frame is half that, the boxes are in native pixels
+  setT(m); ctx.drawImage(bmp, 0, 0, hdr.w || 640, hdr.h || 480);
   const tracks = hdr.tracks || [];
   for (const t of tracks) {
     const [x1, y1, x2, y2] = t.box, sel = t.id === hdr.selected;
     const ok = t.ranged !== false;           // LiDAR-ranged at least once = selectable
-    ctx.setTransform(m);
+    setT(m);
     ctx.lineWidth = sel ? 5 : 2.5;
     ctx.strokeStyle = sel ? "#ff1744" : ok ? "#00e676" : "#9e9e9e";
     ctx.setLineDash(t.visible && ok ? [] : [8, 6]);
     ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
     // label upright, at the top-left corner of the box as seen on screen
-    const c = [new DOMPoint(x1, y1), new DOMPoint(x2, y1), new DOMPoint(x1, y2), new DOMPoint(x2, y2)].map(p => p.matrixTransform(m));
+    const c = [pt(x1, y1), pt(x2, y1), pt(x1, y2), pt(x2, y2)].map(p => m.apply(p));
     const lx = Math.min(...c.map(p => p.x)), ly = Math.min(...c.map(p => p.y));
     ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.setLineDash([]);
     const label = "#" + t.id + (t.range != null ? "  " + t.range.toFixed(1) + " m"
@@ -177,14 +215,24 @@ function onFrame(buf) {
   pending = { hdr, blob };
   if (!decoding) decodeNext();
 }
+function decodeJpeg(blob) {                 // createImageBitmap where there is one, else an <img>
+  if (window.createImageBitmap) return createImageBitmap(blob);
+  return new Promise((res, rej) => {
+    const url = URL.createObjectURL(blob), im = new Image();
+    im.onload = () => { URL.revokeObjectURL(url); res(im); };
+    im.onerror = e => { URL.revokeObjectURL(url); rej(e); };
+    im.src = url;
+  });
+}
 async function decodeNext() {
   if (!pending) return;
   const { hdr, blob } = pending; pending = null; decoding = true;
   try {
-    const bmp = await createImageBitmap(blob);
-    if (last && last.bmp) last.bmp.close();
+    const bmp = await decodeJpeg(blob);
+    if (last && last.bmp && last.bmp.close) last.bmp.close();
     last = { hdr, bmp };
     draw(hdr, bmp); status(hdr); drawn++;
+    $("lite").classList.toggle("on", hdr.video === "lite");
     if (offset !== null) {
       const age = Date.now() / 1000 + offset - hdr.stamp;
       $("age").textContent = Math.round(age * 1000) + " ms";
@@ -198,7 +246,7 @@ async function decodeNext() {
 // ---------- input ----------
 cv.addEventListener("click", ev => {
   if (!last || !(last.hdr.tracks || last.hdr.markers)) return;
-  const p = canvasPoint(ev).matrixTransform(viewMatrix(last.hdr).inverse());   // -> native pixels
+  const m = viewMatrix(last.hdr), p = m.inverse().apply(canvasPoint(ev));   // -> native pixels
   let best = null;                          // the SMALLEST shape under the click wins
   for (const k of last.hdr.markers || []) {
     if (!k.visible) continue;
@@ -214,6 +262,22 @@ cv.addEventListener("click", ev => {
       const a = (x2 - x1) * (y2 - y1);
       if (!best || a < best.a) best = { id: t.id, a, ok: t.ranged !== false };
     }
+  }
+  if (!best) {
+    // a fingertip misses small (far) targets: take the nearest one within ~28 screen px
+    const r = cv.getBoundingClientRect(), tol = 28 * cv.width / r.width;
+    let near = null;
+    const consider = (id, ok, x1, y1, x2, y2) => {
+      const dx = Math.max(x1 - p.x, 0, p.x - x2), dy = Math.max(y1 - p.y, 0, p.y - y2), d = Math.hypot(dx, dy);
+      if (d <= tol && (!near || d < near.d)) near = { id: id, ok: ok, d: d };
+    };
+    for (const k of last.hdr.markers || []) {
+      if (!k.visible) continue;
+      const xs = quad(k).map(q => q.x), ys = quad(k).map(q => q.y);
+      consider(k.id, k.ok, Math.min.apply(null, xs), Math.min.apply(null, ys), Math.max.apply(null, xs), Math.max.apply(null, ys));
+    }
+    for (const t of last.hdr.tracks || []) consider(t.id, t.ranged !== false, t.box[0], t.box[1], t.box[2], t.box[3]);
+    if (near) best = near;
   }
   if (best && !best.ok) {
     setMsg(isMarker(best.id)
@@ -232,6 +296,23 @@ cv.addEventListener("click", ev => {
 $("follow").onclick = () => send({ type: "follow" });
 $("stop").onclick = () => { send({ type: "stop" }); setMsg("STOP sent"); };
 $("clear").onclick = () => send({ type: "clear" });
+$("lite").onclick = () => {
+  lite = !lite; store("video", lite ? "lite" : "full");
+  send({ type: "video", mode: lite ? "lite" : "full" });
+  setMsg(lite ? "LITE video: half size, for a slow / long-range link" : "full video");
+};
+$("full").onclick = () => {
+  const el = document.documentElement;
+  if (document.fullscreenElement || document.webkitFullscreenElement) {
+    (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+    return;
+  }
+  const go = el.requestFullscreen || el.webkitRequestFullscreen;
+  if (!go) { setMsg("full screen not supported by this browser"); return; }
+  const r = go.call(el);
+  if (r && r.then) r.then(() => { if (screen.orientation && screen.orientation.lock) screen.orientation.lock("landscape").catch(() => {}); })
+                    .catch(e => setMsg("full screen refused: " + e));
+};
 document.addEventListener("keydown", ev => {
   if (ev.code === "Space") { ev.preventDefault(); $("stop").click(); }
   else if (ev.code === "Escape") $("clear").click();
@@ -239,7 +320,8 @@ document.addEventListener("keydown", ev => {
 
 // ---------- connection + clock ----------
 function connect() {
-  ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
+  ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws"
+                     + (lite ? "?video=lite" : ""));
   ws.binaryType = "arraybuffer";
   ws.onopen = () => { $("conn").textContent = "connected"; $("conn").className = "ok"; backoff = 500; setMsg(""); };
   ws.onclose = () => {

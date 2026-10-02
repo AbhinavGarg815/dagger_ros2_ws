@@ -1,7 +1,7 @@
 # Dagger UGV — command reference
 
 Every command used to build, run, test and debug the rover, in the order you need them.
-Last updated: 2026-09-30.
+Last updated: 2026-10-02.
 
 **Conventions**
 
@@ -134,7 +134,15 @@ ros2 launch dagger_bringup follow.launch.py det_conf:=0.2 marker_dictionary:=DIC
 ros2 launch dagger_bringup follow.launch.py detect_people:=false marker_dictionary:=DICT_6X6_50 marker_ids:=0 marker_size:=0.175
 ```
 
-Open `http://<rover-ip>:8080`, click a person or marker, press **FOLLOW** **[MOTION]**.
+Open the page, click (tap) a person or marker, press **FOLLOW** **[MOTION]**:
+
+- laptop / phone on Wi-Fi: `http://<rover-ip>:8080`
+- **SIYI MK32 handset** (over the SIYI radio): `http://192.168.144.100:8080` in its browser, then **FULL**.
+  Touch screens get the handset layout (big buttons on the right); force with `?handset=1` / `?handset=0`.
+- **LITE** button, or `?video=lite`: half-size video (about 10 KB/frame instead of 29) for a slow, long-range link.
+- The page that pressed FOLLOW is the deadman: if it goes silent for 1.5 s or disconnects, follow stops,
+  whatever other pages are open.
+
 The rover keeps 3 m (`follow_distance:=`), at most 0.6 m/s (`max_linear:=`), stands still while the
 target is within 1.6 m, and searches by turning for 30 s if it loses the target.
 
@@ -168,6 +176,7 @@ Names are timestamped automatically; start the recorder before the test and stop
 | `python3 tools/compare_detectors.py <bag> --ref 4:you --ref 8:plant` | Compare detector models on a recording against labelled tracks. |
 | `python3 tools/detect_bench.py` | Detector sanity check and speed on this Jetson. |
 | `python3 tools/node_cpu.py <name> … [-i 5 -d 600 -o out.csv]` | CPU of the named processes (one sample, or logged over time). |
+| `python3 tools/ui_latency.py [--lite] [-s 20]` | How old the page's video is when it leaves the rover (camera → sent), frame size and rate. Needs T1 with camera + T4. |
 
 ## 10. Debugging
 
@@ -184,6 +193,7 @@ Names are timestamped automatically; start the recorder before the test and stop
 | Obstacles in the costmap that are not there | `python3 tools/costmap_audit.py [local\|global]` |
 | Does the costmap see a low object ahead? | `python3 tools/scan_ahead.py` · `python3 tools/low_obstacle_approach.py` |
 | Which nodes are up? | `ros2 node list` |
+| Is the SIYI handset reachable? | `ping 192.168.144.20` (about 5 ms round trip over the radio) |
 | `ros2` commands hang or list stale nodes | `ros2 daemon stop; ros2 daemon start` |
 | Node logs (newest first) | `ls -t ~/.ros/log \| head` then `grep -i "error\|warn" ~/.ros/log/<file>` |
 | Stop one stuck process | `pgrep -af <name>` then `kill <PID>` — never `pkill -f <pattern>` (it has matched the wrong shell) |
@@ -205,7 +215,7 @@ stack — because the scene tests are timing-sensitive under load.
 | `python3 tools/test_click_follow.py all` | 53/53 | Person following scenes (or one of `main cross occlude reid beside close hug sign wall`) |
 | `python3 tools/test_marker_follow.py all` | 25/25 | Marker following scenes (`follow`, `switch`) |
 | `python3 tools/test_marker_pipeline.py` | 14/14 | Camera image → detector → marker tracker. `--people` also loads the person detector (T4 must be down). |
-| `python3 tools/test_ui_server.py` | 15/15 | Web page server: video, selection, deadman |
+| `python3 tools/test_ui_server.py` | 21/21 | Web page server: video (full / LITE), selection, deadman per page |
 | `python3 tools/test_follow_lidar.py main` / `wall` | 4/4, 3/3 | Old automatic follow mode |
 | `python3 tools/test_odom_zupt.py [bag]` | — | Odometry zero-velocity update on a recorded stop |
 | `python3 tools/test_ground_seg.py [bag]` · `test_ground_scan.py [bag]` | — | Ground segmentation on a recorded cloud |
@@ -240,6 +250,7 @@ and the issues report (`/home/jetson/dagger_reports/issues_and_fixes.md`).
 | Workspace | `/home/jetson/ros2_ws` |
 | Follow page | `http://<rover-ip>:8080` |
 | Foxglove | `ws://<rover-ip>:8765` |
+| SIYI link (Jetson port `enP8p1s0`) | Jetson `192.168.144.100` · air unit `.11` · ground unit `.12` · MK32 Android `.20` |
 | Bags | `~/dagger_bags/` (replays in `~/dagger_bags/replay/`) |
 | Saved maps | `src/dagger_bringup/maps/` |
 | Parameters | `src/dagger_bringup/params/` |

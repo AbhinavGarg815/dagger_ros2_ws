@@ -133,8 +133,8 @@ class Page:
         self.c.close()
 
 
-async def page():
-    return Page(await tornado.websocket.websocket_connect(f"ws://127.0.0.1:{PORT}/ws",
+async def page(query=""):
+    return Page(await tornado.websocket.websocket_connect(f"ws://127.0.0.1:{PORT}/ws{query}",
                                                           max_message_size=2 ** 22))
 
 
@@ -204,6 +204,29 @@ async def main():
     await asyncio.sleep(4.0)                                   # nodes up + discovery
     body = urllib.request.urlopen(f"http://127.0.0.1:{PORT}/", timeout=3).read().decode()
     check("page served at /", "Dagger follow" in body and "<canvas" in body and "/ws" in body)
+    check("page runs on older Android WebViews (no DOMMatrix / DOMPoint), has the handset layout",
+          "new DOMMatrix" not in body and "new DOMPoint" not in body and "body.handset" in body
+          and 'id="lite"' in body and 'id="full"' in body)
+
+    # LITE video for a slow link (SIYI MK32 at range): per page, the same frames
+    small, big = await page("?video=lite"), await page()
+    got_s, got_b = await asyncio.gather(frames(small, 1.5), frames(big, 1.5))
+    dims = lambda g: {cv2.imdecode(np.frombuffer(j, np.uint8), cv2.IMREAD_COLOR).shape[:2] for _, _, j in g}  # noqa: E731
+    size = lambda g: sorted(len(j) for _, _, j in g)[len(g) // 2] if g else 0  # noqa: E731
+    check("LITE page (/ws?video=lite): 320x240 frames, header video=lite; the other page still full 640x480",
+          len(got_s) >= 10 and len(got_b) >= 10 and dims(got_s) == {(240, 320)} and dims(got_b) == {(480, 640)}
+          and all(h.get("video") == "lite" for _, h, _ in got_s) and all(h.get("video") == "full" for _, h, _ in got_b),
+          f"{len(got_s)} / {len(got_b)} frames, {dims(got_s)} / {dims(got_b)}, {size(got_s)} / {size(got_b)} bytes")
+    check("... and both pages get the same frames (same seq, same boxes)",
+          bool({h["seq"] for _, h, _ in got_s} & {h["seq"] for _, h, _ in got_b})
+          and all(h.get("tracks") is not None for _, h, _ in got_s))
+    await big.send(json.dumps({"type": "video", "mode": "lite"}))
+    await frames(big, 0.3)
+    got = await frames(big, 1.0)
+    check("switching a page to LITE by message takes effect",
+          len(got) >= 6 and dims(got) == {(240, 320)}, f"{dims(got)}")
+    small.close(); big.close()
+    await asyncio.sleep(0.5)
 
     ws = await page()
     if True:
@@ -290,6 +313,36 @@ async def main():
     off = [t for t, v in enable_log if v is False]
     check("DEADMAN: page disconnects while following -> enable=false", armed and bool(off),
           (f"after {off[0] - t0:.2f} s" if off else "never") + ("" if armed else " (follow was not on)"))
+
+    # the deadman belongs to the page that pressed FOLLOW: another page staying
+    # connected (a laptop left open) must not keep the rover going
+    op, other = await page("?video=lite"), await page()
+    await asyncio.gather(frames(op, 0.6), frames(other, 0.6))
+    enable_log.clear()
+    await op.send(json.dumps({"type": "follow"}))
+    await asyncio.gather(frames(op, 0.5), frames(other, 0.5))
+    armed = bool(enable_log) and enable_log[-1][1] is True
+    enable_log.clear()
+    t0 = time.time()
+    await asyncio.gather(frames(op, 2.5, hb=False), frames(other, 2.5))   # the operator's link stalls
+    off = [t for t, v in enable_log if v is False]
+    check("DEADMAN: the FOLLOW page goes silent, another page still heartbeating -> enable=false",
+          armed and bool(off) and off[0] - t0 < 2.0,
+          (f"after {off[0] - t0:.2f} s" if off else "never") + ("" if armed else " (follow was not on)"))
+    await asyncio.gather(frames(op, 0.6), frames(other, 0.6))
+    enable_log.clear()
+    await op.send(json.dumps({"type": "follow"}))
+    await asyncio.gather(frames(op, 0.5), frames(other, 0.5))
+    armed = bool(enable_log) and enable_log[-1][1] is True
+    enable_log.clear()
+    t0 = time.time()
+    op.close()
+    await frames(other, 1.0)
+    off = [t for t, v in enable_log if v is False]
+    check("DEADMAN: the FOLLOW page disconnects, another page still connected -> enable=false",
+          armed and bool(off), (f"after {off[0] - t0:.2f} s" if off else "never") + ("" if armed else " (follow was not on)"))
+    other.close()
+    await asyncio.sleep(0.5)
 
     loop = asyncio.get_event_loop()
     age0, drained, burst = await loop.run_in_executor(None, raw_slow_client, 2.0)

@@ -22,10 +22,14 @@ cannot command the rover.
 
 IN (JSON text): hb (heartbeat, answered with the server clock for the page's
 latency meter), select {id}, clear, follow, stop.
-DEADMAN: if following was enabled FROM THE UI and no page has sent a heartbeat
-for deadman_s (or the last page disconnects), follow is disabled -- the rover
-stops when the operator's link is gone. Following enabled elsewhere (CLI,
+DEADMAN: if following was enabled FROM THE UI and THE PAGE THAT PRESSED FOLLOW
+has sent no heartbeat for deadman_s, or has disconnected, follow is disabled --
+the rover stops when the operator's link is gone, whatever other pages are still
+open (a laptop left connected must not keep the rover going for an operator on
+the SIYI handset whose radio dropped). Following enabled elsewhere (CLI,
 follow_solo.sh) is not touched by the deadman.
+VIDEO: per page, full (640x480) or LITE (320x240, /ws?video=lite or a
+{"type": "video", "mode": "lite"} message) for a slow link.
 
 Threads: rclpy spins in a background executor thread; tornado owns the asyncio
 loop in the main thread; frames cross with call_soon_threadsafe.
@@ -62,6 +66,18 @@ def num(v, nd=3):
     return round(float(v), nd) if v == v and abs(v) != float("inf") else None
 
 
+def shrink(jpeg, quality=70):
+    """Half-size (320x240) re-encode of a frame for a page on a slow link (LITE):
+    decoded straight at half size, 2.4 ms, ~10 KB instead of ~29 KB (aruco2 frames,
+    2026-10-02). Only worth it when the radio is slow: at short range the SIYI link
+    carries a full frame in about the time this takes."""
+    import cv2
+    import numpy as np
+    im = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_REDUCED_COLOR_2)
+    ok, enc = cv2.imencode(".jpg", im, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    return enc.tobytes() if ok else jpeg
+
+
 class Hub:
     """asyncio side: the latest frame and the connected pages."""
 
@@ -69,6 +85,14 @@ class Hub:
         self.frame = None                # (header dict, jpeg bytes)
         self.seq = 0
         self.clients = {}                # PageSocket -> last heartbeat (monotonic)
+        self.lite_frame = (0, None)      # (seq, future of the shrunk JPEG): made once, shared
+
+    def lite(self, seq, jpeg):
+        """Awaitable LITE JPEG of frame `seq`, encoded in a worker thread (cv2
+        releases the GIL) so the loop keeps serving other pages meanwhile."""
+        if self.lite_frame[0] != seq:
+            self.lite_frame = (seq, asyncio.get_event_loop().run_in_executor(None, shrink, jpeg))
+        return self.lite_frame[1]
 
     def publish(self, header, jpeg):
         self.seq += 1
@@ -116,6 +140,7 @@ class UiServer(Node):
         self.target_source = ""
         self.target_range = None
         self.ui_armed = False                     # following was enabled from the page
+        self.armed_page = None                    # ... from THIS page: its heartbeat is the deadman
 
         be = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
                         history=HistoryPolicy.KEEP_LAST, depth=1)
@@ -136,7 +161,7 @@ class UiServer(Node):
     def on_state(self, m):
         self.follow_state = m.data
         if m.data.startswith("disabled"):
-            self.ui_armed = False                  # the controller stood down by itself
+            self.ui_armed, self.armed_page = False, None   # the controller stood down by itself
 
     def on_target(self, m):
         p = m.pose.position
@@ -218,13 +243,13 @@ class UiServer(Node):
         self.loop.call_soon_threadsafe(self.hub.publish, h, bytes(img.data))
 
     # ---------------- commands (loop thread; rclpy publish is thread-safe) ----------------
-    def set_follow(self, on, why):
+    def set_follow(self, on, why, page=None):
         for _ in range(3):                         # a single message can be dropped
             self.enable_pub.publish(Bool(data=on))
-        self.ui_armed = on
+        self.ui_armed, self.armed_page = on, (page if on else None)
         self.get_logger().info(f"follow {'ENABLED' if on else 'DISABLED'} from the UI ({why})")
 
-    def command(self, msg):
+    def command(self, msg, page=None):
         t = msg.get("type")
         if t == "select":
             tid = int(msg["id"])
@@ -241,7 +266,7 @@ class UiServer(Node):
             if not self.allow_follow:
                 return {"type": "error", "msg": "FOLLOW from the page is not enabled yet "
                                                 "(allow_follow:=false)"}
-            self.set_follow(True, "FOLLOW pressed")
+            self.set_follow(True, "FOLLOW pressed", page)
             return None
         return {"type": "error", "msg": f"unknown command {t!r}"}
 
@@ -263,9 +288,11 @@ class PageSocket(tornado.websocket.WebSocketHandler):
         self.node, self.hub = node, hub
         self.wake = asyncio.Event()
         self.sender = None
+        self.lite = False                # half-size video for this page (/ws?video=lite, or a message)
 
     def open(self):
         self.hub.clients[self] = time.monotonic()
+        self.lite = self.get_query_argument("video", "full") == "lite"
         self.set_nodelay(True)                     # small replies (pong) must not wait for Nagle
         # Latest-only must hold on a slow link too: the kernel send buffer grows to
         # megabytes = seconds of OLD frames queued below the app. Cap it at ~3 JPEGs
@@ -276,7 +303,7 @@ class PageSocket(tornado.websocket.WebSocketHandler):
         self.sndbuf = sock.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF)  # kernel doubles it
         self.node.get_logger().info(
             f"UI connected: {self.request.remote_ip} ({len(self.hub.clients)} page(s), "
-            f"send buffer {self.sndbuf // 1024} KiB)")
+            f"send buffer {self.sndbuf // 1024} KiB, video {'LITE' if self.lite else 'full'})")
         self.sender = asyncio.ensure_future(self.send_frames())
         if self.hub.frame is not None:
             self.wake.set()
@@ -291,7 +318,10 @@ class PageSocket(tornado.websocket.WebSocketHandler):
                     continue
                 header, jpeg = self.hub.frame
                 last = header["seq"]
-                hdr = json.dumps(dict(header, sent=time.time()), separators=(",", ":")).encode()
+                if self.lite:
+                    jpeg = await self.hub.lite(last, jpeg)
+                hdr = json.dumps(dict(header, sent=time.time(), video="lite" if self.lite else "full"),
+                                 separators=(",", ":")).encode()
                 # awaits until tornado has handed the bytes to the socket: while it
                 # waits, newer frames only overwrite hub.frame -> latest-only
                 await self.write_message(struct.pack(">I", len(hdr)) + hdr + jpeg, binary=True)
@@ -309,8 +339,12 @@ class PageSocket(tornado.websocket.WebSocketHandler):
             self.hub.clients[self] = time.monotonic()
             self.reply({"type": "pong", "t": msg.get("t"), "server": time.time()})
             return
+        if msg.get("type") == "video":                 # this page only
+            self.lite = msg.get("mode") == "lite"
+            self.node.get_logger().info(f"UI {self.request.remote_ip}: video {'LITE' if self.lite else 'full'}")
+            return
         try:
-            reply = self.node.command(msg)
+            reply = self.node.command(msg, self)
         except (KeyError, TypeError, ValueError) as e:
             reply = {"type": "error", "msg": f"bad command: {e}"}
         if reply:
@@ -334,11 +368,12 @@ async def deadman(node, hub):
         await asyncio.sleep(0.2)
         if not node.ui_armed:
             continue
-        newest = max(hub.clients.values(), default=None)
-        if newest is None:
-            node.set_follow(False, "DEADMAN: no page connected")
-        elif time.monotonic() - newest > node.deadman_s:
-            node.set_follow(False, f"DEADMAN: no heartbeat for {node.deadman_s:.1f} s")
+        beat = hub.clients.get(node.armed_page)    # the page that pressed FOLLOW, not any page
+        if beat is None:
+            node.set_follow(False, "DEADMAN: the page that pressed FOLLOW disconnected")
+        elif time.monotonic() - beat > node.deadman_s:
+            node.set_follow(False, f"DEADMAN: no heartbeat from the page that pressed FOLLOW "
+                                   f"for {node.deadman_s:.1f} s")
 
 
 def spin_quietly(executor):
