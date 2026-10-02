@@ -1,7 +1,7 @@
 # Dagger UGV — command reference
 
 Every command used to build, run, test and debug the rover, in the order you need them.
-Last updated: 2026-10-02.
+Last updated: 2026-10-02 (reports + learnings in the repo).
 
 **Conventions**
 
@@ -238,10 +238,11 @@ git status                      # what changed
 git log --oneline -10           # recent commits
 git add -A && git commit -m "…" # commit
 git push origin main            # publish to github.com/AbhinavGarg815/dagger_ros2_ws (private)
+bash tools/sync_learnings.sh    # copy Claude's project memory into docs/learnings/ (before a wrap-up commit)
 ```
 
-Not in the repository: bags (`~/dagger_bags/`), models (`models/`), third-party sources (`src/<vendored>/`),
-and the issues report (`/home/jetson/dagger_reports/issues_and_fixes.md`).
+In the repository: code, `COMMANDS.md`, the reports (`docs/reports/`) and the learnings (`docs/learnings/`).
+Not in it: bags (`~/dagger_bags/`), models (`models/`), third-party sources (`src/<vendored>/`).
 
 ## 14. Quick reference
 
@@ -255,4 +256,5 @@ and the issues report (`/home/jetson/dagger_reports/issues_and_fixes.md`).
 | Saved maps | `src/dagger_bringup/maps/` |
 | Parameters | `src/dagger_bringup/params/` |
 | Node logs | `~/.ros/log/` |
-| Issues and fixes report | `/home/jetson/dagger_reports/issues_and_fixes.md` |
+| Issues and fixes report | `docs/reports/issues_and_fixes.md` (`/home/jetson/dagger_reports/` links here) |
+| Learnings (Claude's project memory, copy) | `docs/learnings/claude-memory/` |

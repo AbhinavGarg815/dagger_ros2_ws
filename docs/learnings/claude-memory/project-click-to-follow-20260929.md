@@ -1,0 +1,31 @@
+---
+name: project-click-to-follow-20260929
+description: "Click-to-select person following (crowds): browser UI + JPEG/WebSocket video + multi-person tracker with LiDAR fusion and OSNet re-ID — design decisions and phase plan"
+metadata:
+  node_type: memory
+  type: project
+  originSessionId: 5c15c34f-dbac-4cc2-816f-8b5cfc96d79b
+  modified: 2026-09-30T07:12:21.246Z
+---
+
+User request 2026-09-29: follow a person chosen by CLICKING them in low-latency video on the PC, working with multiple people / crowds; "low-latency, reliable, fast, error free". Approved plan + decisions:
+
+- **UI:** browser page served by the rover (port 8080, one port for page + WebSocket), not Foxglove. Click a box → sends TRACK ID (not pixels). FOLLOW / big STOP (space) / status + frame age, fps, RTT.
+- **Video:** Orin Nano has NO NVENC (no nvv4l2h264enc; x264 sw = +54 % CPU) → per-frame JPEG (cv2/nvjpeg, ~4 ms) over WebSocket, LATEST-FRAME-ONLY (drop, never queue). Frames = the detector's processed frames bundled with that frame's boxes (exact alignment). Est. 80–130 ms glass-to-glass.
+- **Dependency:** `python3-tornado` 6.1 via apt (USER runs sudo). NOT python3-websockets: Jammy's 9.1 can't connect on Python 3.10 (asyncio.Lock(loop=None)) and truncates HTTP bodies. Single port 8080 for page + /ws.
+- **Link loss while following → STOP** (deadman heartbeat ~1.5 s → /follow/enable false).
+- **Tracker (replaces target_selector):** all people tracked in odom (camera bearing + LiDAR range), association = motion + appearance re-ID (OSNet x0.25 MSMT17 ONNX 907 kB from huggingface anriha/osnet_x0_25_msmt17 → TensorRT; no torch on Jetson), BoT-SORT/Deep-OC-SORT style. Never silently switch person: re-acquire only on strong appearance+position agreement, else stop + "LOST — click to reselect". Keep follow_controller / collision monitor / twist_mux / gate and the /follow/target interface unchanged.
+- **Phases:** P1 video + page + simple IDs → P2 multi-person tracker + LiDAR fusion + selection (sim tests) → P3 re-ID TRT → P4 recorded real crowd bag offline tuning → P5 live (tracking-only, one person, crossing with helper).
+- **Pace:** "Go, report per phase" — build/test each phase, report, ask only for live tests and decisions.
+
+Links: [[project-followme-20260925]] (existing follow-me stack), [[feedback-user-drives-physical-motion]].
+
+## Status
+- P1 DONE offline 2189f31 (report Q54): dagger_msgs, person_detector UI JPEG (array('B')!), person_tracker (IoU), ui_server (tornado, latest-only, SO_SNDBUF cap, deadman), web/index.html, follow.launch use_ui/ui_port; tests test_person_tracking 12/12, test_ui_server 10/10 (needs tornado; used extracted .deb via PYTHONPATH scratch/deb/t). Live test pending: tornado install, T1 use_camera:=true, T4, browser http://10.193.159.72:8080.
+- P2 DONE offline ab032df (Q55): person_tracker = target source (target_source:=tracker default | selector old path); odom positions, position-gated Hungarian, LiDAR hold refusing wall AND other-person clusters; /follow/state from controller; tests test_click_follow all 21/21 x3, unit 26/26. Pitfall: rclpy "Logger severity cannot be changed between calls" (one line, two levels) crashed the node. Next P3: OSNet re-ID (hf anriha/osnet_x0_25_msmt17 ONNX -> trtexec) to re-link people after occlusion.
+- ID-stability fixes e429080 (disputed range, one cluster = one person, ByteTrack 2-stage, tentative 3 hits, 2 s survival). ids1 bag (track_ids1_163706): old 17 ids/9 switches -> new 6/0 (det 0.45), 8/1 (det 0.2). Contact sheet: same person = #1,#3,#6,#8 across gaps (needs re-ID); FP #7 = orange sign, weak 0.2-0.3, never ranged. Lost-near-rover cause: beside rover outside camera FOV -> 5 s LiDAR-only timeout; in front <1 m -> /scan_safety range_min 1.0 -> no range.
+- USER DECISIONS 09-29: "no false positives, focus on true positives, never lose target, re-identify target"; RE-ID POLICY = **resume following automatically if re-identified within 30 s of the loss**, after 30 s disable (press FOLLOW). Planned: confirm only on confident dets; person-size check (box*range); clickable only if ranged once; isolated LiDAR hold up to 30 s; near-target (too close for LiDAR) = hold+face, never drive; OSNet re-ID gallery + re-link to OLD id; controller waits (zero cmd) up to 30 s for the same id.
+- P3 DONE offline abed3b1/b0b0ef2 (Q56): OSNet re-ID TRT (models/osnet_x0_25_msmt17_fp16.engine; fetch_model.sh reid), PersonDetections msg w/ signatures, re-link rule 0.66/3 frames/0.08 margin/new-only/30 s, controller resume_window 30 (click mode) + hint search (face, hold 3 s, one-way sweep, rotation only), isolated hold 30 s, near target, wall-slice range rejection, only ranged selectable. Real bag replay: operator = one id whole session. Tests all green. NEXT: live test (T4 restart; no FOLLOW first), then driven test with RC in hand.
+- 09-30 reid1 live (Q57, d5c243a): search slowed to 0.16 rad/s by collision-monitor PolygonSlow (Humble scales the WHOLE twist) → removed; forward-only slow zone in follow_controller. Near-rover continuity hold (≤3 m, 30 s, jump>0.4 ends). Plant FP → YOLOX-S default (compare_detectors.py: Nano plant 40-67 %, S 0 %).
+- 09-30 reid2 live (Q58, 6b536f4): one id all session, no plant FP, search full speed. Losses were lidar_cluster counting unconnected points (wall behind person) → connected-return rule (cluster_link 0.3, body ≤0.9, return ≤1.8). SAFETY: corners sweep 1.03 m, /scan_safety blind <1.0 m → controller min_turn_range 1.6 (no turn/drive; search uses last-SEEN range, not the hint). Tests: unit 64, ctrl 19, scenes 9/53 (new `hug`), bags: track_ids1_163706, track_reid1_105438, track_reid2_115215.
+- OPEN (needs user OK, safety config): near-field blind zone of /scan_safety (range_min 1.0) for BOTH collision monitors → proposal: raw-cloud capture parked, self-filter box (self_filter.py unused) + range_min ~0.3. reid3 live 09-30 12:49 (track_reid3_124942): user "looks good"; one id; inside 1.6 m yaw median 0; one by-design loss re-identified in 3 s → auto-resume. Found boundary toggling at 1.57-1.60 m → min_turn_release 0.2 (23d0678). Report Q58 ✅; Open items refreshed (P12 crowd test + glass-to-glass latency left; P13 near-field scan needs OK; P14 Nav2 low-obstacle detour deferred). 9 commits unpushed (ask first).

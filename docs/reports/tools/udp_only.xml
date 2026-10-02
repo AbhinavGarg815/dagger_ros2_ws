@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- Force UDP-only DDS transport.
+     Needed because MAVROS runs as user 'jetson' while our monitors run as
+     'nvidia'. FastDDS default shared-memory transport uses /dev/shm segments
+     owned by jetson, so a cross-user subscriber discovers the topic but never
+     receives data (publisher count 1, zero messages). UDP-only sidesteps SHM. -->
+<dds xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <profiles>
+    <transport_descriptors>
+      <transport_descriptor>
+        <transport_id>udp_only</transport_id>
+        <type>UDPv4</type>
+      </transport_descriptor>
+    </transport_descriptors>
+    <participant profile_name="udp_participant" is_default_profile="true">
+      <rtps>
+        <userTransports>
+          <transport_id>udp_only</transport_id>
+        </userTransports>
+        <useBuiltinTransports>false</useBuiltinTransports>
+      </rtps>
+    </participant>
+  </profiles>
+</dds>
