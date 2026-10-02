@@ -6,9 +6,11 @@
 
 Connects to ui_server like a page (needs T1 with use_camera:=true and T4) and,
 per frame, splits the delay on the Jetson's own clock:
-    camera -> sent   capture stamp to ui_server sending it (detector, trackers,
-                     pairing the frame with its boxes)
+    camera -> sent   capture stamp to ui_server sending the frame (video first:
+                     camera driver + JPEG, not detection)
     sent -> here     the network (about 0 on the Jetson itself)
+    boxes            capture stamp to that frame's boxes arriving (detection +
+                     tracking); the page shows the previous boxes until then
 What the handset shows ('age' on the page) adds the radio and the browser's
 decode + draw. Never sends heartbeats or commands: it cannot keep follow alive
 or start anything.
@@ -26,7 +28,7 @@ import tornado.websocket
 async def run(a):
     url = f"ws://{a.host}:{a.port}/ws" + ("?video=lite" if a.lite else "")
     ws = await tornado.websocket.websocket_connect(url, max_message_size=2 ** 22)
-    rows, end = [], time.time() + a.secs
+    rows, boxes, end = [], [], time.time() + a.secs
     while time.time() < end:
         try:
             m = await asyncio.wait_for(ws.read_message(), timeout=max(0.1, end - time.time()))
@@ -34,14 +36,17 @@ async def run(a):
             break
         if m is None:
             raise SystemExit("connection closed by ui_server")
-        if not isinstance(m, bytes):
-            continue
         now = time.time()
+        if not isinstance(m, bytes):
+            b = json.loads(m)
+            if b.get("type") == "boxes":
+                boxes.append(now - b["stamp"])
+            continue
         n = struct.unpack(">I", m[:4])[0]
         h = json.loads(m[4:4 + n])
         rows.append((now, h["stamp"], h["sent"], len(m) - 4 - n, h.get("tracks") is not None))
     ws.close()
-    return rows
+    return rows, boxes
 
 
 def main():
@@ -51,7 +56,7 @@ def main():
     ap.add_argument("-s", "--secs", type=float, default=10.0)
     ap.add_argument("--lite", action="store_true", help="the half-size LITE stream")
     a = ap.parse_args()
-    rows = asyncio.get_event_loop().run_until_complete(run(a))
+    rows, boxes = asyncio.get_event_loop().run_until_complete(run(a))
     if len(rows) < 2:
         raise SystemExit(f"{len(rows)} frames in {a.secs:.0f} s -- is T4 (follow.launch.py) up, "
                          f"and T1 with use_camera:=true?")
@@ -61,10 +66,12 @@ def main():
     q = lambda v: f"median {1e3 * np.median(v):5.1f} ms, p95 {1e3 * np.percentile(v, 95):5.1f}"  # noqa: E731
     print(f"{len(rows)} frames, {fps:.1f} fps, longest gap {1e3 * gaps.max():.0f} ms, "
           f"{'LITE' if a.lite else 'full'} video {np.median(r[:, 3]) / 1024:.0f} KB/frame "
-          f"({np.median(r[:, 3]) * 8 * fps / 1e6:.1f} Mb/s), {sum(x[4] for x in rows)} with boxes")
+          f"({np.median(r[:, 3]) * 8 * fps / 1e6:.1f} Mb/s), {len(boxes)} boxes messages")
     print(f"  camera -> sent : {q(r[:, 1])}")
     print(f"  sent   -> here : {q(r[:, 2])}")
     print(f"  camera -> here : {q(r[:, 0])}")
+    if boxes:
+        print(f"  camera -> boxes: {q(np.array(boxes))}")
 
 
 if __name__ == "__main__":

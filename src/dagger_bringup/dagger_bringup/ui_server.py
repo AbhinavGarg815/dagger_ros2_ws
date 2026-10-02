@@ -9,10 +9,14 @@ Built on tornado (apt python3-tornado 6.1). Not python3-websockets: Ubuntu
 connection never completes (reproduced 2026-09-29) -- and it also cuts off
 HTTP bodies served from its handshake hook.
 
-OUT, per camera frame the detector processed: ONE binary message =
-    4-byte big-endian length | JSON header | JPEG
-where the header carries that frame's tracks (person_tracker): the image and its
-boxes travel together, so what the operator clicks is exactly what they see.
+OUT, per camera frame the detector processed:
+  * the FRAME at once, as one binary message =
+        4-byte big-endian length | JSON header (stamp, size, follow state) | JPEG
+  * its BOXES when the trackers have them (~50 ms later), as a text message
+        {"type": "boxes", "stamp": <the frame's>, tracks, markers, selected, state}
+    The page draws a frame with the previous boxes and redraws it with its own
+    when they arrive, so boxes always match the frame they belong to and the
+    video does not wait for detection (VIDEO FIRST, 2026-10-02: 100 -> ~45 ms).
 LATEST FRAME ONLY: each page has one slot; a frame that arrives while the
 previous one is still being sent replaces the waiting one. A slow link drops
 frames, it never queues them, so the picture cannot fall behind reality.
@@ -86,6 +90,7 @@ class Hub:
         self.seq = 0
         self.clients = {}                # PageSocket -> last heartbeat (monotonic)
         self.lite_frame = (0, None)      # (seq, future of the shrunk JPEG): made once, shared
+        self.boxes = None                # the latest 'boxes' message (JSON text)
 
     def lite(self, seq, jpeg):
         """Awaitable LITE JPEG of frame `seq`, encoded in a worker thread (cv2
@@ -100,6 +105,12 @@ class Hub:
         self.frame = (header, jpeg)
         for c in self.clients:
             c.wake.set()
+
+    def publish_boxes(self, boxes):
+        """A frame's boxes: small, to every page at once (text message)."""
+        self.boxes = json.dumps(boxes, separators=(",", ":"))
+        for c in list(self.clients):
+            c.reply_raw(self.boxes)
 
 
 class UiServer(Node):
@@ -116,6 +127,8 @@ class UiServer(Node):
         # A frame whose tracks have not arrived after this is sent without boxes
         # (tracker down) rather than held back.
         self.declare_parameter("pair_timeout_s", 0.2)
+        # how the camera is mounted, until the trackers say (they carry it too)
+        self.declare_parameter("image_rotation_deg", 0)
         # FOLLOW from the page. Off until the tracker drives /follow/target from
         # the selection (phase 2); STOP always works.
         self.declare_parameter("allow_follow", False)
@@ -131,10 +144,11 @@ class UiServer(Node):
         self.loop, self.hub = loop, hub
 
         self.lock = threading.Lock()
-        self.images = collections.OrderedDict()   # stamp -> (msg, arrival)
-        self.tracks = collections.OrderedDict()   # stamp -> msg
-        self.markers = collections.OrderedDict()  # stamp -> MarkerTracks (marker_tracker, optional)
+        self.tracks = collections.OrderedDict()   # stamp -> (PersonTracks, arrival)
+        self.markers = collections.OrderedDict()  # stamp -> (MarkerTracks, arrival) (marker_tracker, optional)
         self.marker_seen = -1e9                   # last MarkerTracks arrival: is marker_tracker up?
+        self.tracks_seen = -1e9
+        self.geom = (640, 480, int(g("image_rotation_deg")) % 360)   # native size + camera mount
         self.follow_enabled = None
         self.follow_state = ""                     # follow_controller's /follow/state
         self.target_source = ""
@@ -168,58 +182,65 @@ class UiServer(Node):
         self.target_range = (p.x ** 2 + p.y ** 2) ** 0.5
 
     def on_image(self, m):
-        with self.lock:
-            self.images[stamp_s(m.header)] = (m, time.monotonic())
-            while len(self.images) > 5:
-                self.images.popitem(last=False)
-            self.pair(stamp_s(m.header))
+        """VIDEO FIRST: the frame goes out the moment it arrives. Its boxes follow
+        as a 'boxes' message once the trackers have it (~50 ms later); the page
+        shows the previous boxes until then. Pairing them first held every frame
+        until detection + tracking were done: 100 ms capture -> sent, of which
+        55 ms was waiting for boxes (live, 2026-10-02)."""
+        w, h, rot = self.geom
+        hdr = {"type": "frame", "stamp": stamp_s(m.header), "w": w, "h": h, "rot": rot,
+               "follow": self.follow_enabled, "follow_state": self.follow_state,
+               "allow_follow": self.allow_follow, "source": self.target_source,
+               "range": num(self.target_range) if self.target_range is not None else None}
+        self.loop.call_soon_threadsafe(self.hub.publish, hdr, bytes(m.data))
 
     def on_tracks(self, m):
         with self.lock:
-            self.tracks[stamp_s(m.header)] = m
-            while len(self.tracks) > 5:
-                self.tracks.popitem(last=False)
-            self.pair(stamp_s(m.header))
+            self.geom = (m.image_width or self.geom[0], m.image_height or self.geom[1], m.image_rotation_deg)
+            self.part(self.tracks, m)
 
     def on_markers(self, m):
         with self.lock:
             self.marker_seen = time.monotonic()
-            self.markers[stamp_s(m.header)] = m
-            while len(self.markers) > 5:
-                self.markers.popitem(last=False)
-            self.pair(stamp_s(m.header))
+            if self.marker_seen - self.tracks_seen > 1.0:  # no person tracker: markers set the geometry
+                self.geom = (m.image_width or self.geom[0], m.image_height or self.geom[1], m.image_rotation_deg)
+            self.part(self.markers, m)
 
-    def pair(self, st):
-        """Caller holds the lock. Emit the frame at stamp st once all parts exist:
-        the image, its person tracks and -- while marker_tracker is publishing --
-        its marker tracks."""
-        want_markers = time.monotonic() - self.marker_seen < 1.0
-        if st in self.images and st in self.tracks and (st in self.markers or not want_markers):
-            img, _ = self.images.pop(st)
-            trk = self.tracks.pop(st)
-            mk = self.markers.pop(st, None)
-            for d in (self.images, self.tracks, self.markers):   # anything older can no longer pair
-                for k in [k for k in d if k < st]:
-                    del d[k]
-            self.emit(img, trk, mk)
+    def part(self, store, m):
+        """Caller holds the lock. One tracker's output for a frame; boxes go out
+        once both trackers' outputs for that frame are in (marker tracks only
+        while marker_tracker is publishing)."""
+        st = stamp_s(m.header)
+        now = time.monotonic()
+        if store is self.tracks:
+            self.tracks_seen = now
+        store[st] = (m, now)
+        while len(store) > 5:
+            store.popitem(last=False)
+        want_markers = now - self.marker_seen < 1.0
+        if st in self.tracks and (st in self.markers or not want_markers):
+            self.emit_boxes(st)
 
     def flush_unpaired(self):
+        """Boxes whose other half never came (a tracker down or late): send what there is."""
         now = time.monotonic()
         with self.lock:
-            for st in [k for k, (_, t0) in self.images.items() if now - t0 > self.pair_timeout]:
-                img, _ = self.images.pop(st)
-                # a part that never came is shown as missing, the rest as they are
-                self.emit(img, self.tracks.pop(st, None), self.markers.pop(st, None))
+            for st in sorted(set(self.tracks) | set(self.markers)):
+                t0 = min(d[st][1] for d in (self.tracks, self.markers) if st in d)
+                if now - t0 > self.pair_timeout:
+                    self.emit_boxes(st)
 
-    def emit(self, img, trk, mk=None):
-        h = {"type": "frame", "stamp": stamp_s(img.header),
-             "follow": self.follow_enabled, "follow_state": self.follow_state,
-             "allow_follow": self.allow_follow,
-             "source": self.target_source,
-             "range": num(self.target_range) if self.target_range is not None else None}
+    def emit_boxes(self, st):
+        """Caller holds the lock."""
+        trk = self.tracks.pop(st, (None,))[0]
+        mk = self.markers.pop(st, (None,))[0]
+        for d in (self.tracks, self.markers):             # anything older can no longer complete
+            for k in [k for k in d if k < st]:
+                del d[k]
+        w, h, rot = self.geom
+        b = {"type": "boxes", "stamp": st, "w": w, "h": h, "rot": rot}
         if trk is not None:
-            h.update(w=trk.image_width, h=trk.image_height, rot=trk.image_rotation_deg,
-                     selected=trk.selected_id, state=trk.target_state,
+            b.update(selected=trk.selected_id, state=trk.target_state,
                      tracks=[{"id": t.id, "box": [num(t.x1, 1), num(t.y1, 1), num(t.x2, 1),
                                                   num(t.y2, 1)],
                               "score": num(t.score, 2), "visible": t.visible,
@@ -227,20 +248,18 @@ class UiServer(Node):
                               "ranged": t.ranged}
                              for t in trk.tracks])
         else:
-            h.update(tracks=None, selected=-1, state="NO_TRACKER")
+            b.update(tracks=None, selected=-1, state="NO_TRACKER")
         if mk is not None:
             # corners: the marker's outline in native image pixels, like the boxes
-            h["markers"] = [{"id": t.id, "mid": t.marker_id,
+            b["markers"] = [{"id": t.id, "mid": t.marker_id,
                              "corners": [num(v, 1) for v in t.corners],
                              "visible": t.visible, "ok": t.confirmed,
                              "range": num(t.range_m, 2), "bearing": num(t.bearing_deg, 1),
                              "heading": num(t.heading_deg, 0), "src": t.range_source}
                             for t in mk.tracks]
-            if trk is None:
-                h.update(w=mk.image_width, h=mk.image_height, rot=mk.image_rotation_deg)
             if mk.selected_id >= 0:                # a marker is the selection: its state counts
-                h.update(selected=mk.selected_id, state=mk.target_state)
-        self.loop.call_soon_threadsafe(self.hub.publish, h, bytes(img.data))
+                b.update(selected=mk.selected_id, state=mk.target_state)
+        self.loop.call_soon_threadsafe(self.hub.publish_boxes, b)
 
     # ---------------- commands (loop thread; rclpy publish is thread-safe) ----------------
     def set_follow(self, on, why, page=None):
@@ -305,6 +324,8 @@ class PageSocket(tornado.websocket.WebSocketHandler):
             f"UI connected: {self.request.remote_ip} ({len(self.hub.clients)} page(s), "
             f"send buffer {self.sndbuf // 1024} KiB, video {'LITE' if self.lite else 'full'})")
         self.sender = asyncio.ensure_future(self.send_frames())
+        if self.hub.boxes is not None:
+            self.reply_raw(self.hub.boxes)         # selection + geometry before the first frame
         if self.hub.frame is not None:
             self.wake.set()
 
@@ -351,8 +372,11 @@ class PageSocket(tornado.websocket.WebSocketHandler):
             self.reply(reply)
 
     def reply(self, obj):
+        self.reply_raw(json.dumps(obj))
+
+    def reply_raw(self, text):
         try:
-            self.write_message(json.dumps(obj))
+            self.write_message(text)
         except tornado.websocket.WebSocketClosedError:
             pass
 

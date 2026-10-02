@@ -249,6 +249,7 @@ def generate_launch_description():
         condition=IfCondition(use_ui),
         parameters=[{
             "port": ParameterValue(ui_port, value_type=int),
+            "image_rotation_deg": image_rotation,
             "allow_follow": ParameterValue(is_tracker, value_type=bool),
             "use_sim_time": use_sim_time,
         }],

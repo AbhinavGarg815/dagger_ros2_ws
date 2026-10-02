@@ -5,58 +5,87 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>Dagger follow</title>
 <style>
-  :root { --bg:#111; --fg:#eee; --muted:#999; --ok:#2e7d32; --warn:#f9a825; --bad:#c62828; }
-  * { box-sizing: border-box; }
-  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg);
-               font:14px/1.3 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  /* No flex `gap`, `inset` or `aspect-ratio`: the SIYI MK32's browser predates them
+     (2026-10-02: the status items ran together). Spacing is done with margins. */
+  :root { --bg:#0e0e0e; --panel:#181818; --fg:#eee; --muted:#9a9a9a;
+          --ok:#2e7d32; --go:#00c853; --warn:#ffab00; --bad:#d50000; --grey:#455a64; }
+  * { box-sizing:border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg); overflow:hidden;
+               font:14px/1.3 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
   #wrap { display:flex; flex-direction:column; height:100%; }
-  #bar { display:flex; flex-wrap:wrap; gap:6px 14px; align-items:center; padding:6px 10px; background:#1b1b1b; }
-  #bar .k { color:var(--muted); }
-  #conn.ok { color:#69f0ae; } #conn.bad { color:#ff5252; }
   #main { flex:1; min-height:0; display:flex; flex-direction:column; }
-  #stage { position:relative; flex:1; min-height:0; min-width:0; display:flex; align-items:center; justify-content:center; }
-  canvas { max-width:100%; max-height:100%; cursor:crosshair; background:#000; touch-action:none; }
-  #banner { position:absolute; top:10px; left:50%; transform:translateX(-50%); padding:6px 14px; border-radius:6px;
-            font-weight:700; display:none; }
-  #controls { display:flex; gap:10px; padding:8px 10px; background:#1b1b1b; }
-  button { font:inherit; font-weight:700; border:0; border-radius:8px; padding:14px 18px; color:#fff; cursor:pointer; }
-  button:disabled { opacity:.35; cursor:not-allowed; }
-  #follow { background:var(--ok); } #stop { background:var(--bad); flex:1; font-size:20px; } #clear { background:#555; }
-  #lite, #full { background:#37474f; } #lite.on { background:#0277bd; }
-  #msg { position:absolute; left:8px; bottom:8px; max-width:75%; color:var(--warn); background:rgba(0,0,0,.7);
-         border-radius:6px; padding:4px 8px; }
+  #stage { position:relative; flex:1; min-height:0; min-width:0; display:flex; align-items:center;
+           justify-content:center; background:#000; }
+  canvas { display:block; max-width:100%; max-height:100%; cursor:crosshair; touch-action:none; }
+
+  /* overlays on the video */
+  #hud { position:absolute; left:0; right:0; top:0; display:flex; flex-wrap:wrap; align-items:center;
+         padding:4px 8px; background:linear-gradient(rgba(0,0,0,.75), rgba(0,0,0,0)); pointer-events:none; }
+  #hud > span { margin-right:14px; white-space:nowrap; }
+  #hud .k { color:var(--muted); }
+  #dot { display:inline-block; width:10px; height:10px; border-radius:50%; background:var(--bad);
+         margin-right:6px; vertical-align:middle; }
+  #banner { position:absolute; top:34px; left:50%; transform:translateX(-50%); padding:6px 14px;
+            border-radius:6px; font-weight:700; display:none; text-align:center; max-width:90%; }
+  #msg { position:absolute; left:8px; bottom:8px; max-width:75%; color:var(--warn);
+         background:rgba(0,0,0,.72); border-radius:6px; padding:4px 8px; }
   #msg:empty { display:none; }
-  /* HANDSET (touch screen, e.g. the SIYI MK32): video fills the screen, big buttons
-     in a column on the right, no page zoom or scroll, no keyboard hints */
-  body.handset { font-size:16px; -webkit-user-select:none; user-select:none; -webkit-tap-highlight-color:transparent;
-                 overscroll-behavior:none; touch-action:none; }
-  body.handset #bar { padding:4px 10px; gap:4px 12px; }
+
+  /* the controls panel */
+  #panel { display:flex; align-items:stretch; background:var(--panel); padding:6px; }
+  #state { display:flex; flex-direction:column; justify-content:center; padding:6px 12px; margin:0 6px 0 0;
+           border-radius:8px; background:var(--grey); font-weight:700; min-width:150px; }
+  #state small { font-weight:400; opacity:.85; }
+  button { font:inherit; font-weight:700; border:0; border-radius:8px; padding:14px 18px; margin:0 6px 0 0;
+           color:#fff; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+  button:active { filter:brightness(1.3); }
+  button:disabled { opacity:.3; cursor:not-allowed; filter:none; }
+  #stop { background:var(--bad); flex:1; font-size:22px; letter-spacing:1px; }
+  #follow { background:var(--ok); } #clear { background:#616161; }
+  #lite, #full { background:#37474f; } #lite.on { background:#0277bd; }
+  #small { display:flex; }
+  .key { opacity:.7; font-weight:400; }
+
+  /* HANDSET (touch screen, e.g. the SIYI MK32): video at full height on the left,
+     a column of big controls on the right, no zoom / scroll / text selection. */
+  body.handset { font-size:15px; -webkit-user-select:none; user-select:none; touch-action:none; }
   body.handset #main { flex-direction:row; }
-  body.handset #controls { flex-direction:column; width:150px; padding:8px; }
-  body.handset #controls button { flex:1; padding:6px; font-size:20px; }
-  body.handset #stop { flex:2.2; font-size:28px; }
+  body.handset #panel { flex-direction:column; width:24%; min-width:150px; max-width:260px; padding:8px; }
+  body.handset #state { margin:0 0 8px 0; min-width:0; min-height:64px; font-size:19px; text-align:center; }
+  body.handset button { margin:0 0 8px 0; padding:6px; font-size:21px; }
+  body.handset #stop { flex:2.4; font-size:30px; }
+  body.handset #follow, body.handset #clear { flex:1.1; }
+  body.handset #small { flex:0.8; margin:0; }
+  body.handset #small button { flex:1; margin:0 4px 0 0; font-size:17px; }
+  body.handset #small button:last-child { margin-right:0; }
   body.handset .key { display:none; }
 </style>
 </head>
 <body>
 <div id="wrap">
-  <div id="bar">
-    <span id="conn" class="bad">connecting…</span>
-    <span><span class="k">age</span> <b id="age">–</b></span>
-    <span><span class="k">fps</span> <b id="fps">–</b></span>
-    <span><span class="k">rtt</span> <b id="rtt">–</b></span>
-    <span><span class="k">people</span> <b id="npeople">–</b></span>
-    <span><span class="k">target</span> <b id="target">none</b></span>
-    <span><span class="k">follow</span> <b id="followst">–</b></span>
-  </div>
   <div id="main">
-    <div id="stage"><canvas id="cv" width="640" height="480"></canvas><div id="banner"></div><div id="msg"></div></div>
-    <div id="controls">
+    <div id="stage">
+      <canvas id="cv" width="640" height="480"></canvas>
+      <div id="hud">
+        <span><span id="dot"></span><b id="conn">connecting…</b></span>
+        <span><span class="k">age</span> <b id="age">–</b></span>
+        <span><span class="k">fps</span> <b id="fps">–</b></span>
+        <span><span class="k">rtt</span> <b id="rtt">–</b></span>
+        <span><b id="npeople">–</b></span>
+        <span><span class="k">target</span> <b id="target">none</b></span>
+      </div>
+      <div id="banner"></div>
+      <div id="msg"></div>
+    </div>
+    <div id="panel">
+      <div id="state">OFF<small>select a target</small></div>
       <button id="stop">STOP<span class="key"> (space)</span></button>
       <button id="follow" disabled>FOLLOW</button>
       <button id="clear">CLEAR<span class="key"> (esc)</span></button>
-      <button id="lite" title="half-size video for a slow link">LITE</button>
-      <button id="full" title="full screen">FULL</button>
+      <div id="small">
+        <button id="lite" title="half-size video for a slow, long-range link">LITE</button>
+        <button id="full" title="full screen">FULL</button>
+      </div>
     </div>
   </div>
 </div>
@@ -65,23 +94,30 @@
 const cv = document.getElementById("cv"), ctx = cv.getContext("2d");
 const $ = id => document.getElementById(id);
 let ws = null, backoff = 500;
-let last = null;              // {hdr, bmp}: what is on screen now (clicks resolve against it)
+// VIDEO FIRST: a frame arrives before its boxes (a separate "boxes" message,
+// ~50 ms later). `shown` = what is on screen: the frame and the boxes drawn on it;
+// taps resolve against exactly that.
+let shown = null;                 // {hdr, bmp, boxes}
+const boxesBy = {};               // frame stamp -> its boxes message (the last few)
+let latest = null;                // the newest boxes message: selection + state
 let decoding = false, pending = null;
 let offset = null, bestRtt = Infinity, rtts = [];
 let drawn = 0, fpsT0 = performance.now();
-let following = false;
+let following = false, frameHdr = null;
 let prevState = "", reidUntil = 0;
 
 function setMsg(t) { $("msg").textContent = t || ""; }
+function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
 
-// Handset layout: a touch screen (the SIYI MK32), or forced with ?handset=1 / ?handset=0.
+// Handset layout on a touch screen (the SIYI MK32), or forced with ?handset=1 / ?handset=0.
+// pointer:coarse alone was not enough: the MK32's browser does not report it.
 const qs = new URLSearchParams(location.search);
-const handset = qs.has("handset") ? qs.get("handset") !== "0"
-              : !!(window.matchMedia && matchMedia("(pointer: coarse)").matches);
+const touch = ("ontouchstart" in window) || (navigator.maxTouchPoints > 0)
+              || !!(window.matchMedia && matchMedia("(any-pointer: coarse)").matches);
+const handset = qs.has("handset") ? qs.get("handset") !== "0" : touch;
 if (handset) document.body.classList.add("handset");
 function store(k, v) { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { return null; } }
 let lite = qs.has("video") ? qs.get("video") === "lite" : store("video") === "lite";
-function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
 
 // ---------- geometry: native camera pixels <-> upright canvas ----------
 // Own 2D affine instead of DOMMatrix / DOMPoint, which older Android WebViews
@@ -126,9 +162,36 @@ function quadArea(q) {
   for (let i = 0; i < 4; i++) { const p = q[i], n = q[(i + 1) % 4]; a += p.x * n.y - n.x * p.y; }
   return Math.abs(a) / 2;
 }
-function drawMarkers(hdr, m) {
-  for (const k of hdr.markers || []) {
-    const sel = k.id === hdr.selected;
+
+// ---------- drawing ----------
+function label(m, xs, ys, text, bg) {      // upright, above the shape as seen on screen
+  const c = xs.map((x, i) => m.apply(pt(x, ys[i])));
+  const lx = Math.min.apply(null, c.map(p => p.x)), ly = Math.min.apply(null, c.map(p => p.y));
+  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.setLineDash([]);
+  ctx.font = "bold 18px sans-serif"; const tw = ctx.measureText(text).width;
+  ctx.fillStyle = bg; ctx.fillRect(lx, Math.max(0, ly - 24), tw + 10, 24);
+  ctx.fillStyle = "#fff"; ctx.fillText(text, lx + 5, Math.max(18, ly - 6));
+}
+function render() {
+  if (!shown) return;
+  const hdr = shown.hdr, b = shown.boxes, m = viewMatrix(hdr);
+  // into NATIVE pixel size: a LITE frame is half that, the boxes are in native pixels
+  setT(m); ctx.drawImage(shown.bmp, 0, 0, hdr.w || 640, hdr.h || 480);
+  if (!b) { ctx.setTransform(1, 0, 0, 1, 0, 0); return; }
+  for (const t of b.tracks || []) {
+    const x1 = t.box[0], y1 = t.box[1], x2 = t.box[2], y2 = t.box[3], sel = t.id === b.selected;
+    const ok = t.ranged !== false;           // LiDAR-ranged at least once = selectable
+    setT(m);
+    ctx.lineWidth = sel ? 5 : 2.5;
+    ctx.strokeStyle = sel ? "#ff1744" : ok ? "#00e676" : "#9e9e9e";
+    ctx.setLineDash(t.visible && ok ? [] : [8, 6]);
+    ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+    label(m, [x1, x2, x1, x2], [y1, y1, y2, y2],
+          "#" + t.id + (t.range != null ? "  " + t.range.toFixed(1) + " m" : ok ? "" : "  no LiDAR"),
+          sel ? "#ff1744" : "rgba(0,0,0,.65)");
+  }
+  for (const k of b.markers || []) {
+    const sel = k.id === b.selected;
     if (!k.visible && !sel) continue;       // an old outline would only mislead
     const q = quad(k);
     setT(m);
@@ -138,81 +201,60 @@ function drawMarkers(hdr, m) {
     ctx.beginPath(); ctx.moveTo(q[0].x, q[0].y);
     for (let i = 1; i < 4; i++) ctx.lineTo(q[i].x, q[i].y);
     ctx.closePath(); ctx.stroke();
-    const c = q.map(p => m.apply(p));
-    const lx = Math.min(...c.map(p => p.x)), ly = Math.min(...c.map(p => p.y));
-    ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.setLineDash([]);
-    const label = "M" + k.mid + (k.range != null ? "  " + k.range.toFixed(1) + " m" : "  no range")
-                + (k.ok ? "" : " ?");
-    ctx.font = "bold 18px system-ui"; const tw = ctx.measureText(label).width;
-    ctx.fillStyle = sel ? "#ff1744" : "rgba(0,60,70,.8)"; ctx.fillRect(lx, Math.max(0, ly - 24), tw + 10, 24);
-    ctx.fillStyle = "#fff"; ctx.fillText(label, lx + 5, Math.max(18, ly - 6));
+    label(m, q.map(p => p.x), q.map(p => p.y),
+          "M" + k.mid + (k.range != null ? "  " + k.range.toFixed(1) + " m" : "  no range") + (k.ok ? "" : " ?"),
+          sel ? "#ff1744" : "rgba(0,60,70,.8)");
   }
-}
-
-// ---------- drawing ----------
-function draw(hdr, bmp) {
-  const m = viewMatrix(hdr);
-  // into NATIVE pixel size: a LITE frame is half that, the boxes are in native pixels
-  setT(m); ctx.drawImage(bmp, 0, 0, hdr.w || 640, hdr.h || 480);
-  const tracks = hdr.tracks || [];
-  for (const t of tracks) {
-    const [x1, y1, x2, y2] = t.box, sel = t.id === hdr.selected;
-    const ok = t.ranged !== false;           // LiDAR-ranged at least once = selectable
-    setT(m);
-    ctx.lineWidth = sel ? 5 : 2.5;
-    ctx.strokeStyle = sel ? "#ff1744" : ok ? "#00e676" : "#9e9e9e";
-    ctx.setLineDash(t.visible && ok ? [] : [8, 6]);
-    ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
-    // label upright, at the top-left corner of the box as seen on screen
-    const c = [pt(x1, y1), pt(x2, y1), pt(x1, y2), pt(x2, y2)].map(p => m.apply(p));
-    const lx = Math.min(...c.map(p => p.x)), ly = Math.min(...c.map(p => p.y));
-    ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.setLineDash([]);
-    const label = "#" + t.id + (t.range != null ? "  " + t.range.toFixed(1) + " m"
-                                                : ok ? "" : "  no LiDAR");
-    ctx.font = "bold 18px system-ui"; const tw = ctx.measureText(label).width;
-    ctx.fillStyle = sel ? "#ff1744" : "rgba(0,0,0,.65)"; ctx.fillRect(lx, Math.max(0, ly - 24), tw + 10, 24);
-    ctx.fillStyle = "#fff"; ctx.fillText(label, lx + 5, Math.max(18, ly - 6));
-  }
-  drawMarkers(hdr, m);
   ctx.setTransform(1, 0, 0, 1, 0, 0);
 }
 
-function status(hdr) {
-  const nm = (hdr.markers || []).filter(k => k.visible).length;
-  $("npeople").textContent = (hdr.tracks ? hdr.tracks.length : "no tracker")
-                           + (hdr.markers ? " + " + nm + " marker" + (nm === 1 ? "" : "s") : "");
-  const st = hdr.state || "NONE";
-  let tgt = st === "NONE" ? "none" : tname(hdr.selected) + " " + st;
-  if (hdr.range != null && st !== "NONE") tgt += " " + hdr.range.toFixed(1) + " m";
-  if (hdr.source) tgt += " (" + hdr.source + ")";
-  $("target").textContent = tgt;
-  const fs = hdr.follow_state || (hdr.follow === true ? "enabled" : "off");
-  $("followst").textContent = fs;
-  $("followst").style.color = fs === "following" ? "#69f0ae" : fs === "searching" ? "#ffd740"
-                            : fs.startsWith("disabled: target") ? "#ff5252" : "";
-  following = fs === "following" || fs === "searching" || fs === "no target";
-  $("follow").disabled = !(hdr.allow_follow && hdr.selected >= 0 && st === "TRACKING" && !following);
+function banner(text, bg) {
   const b = $("banner");
+  if (!text) { b.style.display = "none"; return; }
+  b.style.display = "block"; b.style.background = bg; b.textContent = text;
+}
+function status() {
+  const b = latest || { selected: -1, state: "NONE" }, h = frameHdr || {};
+  const np = b.tracks ? b.tracks.length : null, nm = (b.markers || []).filter(k => k.visible).length;
+  $("npeople").textContent = (np === null ? "no tracker" : np + " " + (np === 1 ? "person" : "people"))
+                           + (b.markers ? " · " + nm + " marker" + (nm === 1 ? "" : "s") : "");
+  const st = b.state || "NONE";
+  let tgt = st === "NONE" ? "none" : tname(b.selected) + " " + st;
+  if (h.range != null && st !== "NONE") tgt += " " + h.range.toFixed(1) + " m";
+  $("target").textContent = tgt;
+  // the big state indicator
+  const fs = h.follow_state || (h.follow === true ? "enabled" : "off");
+  following = fs === "following" || fs === "searching" || fs === "no target";
+  let big = "OFF", small = st === "NONE" ? "select a target" : tname(b.selected) + " selected", bg = "var(--grey)";
+  if (fs === "following") { big = "FOLLOWING"; small = tname(b.selected); bg = "var(--go)"; }
+  else if (fs === "searching") { big = "SEARCHING"; small = tname(b.selected); bg = "var(--warn)"; }
+  else if (fs === "no target") { big = "WAITING"; small = "no target"; bg = "var(--warn)"; }
+  else if (fs.indexOf("disabled: target") === 0 || fs.indexOf("disabled: DEAD") === 0) { big = "STOPPED"; small = fs.slice(10); bg = "#b71c1c"; }
+  else if (fs === "estop") { big = "E-STOP"; small = ""; bg = "#b71c1c"; }
+  const s = $("state");
+  s.style.background = bg;
+  s.textContent = big;
+  const sm = document.createElement("small"); sm.textContent = small; s.appendChild(sm);
+  $("follow").disabled = !(h.allow_follow && b.selected >= 0 && st === "TRACKING" && !following);
   if (prevState === "SEARCHING" && st === "TRACKING") reidUntil = performance.now() + 2500;
   prevState = st;
-  if (performance.now() < reidUntil) { b.style.display = "block"; b.style.background = "#2e7d32";
-                       b.textContent = (isMarker(hdr.selected) ? "SEEN AGAIN: " : "RE-IDENTIFIED ") + tname(hdr.selected); }
-  else if (st === "SEARCHING") { b.style.display = "block"; b.style.background = "#ef6c00";
-                       b.textContent = tname(hdr.selected) + " lost — searching (resumes if "
-                                     + (isMarker(hdr.selected) ? "seen again" : "re-identified") + " within 30 s)"; }
-  else if (st === "LOST") { b.style.display = "block"; b.style.background = "#c62828";
-                       b.textContent = "TARGET " + tname(hdr.selected) + " LOST — click to reselect"; }
-  else if (st === "HOLD_LIDAR") { b.style.display = "block"; b.style.background = "#f9a825";
-                       b.textContent = "#" + hdr.selected + " out of camera view — held on LiDAR"; }
-  else b.style.display = "none";
+  if (performance.now() < reidUntil)
+    banner((isMarker(b.selected) ? "SEEN AGAIN: " : "RE-IDENTIFIED ") + tname(b.selected), "#2e7d32");
+  else if (st === "SEARCHING")
+    banner(tname(b.selected) + " lost — searching (resumes if " + (isMarker(b.selected) ? "seen again" : "re-identified") + " within 30 s)", "#ef6c00");
+  else if (st === "LOST") banner("TARGET " + tname(b.selected) + " LOST — tap to reselect", "#c62828");
+  else if (st === "HOLD_LIDAR") banner("#" + b.selected + " out of camera view — held on LiDAR", "#f9a825");
+  else banner(null);
+}
+function meter(id, v, warn, bad, txt) {
+  const e = $(id); e.textContent = txt; e.style.color = v > bad ? "#ff5252" : v > warn ? "#ffd740" : "#69f0ae";
 }
 
 // ---------- frames: decode newest only ----------
 function onFrame(buf) {
   const dv = new DataView(buf), n = dv.getUint32(0);
   const hdr = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, n)));
-  const blob = new Blob([new Uint8Array(buf, 4 + n)], { type: "image/jpeg" });
-  pending = { hdr, blob };
+  pending = { hdr: hdr, blob: new Blob([new Uint8Array(buf, 4 + n)], { type: "image/jpeg" }) };
   if (!decoding) decodeNext();
 }
 function decodeJpeg(blob) {                 // createImageBitmap where there is one, else an <img>
@@ -226,41 +268,49 @@ function decodeJpeg(blob) {                 // createImageBitmap where there is 
 }
 async function decodeNext() {
   if (!pending) return;
-  const { hdr, blob } = pending; pending = null; decoding = true;
+  const p = pending; pending = null; decoding = true;
   try {
-    const bmp = await decodeJpeg(blob);
-    if (last && last.bmp && last.bmp.close) last.bmp.close();
-    last = { hdr, bmp };
-    draw(hdr, bmp); status(hdr); drawn++;
-    $("lite").classList.toggle("on", hdr.video === "lite");
+    const bmp = await decodeJpeg(p.blob);
+    if (shown && shown.bmp && shown.bmp.close) shown.bmp.close();
+    // its own boxes if they came first, else the previous frame's until they do
+    shown = { hdr: p.hdr, bmp: bmp, boxes: boxesBy[p.hdr.stamp] || (shown ? shown.boxes : latest) };
+    frameHdr = p.hdr;
+    render(); status(); drawn++;
+    $("lite").className = p.hdr.video === "lite" ? "on" : "";
     if (offset !== null) {
-      const age = Date.now() / 1000 + offset - hdr.stamp;
-      $("age").textContent = Math.round(age * 1000) + " ms";
-      $("age").style.color = age > 0.35 ? "#ff5252" : age > 0.2 ? "#ffd740" : "#69f0ae";
+      const age = Date.now() / 1000 + offset - p.hdr.stamp;
+      meter("age", age, 0.2, 0.35, Math.round(age * 1000) + " ms");
+      $("dot").style.background = age > 0.35 ? "#ff5252" : age > 0.2 ? "#ffd740" : "#69f0ae";
     }
   } catch (e) { setMsg("decode error: " + e); }
   decoding = false;
   if (pending) decodeNext();
 }
+function onBoxes(b) {
+  boxesBy[b.stamp] = b;
+  const keys = Object.keys(boxesBy);
+  if (keys.length > 8) keys.sort((x, y) => x - y).slice(0, keys.length - 8).forEach(k => delete boxesBy[k]);
+  if (!latest || b.stamp >= latest.stamp) latest = b;
+  if (shown && b.stamp === shown.hdr.stamp) { shown.boxes = b; render(); }
+  status();
+}
 
 // ---------- input ----------
 cv.addEventListener("click", ev => {
-  if (!last || !(last.hdr.tracks || last.hdr.markers)) return;
-  const m = viewMatrix(last.hdr), p = m.inverse().apply(canvasPoint(ev));   // -> native pixels
-  let best = null;                          // the SMALLEST shape under the click wins
-  for (const k of last.hdr.markers || []) {
+  const b = shown && shown.boxes;
+  if (!b || !(b.tracks || b.markers)) return;
+  const p = viewMatrix(shown.hdr).inverse().apply(canvasPoint(ev));   // -> native pixels
+  let best = null;                          // the SMALLEST shape under the tap wins
+  for (const k of b.markers || []) {
     if (!k.visible) continue;
     const q = quad(k);
-    if (inQuad(p, q)) {
-      const a = quadArea(q);
-      if (!best || a < best.a) best = { id: k.id, a, ok: k.ok };
-    }
+    if (inQuad(p, q)) { const a = quadArea(q); if (!best || a < best.a) best = { id: k.id, a: a, ok: k.ok }; }
   }
-  for (const t of last.hdr.tracks || []) {
-    const [x1, y1, x2, y2] = t.box;
+  for (const t of b.tracks || []) {
+    const x1 = t.box[0], y1 = t.box[1], x2 = t.box[2], y2 = t.box[3];
     if (p.x >= x1 && p.x <= x2 && p.y >= y1 && p.y <= y2) {
       const a = (x2 - x1) * (y2 - y1);
-      if (!best || a < best.a) best = { id: t.id, a, ok: t.ranged !== false };
+      if (!best || a < best.a) best = { id: t.id, a: a, ok: t.ranged !== false };
     }
   }
   if (!best) {
@@ -271,27 +321,27 @@ cv.addEventListener("click", ev => {
       const dx = Math.max(x1 - p.x, 0, p.x - x2), dy = Math.max(y1 - p.y, 0, p.y - y2), d = Math.hypot(dx, dy);
       if (d <= tol && (!near || d < near.d)) near = { id: id, ok: ok, d: d };
     };
-    for (const k of last.hdr.markers || []) {
+    for (const k of b.markers || []) {
       if (!k.visible) continue;
       const xs = quad(k).map(q => q.x), ys = quad(k).map(q => q.y);
       consider(k.id, k.ok, Math.min.apply(null, xs), Math.min.apply(null, ys), Math.max.apply(null, xs), Math.max.apply(null, ys));
     }
-    for (const t of last.hdr.tracks || []) consider(t.id, t.ranged !== false, t.box[0], t.box[1], t.box[2], t.box[3]);
+    for (const t of b.tracks || []) consider(t.id, t.ranged !== false, t.box[0], t.box[1], t.box[2], t.box[3]);
     if (near) best = near;
   }
   if (best && !best.ok) {
     setMsg(isMarker(best.id)
-      ? tname(best.id) + " is not selectable yet: not confirmed, or no range (marker size not set and no LiDAR return)"
-      : "#" + best.id + " is not selectable: the LiDAR has not ranged it (not confirmed as a person)");
+      ? tname(best.id) + " is not selectable yet: not confirmed, or no range"
+      : "#" + best.id + " is not selectable: the LiDAR has not ranged it");
     return;
   }
   if (best) {
     send({ type: "select", id: best.id });
-    setMsg(following && best.id !== last.hdr.selected
+    setMsg(following && best.id !== b.selected
       ? "selected " + tname(best.id) + " — following STOPS (different target); press FOLLOW to follow it"
       : "selected " + tname(best.id));
   }
-  else setMsg("no person or marker under the click");
+  else setMsg("no person or marker there");
 });
 $("follow").onclick = () => send({ type: "follow" });
 $("stop").onclick = () => { send({ type: "stop" }); setMsg("STOP sent"); };
@@ -323,32 +373,32 @@ function connect() {
   ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws"
                      + (lite ? "?video=lite" : ""));
   ws.binaryType = "arraybuffer";
-  ws.onopen = () => { $("conn").textContent = "connected"; $("conn").className = "ok"; backoff = 500; setMsg(""); };
+  ws.onopen = () => { $("conn").textContent = "link"; $("dot").style.background = "#69f0ae"; backoff = 500; setMsg(""); };
   ws.onclose = () => {
-    $("conn").textContent = "DISCONNECTED — retrying"; $("conn").className = "bad";
-    const b = $("banner"); b.style.display = "block"; b.style.background = "#c62828"; b.textContent = "NO LINK TO ROVER";
+    $("conn").textContent = "NO LINK — retrying"; $("dot").style.background = "#ff5252";
+    banner("NO LINK TO ROVER", "#c62828");
     setTimeout(connect, backoff); backoff = Math.min(backoff * 2, 4000);
   };
   ws.onmessage = ev => {
     if (typeof ev.data !== "string") { onFrame(ev.data); return; }
     const m = JSON.parse(ev.data);
-    if (m.type === "pong") {
+    if (m.type === "boxes") onBoxes(m);
+    else if (m.type === "pong") {
       const now = Date.now() / 1000, rtt = now - m.t;
       rtts.push(rtt); if (rtts.length > 20) rtts.shift();
       if (rtt <= bestRtt * 1.5 || offset === null) {          // trust the fastest round trips
         bestRtt = Math.min(bestRtt, rtt); offset = m.server - (m.t + rtt / 2);
       }
-      $("rtt").textContent = Math.round(1000 * rtts.reduce((a, b) => a + b, 0) / rtts.length) + " ms";
+      const avg = rtts.reduce((a, b) => a + b, 0) / rtts.length;
+      meter("rtt", avg, 0.05, 0.15, Math.round(1000 * avg) + " ms");
     } else if (m.type === "error") setMsg(m.msg);
   };
 }
 setInterval(() => send({ type: "hb", t: Date.now() / 1000 }), 250);
 setInterval(() => {
-  const now = performance.now();
-  $("fps").textContent = (drawn * 1000 / (now - fpsT0)).toFixed(1); drawn = 0; fpsT0 = now;
-  if (last && offset !== null && Date.now() / 1000 + offset - last.hdr.stamp > 1.0) {
-    const b = $("banner"); b.style.display = "block"; b.style.background = "#f9a825"; b.textContent = "STALE VIDEO";
-  }
+  const now = performance.now(), fps = drawn * 1000 / (now - fpsT0);
+  meter("fps", 10 - fps, 2, 5, fps.toFixed(1)); drawn = 0; fpsT0 = now;
+  if (shown && offset !== null && Date.now() / 1000 + offset - shown.hdr.stamp > 1.0) banner("STALE VIDEO", "#f9a825");
 }, 1000);
 connect();
 </script>

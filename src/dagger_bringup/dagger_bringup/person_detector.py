@@ -123,6 +123,8 @@ class PersonDetector(Node):
 
         from cv_bridge import CvBridge
         self.bridge = CvBridge()
+        from concurrent.futures import ThreadPoolExecutor
+        self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="side")
 
         # Depth 1 + best effort: we want the newest frame, never a queue. A
         # backlog here would feed the controller a stale bearing, which is worse
@@ -162,29 +164,18 @@ class PersonDetector(Node):
 
         # The driver streams rgb8; YOLOX was calibrated on cv2's BGR ordering.
         frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+        # VIDEO FIRST: the operator's JPEG and the ArUco markers, in a worker
+        # thread WHILE YOLOX runs (cv2 releases the GIL; measured 40.6 -> 28.2 ms
+        # for both together, 2026-10-02). The JPEG used to wait for YOLOX + markers:
+        # 99 ms from capture to publish, of which 55 ms was detection it does not
+        # need -- the page now gets the frame first and its boxes when they exist.
+        side = self.pool.submit(self.side_work, frame, msg.header)
         t0 = time.perf_counter()
         upright = self.rotate(frame)
         dets_up = self.detector.detect(upright) if self.detector is not None else []
         dets = [self.unrotate(d, frame.shape[1], frame.shape[0]) for d in dets_up]
         self.infer_ms.append((time.perf_counter() - t0) * 1e3)
         self.n_frames += 1
-
-        if self.marker_detect is not None:
-            import cv2
-            t1 = time.perf_counter()
-            mk = MarkerDetections()
-            mk.header = msg.header
-            mk.image_width, mk.image_height = frame.shape[1], frame.shape[0]
-            mk.dictionary = self.marker_dict
-            try:
-                for mid, corners in self.marker_detect(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)):
-                    m = MarkerDetection()
-                    m.marker_id, m.corners = mid, corners
-                    mk.markers.append(m)
-            except Exception as e:     # never let a marker problem stop person detection
-                self.get_logger().error(f"marker detection failed: {e}", throttle_duration_sec=5.0)
-            self.mk_pub.publish(mk)        # every frame, also empty: marker_tracker's clock
-            self.marker_ms.append((time.perf_counter() - t1) * 1e3)
 
         # appearance signatures: crops from the upright frame (the network was
         # trained on upright people), in the same order as dets
@@ -228,18 +219,7 @@ class PersonDetector(Node):
             d.results.append(h)
             out.detections.append(d)
         self.pub.publish(out)
-
-        if self.ui_pub.get_subscription_count() > 0:
-            import cv2
-            ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, self.ui_quality])
-            if ok:
-                ui = CompressedImage()
-                ui.header = msg.header
-                ui.format = "jpeg"
-                # array('B'), NOT bytes: rclpy validates a bytes value element by
-                # element in Python -- 32 ms for a 166 KB JPEG vs 0.11 ms (measured)
-                ui.data = array.array("B", jpg.tobytes())
-                self.ui_pub.publish(ui)
+        side.result()                      # done long before YOLOX; and never draw on `frame` before it is
 
         if self.debug_pub is not None:
             import cv2
@@ -250,6 +230,40 @@ class PersonDetector(Node):
             dbg = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
             dbg.header = msg.header
             self.debug_pub.publish(dbg)
+
+    def side_work(self, frame, header):
+        """Worker thread, concurrent with YOLOX: the UI JPEG first, then markers.
+        Reads `frame` only. Never raises: a failure here must not stop detection."""
+        import cv2
+        try:
+            if self.ui_pub.get_subscription_count() > 0:
+                ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, self.ui_quality])
+                if ok:
+                    ui = CompressedImage()
+                    ui.header = header
+                    ui.format = "jpeg"
+                    # array('B'), NOT bytes: rclpy validates a bytes value element by
+                    # element in Python -- 32 ms for a 166 KB JPEG vs 0.11 ms (measured)
+                    ui.data = array.array("B", jpg.tobytes())
+                    self.ui_pub.publish(ui)
+        except Exception as e:
+            self.get_logger().error(f"UI image failed: {e}", throttle_duration_sec=5.0)
+        if self.marker_detect is None:
+            return
+        t1 = time.perf_counter()
+        mk = MarkerDetections()
+        mk.header = header
+        mk.image_width, mk.image_height = frame.shape[1], frame.shape[0]
+        mk.dictionary = self.marker_dict
+        try:
+            for mid, corners in self.marker_detect(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)):
+                m = MarkerDetection()
+                m.marker_id, m.corners = mid, corners
+                mk.markers.append(m)
+        except Exception as e:             # never let a marker problem stop person detection
+            self.get_logger().error(f"marker detection failed: {e}", throttle_duration_sec=5.0)
+        self.mk_pub.publish(mk)            # every frame, also empty: marker_tracker's clock
+        self.marker_ms.append((time.perf_counter() - t1) * 1e3)
 
     def rotate(self, frame):
         if self.rot_deg == 0:
@@ -297,6 +311,7 @@ def main(args=None):
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
+    node.pool.shutdown(wait=True)
     if node.detector is not None:
         node.detector.close()
     node.destroy_node()

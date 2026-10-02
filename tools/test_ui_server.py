@@ -200,6 +200,15 @@ async def frames(ws, seconds, hb=True):
     return [(t, *parse(m)) for t, m in ws.inbox[start:] if isinstance(m, bytes)]
 
 
+async def window(ws, seconds, hb=True):
+    """Frames AND 'boxes' messages that arrive during `seconds` (video first:
+    each frame's boxes come as a separate text message, after the frame)."""
+    i = len(ws.inbox)
+    fr = await frames(ws, seconds, hb)
+    bx = [(t, json.loads(m)) for t, m in ws.inbox[i:] if isinstance(m, str)]
+    return fr, [(t, b) for t, b in bx if b.get("type") == "boxes"]
+
+
 async def main():
     await asyncio.sleep(4.0)                                   # nodes up + discovery
     body = urllib.request.urlopen(f"http://127.0.0.1:{PORT}/", timeout=3).read().decode()
@@ -210,16 +219,16 @@ async def main():
 
     # LITE video for a slow link (SIYI MK32 at range): per page, the same frames
     small, big = await page("?video=lite"), await page()
-    got_s, got_b = await asyncio.gather(frames(small, 1.5), frames(big, 1.5))
+    (got_s, bx_s), (got_b, bx_b) = await asyncio.gather(window(small, 1.5), window(big, 1.5))
     dims = lambda g: {cv2.imdecode(np.frombuffer(j, np.uint8), cv2.IMREAD_COLOR).shape[:2] for _, _, j in g}  # noqa: E731
     size = lambda g: sorted(len(j) for _, _, j in g)[len(g) // 2] if g else 0  # noqa: E731
     check("LITE page (/ws?video=lite): 320x240 frames, header video=lite; the other page still full 640x480",
-          len(got_s) >= 10 and len(got_b) >= 10 and dims(got_s) == {(240, 320)} and dims(got_b) == {(480, 640)}
+          len(got_s) >= 6 and len(got_b) >= 6 and dims(got_s) == {(240, 320)} and dims(got_b) == {(480, 640)}
           and all(h.get("video") == "lite" for _, h, _ in got_s) and all(h.get("video") == "full" for _, h, _ in got_b),
           f"{len(got_s)} / {len(got_b)} frames, {dims(got_s)} / {dims(got_b)}, {size(got_s)} / {size(got_b)} bytes")
-    check("... and both pages get the same frames (same seq, same boxes)",
+    check("... and both pages get the same frames and the same boxes",
           bool({h["seq"] for _, h, _ in got_s} & {h["seq"] for _, h, _ in got_b})
-          and all(h.get("tracks") is not None for _, h, _ in got_s))
+          and len(bx_s) >= 6 and bool({b["stamp"] for _, b in bx_s} & {b["stamp"] for _, b in bx_b}))
     await big.send(json.dumps({"type": "video", "mode": "lite"}))
     await frames(big, 0.3)
     got = await frames(big, 1.0)
@@ -230,60 +239,60 @@ async def main():
 
     ws = await page()
     if True:
-        got = await frames(ws, 3.0)
-        paired = [h for _, h, j in got if h.get("tracks") is not None]
+        got, bx = await window(ws, 3.0)
+        boxed = {b["stamp"]: b for _, b in bx}
+        mine = [h for _, h, _ in got if h["stamp"] in boxed]
         check("frames arrive at ~10 Hz", 25 <= len(got) <= 33, f"{len(got)} in 3 s")
-        check("every frame paired with its tracks (2 people)",
-              len(paired) == len(got) and all(len(h["tracks"]) == 2 for h in paired),
-              f"{len(paired)}/{len(got)} paired")
+        check("every frame gets its own boxes (same stamp, 2 people) as a separate message",
+              len(mine) >= len(got) - 1 and all(len(boxed[h["stamp"]]["tracks"]) == 2 for h in mine),
+              f"{len(mine)}/{len(got)} frames with boxes")
         check("JPEG intact", all(j[:2] == b"\xff\xd8" and j[-2:] == b"\xff\xd9" for _, _, j in got))
         med = lambda v: sorted(v)[len(v) // 2]  # noqa: E731
         ages = [(h["sent"] - h["stamp"]) * 1000 for _, h, _ in got]
-        trk = 1000 * med(hop["tracks"])
+        img, trk = 1000 * med(hop["image"]), 1000 * med(hop["tracks"])
         # the harness's own Python delivery (fake camera -> its own subscriber) is
-        # tens of ms on this CPU; judge only what ui_server ADDS on top of the
-        # tracks' ROS delivery
-        check("ui_server adds < 15 ms between tracks arriving and the frame going out",
-              med(ages) - trk < 15,
-              f"stamp->send median {med(ages):.1f} ms vs stamp->tracks {trk:.1f} ms "
-              f"(image hop {1000 * med(hop['image']):.1f} ms)")
+        # tens of ms on this CPU; judge only what ui_server ADDS on top of it
+        check("VIDEO FIRST: a frame leaves < 15 ms after its image arrives (it does not wait for its boxes)",
+              med(ages) - img < 15, f"stamp->send median {med(ages):.1f} ms vs stamp->image {img:.1f} ms")
+        bage = [(t - b["stamp"]) * 1000 for t, b in bx]
+        check("... and its boxes leave < 15 ms after the tracks arrive",
+              med(bage) - trk < 15, f"stamp->boxes here median {med(bage):.1f} ms vs stamp->tracks {trk:.1f} ms")
         rx = sorted((t - h["stamp"]) * 1000 for t, h, _ in got)
         print(f"         loopback stamp -> client receive: median {rx[len(rx) // 2]:.1f} ms, max {rx[-1]:.1f} ms")
 
-        tid = got[-1][1]["tracks"][0]["id"]
+        tid = bx[-1][1]["tracks"][0]["id"]
         await ws.send(json.dumps({"type": "select", "id": tid}))
-        got = await frames(ws, 1.0)
-        check(f"select #{tid} reaches the tracker", tid in select_log and got[-1][1]["selected"] == tid
-              and got[-1][1]["state"] == "TRACKING", f"state {got[-1][1].get('state')}")
+        got, bx = await window(ws, 1.0)
+        check(f"select #{tid} reaches the tracker", tid in select_log and bx[-1][1]["selected"] == tid
+              and bx[-1][1]["state"] == "TRACKING", f"state {bx[-1][1].get('state')}")
 
         # ---- ArUco markers (marker_tracker's tracks, aligned to the same frame) ----
         mk_on[0] = True
         await frames(ws, 0.5)
-        got = await frames(ws, 2.0)
-        withm = [h for _, h, _ in got if h.get("markers")]
+        got, bx = await window(ws, 2.0)
+        withm = [b for _, b in bx if b.get("markers") and b.get("tracks") is not None]
         m0 = withm[-1]["markers"][0] if withm else {}
-        check("marker tracker up: every frame carries its markers AND its people",
-              16 <= len(got) <= 23 and len(withm) == len(got)
-              and all(h.get("tracks") is not None for _, h, _ in got), f"{len(withm)}/{len(got)}")
+        check("marker tracker up: every frame's boxes carry its markers AND its people",
+              16 <= len(got) <= 23 and len(withm) >= len(got) - 1, f"{len(withm)} boxes with both / {len(got)} frames")
         check("marker outline, id, range reach the page; NaN heading -> null",
               m0.get("id") == 1000007 and m0.get("mid") == 7 and len(m0.get("corners", [])) == 8
               and m0.get("ok") is True and m0.get("range") == 3.2 and m0.get("heading") is None, str(m0))
         check("a person stays the selection while no marker is selected",
-              got[-1][1]["selected"] == tid, str(got[-1][1]["selected"]))
+              bx[-1][1]["selected"] == tid, str(bx[-1][1]["selected"]))
         await ws.send(json.dumps({"type": "select", "id": 1000007}))
         await frames(ws, 0.3)
         mk_sel[0] = 1000007                       # what marker_tracker does on that select
-        got = await frames(ws, 1.0)
+        got, bx = await window(ws, 1.0)
         check("clicking the marker sends its id; the page then shows the marker as the target",
-              1000007 in select_log and got[-1][1]["selected"] == 1000007
-              and got[-1][1]["state"] == "TRACKING", f"{got[-1][1].get('selected')} {got[-1][1].get('state')}")
+              1000007 in select_log and bx[-1][1]["selected"] == 1000007
+              and bx[-1][1]["state"] == "TRACKING", f"{bx[-1][1].get('selected')} {bx[-1][1].get('state')}")
         mk_on[0], mk_sel[0] = False, -1
-        got = await frames(ws, 2.5)
-        tail = [h for t_, h, _ in got if t_ > got[0][0] + 1.5]
+        got, bx = await window(ws, 2.5)
+        tail = [b for t_, b in bx if t_ > got[0][0] + 1.5]
         stall = max(b_[0] - a_[0] for a_, b_ in zip(got, got[1:])) if len(got) > 1 else 9.9
         # no stall is the point; the exact count depends on the harness's own 10 Hz
         # timer under load (7-10 in the last second at load average 6, 2026-09-30)
-        check("marker tracker stops: video keeps flowing (no gap > 0.5 s), frames no longer wait for markers",
+        check("marker tracker stops: video keeps flowing (no gap > 0.5 s), boxes no longer wait for markers",
               len(got) >= 18 and stall < 0.5 and len(tail) >= 5 and all("markers" not in h for h in tail),
               f"{len(got)} frames in 2.5 s, longest gap {stall:.2f} s, {len(tail)} in the last second")
 

@@ -33,7 +33,7 @@ from geometry_msgs.msg import PoseStamped, TransformStamped  # noqa: E402
 from nav_msgs.msg import Odometry  # noqa: E402
 from rclpy.node import Node  # noqa: E402
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy  # noqa: E402
-from sensor_msgs.msg import CameraInfo, Image  # noqa: E402
+from sensor_msgs.msg import CameraInfo, CompressedImage, Image  # noqa: E402
 from std_msgs.msg import Int32  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -77,7 +77,20 @@ p_sel = n.create_publisher(Int32, "/follow/select", 10)
 dets, tracks, targets, people = [], [], [], []
 n.create_subscription(MarkerDetections, "/follow/marker_detections", dets.append, 10)
 n.create_subscription(MarkerTracks, "/follow/marker_tracks", tracks.append, 10)
-n.create_subscription(PersonDetections, "/follow/person_detections", people.append, 10)
+arrive = {}                                         # stamp -> {"ui": t, "people": t}: who is out first
+
+
+def seen(kind):
+    def f(m):
+        arrive.setdefault((m.header.stamp.sec, m.header.stamp.nanosec), {})[kind] = time.monotonic()
+        if kind == "people":
+            people.append(m)
+    return f
+
+
+n.create_subscription(PersonDetections, "/follow/person_detections", seen("people"), 10)
+n.create_subscription(CompressedImage, "/follow/ui/image/compressed", seen("ui"),
+                      QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryPolicy.KEEP_LAST, depth=5))
 n.create_subscription(PoseStamped, "/follow/target", lambda m: targets.append(
     (m.pose.position.x, m.pose.position.y)), 10)
 info = CameraInfo()
@@ -164,6 +177,14 @@ try:
     check("marker back: target again, same id",
           len(targets) >= 5 and bool(tracks) and tracks[-1].target_state == "TRACKING",
           f"{len(targets)} targets, {tracks[-1].target_state if tracks else 'no tracks'}")
+    both = [v for v in arrive.values() if "ui" in v and "people" in v]
+    check("the operator's JPEG is published for every processed frame, same stamp as its detections",
+          len(both) >= 0.9 * len([v for v in arrive.values() if "people" in v]) and len(both) >= 30,
+          f"{len(both)} frames with both")
+    if PEOPLE:
+        first = sum(v["ui"] <= v["people"] for v in both)
+        check("VIDEO FIRST: with YOLOX running, the JPEG goes out BEFORE the person detections",
+              first >= 0.9 * len(both), f"{first}/{len(both)} frames")
     check("both nodes still running", all(p.poll() is None for p in procs))
 finally:
     for p in procs:

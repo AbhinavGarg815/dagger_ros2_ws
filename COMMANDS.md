@@ -176,7 +176,7 @@ Names are timestamped automatically; start the recorder before the test and stop
 | `python3 tools/compare_detectors.py <bag> --ref 4:you --ref 8:plant` | Compare detector models on a recording against labelled tracks. |
 | `python3 tools/detect_bench.py` | Detector sanity check and speed on this Jetson. |
 | `python3 tools/node_cpu.py <name> … [-i 5 -d 600 -o out.csv]` | CPU of the named processes (one sample, or logged over time). |
-| `python3 tools/ui_latency.py [--lite] [-s 20]` | How old the page's video is when it leaves the rover (camera → sent), frame size and rate. Needs T1 with camera + T4. |
+| `python3 tools/ui_latency.py [--lite] [-s 20]` | Delay of the page's video leaving the rover (camera → sent) and of its boxes (camera → boxes), frame size and rate. Needs T1 with camera + T4. |
 
 ## 10. Debugging
 
@@ -214,8 +214,8 @@ stack — because the scene tests are timing-sensitive under load.
 | `python3 tools/test_follow_controller.py` | 26/26 | Follow controller: speeds, search, close-range hold, CLEAR |
 | `python3 tools/test_click_follow.py all` | 53/53 | Person following scenes (or one of `main cross occlude reid beside close hug sign wall`) |
 | `python3 tools/test_marker_follow.py all` | 25/25 | Marker following scenes (`follow`, `switch`) |
-| `python3 tools/test_marker_pipeline.py` | 14/14 | Camera image → detector → marker tracker. `--people` also loads the person detector (T4 must be down). |
-| `python3 tools/test_ui_server.py` | 21/21 | Web page server: video (full / LITE), selection, deadman per page |
+| `python3 tools/test_marker_pipeline.py` | 15/15 | Camera image → detector → marker tracker, and the page's JPEG. `--people` also loads the person detector (16/16; T4 must be down). |
+| `python3 tools/test_ui_server.py` | 22/22 | Web page server: video first + boxes, full / LITE, selection, deadman per page |
 | `python3 tools/test_follow_lidar.py main` / `wall` | 4/4, 3/3 | Old automatic follow mode |
 | `python3 tools/test_odom_zupt.py [bag]` | — | Odometry zero-velocity update on a recorded stop |
 | `python3 tools/test_ground_seg.py [bag]` · `test_ground_scan.py [bag]` | — | Ground segmentation on a recorded cloud |
