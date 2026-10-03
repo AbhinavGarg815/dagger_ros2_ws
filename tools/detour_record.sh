@@ -12,7 +12,7 @@ out=~/dagger_bags/detour_${name}_$(date +%H%M%S)
 mkdir -p ~/dagger_bags
 echo "recording -> $out   (Ctrl-C to stop)"
 exec ros2 bag record -s mcap --include-hidden-topics -o "$out" \
-  /rslidar_points /patchworkpp/nonground /scan /scan_band /scan_safety /scan_low \
+  /rslidar_points /patchworkpp/nonground /scan /scan_band /scan_safety /scan_low /scan_overhang \
   /plan /odometry/filtered /tf /tf_static /cmd_vel_nav /cmd_vel_nav_raw \
   /mavros/setpoint_velocity/cmd_vel_unstamped /global_costmap/costmap /local_costmap/costmap \
   /navigate_to_pose/_action/status /mavros/state \
