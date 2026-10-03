@@ -6,7 +6,7 @@
 
 Runs in ROS_DOMAIN_ID 80 (set before rclpy is imported). Two parts:
   1. synthetic Patchwork++-style clouds: a static box is confirmed once hit in >= 3 scans
-     spanning >= 0.5 s (the 6th scan at 10 Hz), also
+     spanning >= 1.0 s (the 11th scan at 10 Hz), also
      in front of a distant wall and while the rover drives; a person (feet under a torso
      one or two bearings away) never; a low-only walker at 1.4 m/s never; nothing without
      odometry; empty bearings clear (inf), tall-only bearings do not (NaN);
@@ -33,13 +33,15 @@ from tf2_msgs.msg import TFMessage
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--replay", default=os.path.expanduser("~/dagger_bags/detour_low_114923"))
+ap.add_argument("--params", default="", help='extra low_scan parameters, e.g. "-p min_span:=1.0"')
+ap.add_argument("--replay-only", action="store_true", help="skip the synthetic scenes")
 a = ap.parse_args()
 
 SRC = ("export ROS_DOMAIN_ID=80 && source /opt/ros/humble/setup.bash && "
        "source /home/jetson/ros2_ws/install/setup.bash")
 proc = subprocess.Popen(
     ["bash", "-lc", f"{SRC} && exec ros2 run dagger_perception low_scan --ros-args -r __node:=ls_test "
-     "-r cloud_in:=/t/cloud -r odom:=/t/odom -r scan:=/t/scan_low"],
+     f"-r cloud_in:=/t/cloud -r odom:=/t/odom -r scan:=/t/scan_low {a.params}"],
     stdout=open("/tmp/low_scan_test.log", "w"), stderr=subprocess.STDOUT, preexec_fn=os.setsid)
 
 
@@ -137,63 +139,77 @@ while time.time() < end and run(cloud([]), timeout=0.5) is None:
     pass
 
 print("\n1. Synthetic scenes")
-pose.update(x=0.0, y=0.0, yaw=0.0)
-B = box(5.0, 0.0)
-seq = [run(cloud(B)) for _ in range(8)]
-bins = bins_of(seq[0], B)
-st = [state(s, bins) for s in seq]
-check("static box at 5 m: NaN for 5 scans (0.4 s), confirmed from the 6th (0.5 s)",
-      st[:5] == ["nan"] * 5 and st[5:] == ["confirmed"] * 3, " ".join(st))
-r = np.asarray(seq[-1].ranges)[bins]; r = r[np.isfinite(r)]
-check("... at its range", len(r) and abs(np.min(r) - (5.0 - 0.0)) < 0.05, f"{np.min(r):.3f} m" if len(r) else "")
+if a.replay_only:
+    print("  [SKIP] --replay-only")
+else:
 
-s = run(cloud([]))
-check("empty cloud: all bearings inf (clear beyond 4 m)", np.all(np.isinf(s.ranges)))
+    pose.update(x=0.0, y=0.0, yaw=0.0)
+    B = box(5.0, 0.0)
+    seq = [run(cloud(B)) for _ in range(13)]
+    bins = bins_of(seq[0], B)
+    st = [state(s, bins) for s in seq]
+    check("static box at 5 m: NaN for 10 scans (0.9 s), confirmed from the 11th (1.0 s)",
+          st[:10] == ["nan"] * 10 and st[10:] == ["confirmed"] * 3, f"{st.count('nan')} nan, then {st.count('confirmed')} confirmed")
+    r = np.asarray(seq[-1].ranges)[bins]; r = r[np.isfinite(r)]
+    check("... at its range", len(r) and abs(np.min(r) - (5.0 - 0.0)) < 0.05, f"{np.min(r):.3f} m" if len(r) else "")
 
-wall = [[9.0, y, z] for y in np.linspace(-1.5, 1.5, 60) for z in (0.5, 1.0, 1.4)]
-for _ in range(4):
-    s = run(cloud(B + wall))
-check("box in front of a wall 4 m behind it: still confirmed", state(s, bins) == "confirmed")
-wb = [b for b in bins_of(s, wall) if b not in bins]
-check("... and the wall's own bearings are NaN (tall only: no clearing)", np.all(np.isnan(np.asarray(s.ranges)[wb])))
+    s = run(cloud([]))
+    check("empty cloud: all bearings inf (clear beyond 4 m)", np.all(np.isinf(s.ranges)))
 
-# a person: feet (low) and a torso offset by ~1.5 bearings (0.013 rad at 4 m ~ 5 cm)
-pose.update(x=50.0)                                    # new place: no old hits nearby
-feet = [[4.0, 1.5 + dy, z] for dy in np.linspace(-0.08, 0.08, 5) for z in (0.15, 0.25, 0.33)]
-ang = math.atan2(1.5, 4.0) + 1.5 * 0.0087; rr = math.hypot(4.0, 1.5) + 0.1
-torso = [[rr * math.cos(ang + d), rr * math.sin(ang + d), z] for d in np.linspace(-0.01, 0.01, 4) for z in (0.8, 1.1, 1.4)]
-for _ in range(6):
-    s = run(cloud(feet + torso))
-fb = bins_of(s, feet)
-check("person standing still (feet + torso 1-2 bearings away): never confirmed", state(s, fb) == "nan", state(s, fb))
+    wall = [[9.0, y, z] for y in np.linspace(-1.5, 1.5, 60) for z in (0.5, 1.0, 1.4)]
+    for _ in range(4):
+        s = run(cloud(B + wall))
+    check("box in front of a wall 4 m behind it: still confirmed", state(s, bins) == "confirmed")
+    wb = [b for b in bins_of(s, wall) if b not in bins]
+    check("... and the wall's own bearings are NaN (tall only: no clearing)", np.all(np.isnan(np.asarray(s.ranges)[wb])))
 
-# low-only walker (worst case: no torso) crossing at 1.4 m/s
-pose.update(x=100.0)
-sts = []
-for k in range(20):
-    y = -1.5 + 1.4 * 0.1 * k
-    w = [[5.0, y + dy, z] for dy in np.linspace(-0.06, 0.06, 4) for z in (0.15, 0.3)]
-    s = run(cloud(w)); sts.append(state(s, bins_of(s, w)))
-check("low-only walker at 1.4 m/s: never confirmed", "confirmed" not in sts, f"{sts.count('confirmed')} of 20")
+    # a person: feet (low) and a torso offset by ~1.5 bearings (0.013 rad at 4 m ~ 5 cm)
+    pose.update(x=50.0)                                    # new place: no old hits nearby
+    feet = [[4.0, 1.5 + dy, z] for dy in np.linspace(-0.08, 0.08, 5) for z in (0.15, 0.25, 0.33)]
+    ang = math.atan2(1.5, 4.0) + 1.5 * 0.0087; rr = math.hypot(4.0, 1.5) + 0.1
+    torso = [[rr * math.cos(ang + d), rr * math.sin(ang + d), z] for d in np.linspace(-0.01, 0.01, 4) for z in (0.8, 1.1, 1.4)]
+    for _ in range(14):
+        s = run(cloud(feet + torso))
+    fb = bins_of(s, feet)
+    check("person standing still (feet + torso 1-2 bearings away): never confirmed", state(s, fb) == "nan", state(s, fb))
 
-# rover driving at 0.4 m/s toward a static box (odom moves, the box stays in its odom cell)
-pose.update(x=200.0, y=0.0, yaw=0.0)
-bx = 207.0; sts = []
-for k in range(12):
-    pose["x"] = 200.0 + 0.04 * k
-    b = box(bx - pose["x"], 0.0)
-    s = run(cloud(b)); sts.append(state(s, bins_of(s, b)))
-check("rover driving at 0.4 m/s toward a static box: confirmed from the 6th scan",
-      sts[:5] == ["nan"] * 5 and all(x == "confirmed" for x in sts[5:]), " ".join(sts[:7]))
+    # a person crouching: knees/feet 0.3 m beside the torso -- 4+ bearings away at 4 m
+    # (live walk-by 2026-10-03: such feet escaped a +-2-bearing check and were remembered)
+    pose.update(x=75.0)
+    feet2 = [[4.0, 1.8 + dy, z] for dy in np.linspace(-0.06, 0.06, 4) for z in (0.15, 0.25, 0.33)]
+    torso2 = [[4.05, 1.5 + dy, z] for dy in np.linspace(-0.15, 0.15, 8) for z in (0.6, 0.9)]
+    for _ in range(14):
+        s = run(cloud(feet2 + torso2))
+    check("person crouching, feet 0.3 m beside the body (static): never confirmed", state(s, bins_of(s, feet2)) == "nan",
+          state(s, bins_of(s, feet2)))
 
-# no odometry: nothing confirmed
-proc_quiet = True
-pose.update(x=300.0)
-for _ in range(2):
-    s = run(cloud(B), with_odom=False)
-time.sleep(0.7)                                          # older than odom_timeout (0.5 s)
-sts = [state(run(cloud(B), with_odom=False), bins) for _ in range(8)]
-check("no fresh odometry: never confirmed", "confirmed" not in sts, " ".join(sts))
+    # low-only walker (worst case: no torso) crossing at 1.4 m/s
+    pose.update(x=100.0)
+    sts = []
+    for k in range(20):
+        y = -1.5 + 1.4 * 0.1 * k
+        w = [[5.0, y + dy, z] for dy in np.linspace(-0.06, 0.06, 4) for z in (0.15, 0.3)]
+        s = run(cloud(w)); sts.append(state(s, bins_of(s, w)))
+    check("low-only walker at 1.4 m/s: never confirmed", "confirmed" not in sts, f"{sts.count('confirmed')} of 20")
+
+    # rover driving at 0.4 m/s toward a static box (odom moves, the box stays in its odom cell)
+    pose.update(x=200.0, y=0.0, yaw=0.0)
+    bx = 207.0; sts = []
+    for k in range(14):
+        pose["x"] = 200.0 + 0.04 * k
+        b = box(bx - pose["x"], 0.0)
+        s = run(cloud(b)); sts.append(state(s, bins_of(s, b)))
+    check("rover driving at 0.4 m/s toward a static box: confirmed from the 11th scan",
+          sts[:10] == ["nan"] * 10 and all(x == "confirmed" for x in sts[10:]), f"{sts.count('nan')} nan, then {sts.count('confirmed')} confirmed")
+
+    # no odometry: nothing confirmed
+    proc_quiet = True
+    pose.update(x=300.0)
+    for _ in range(2):
+        s = run(cloud(B), with_odom=False)
+    time.sleep(0.7)                                          # older than odom_timeout (0.5 s)
+    sts = [state(run(cloud(B), with_odom=False), bins) for _ in range(14)]
+    check("no fresh odometry: never confirmed", "confirmed" not in sts, " ".join(sts))
 
 
 # ---- 2. replay -----------------------------------------------------------------------
@@ -203,7 +219,8 @@ if not os.path.isdir(a.replay):
 else:
     rd = rosbag2_py.SequentialReader()
     rd.open(rosbag2_py.StorageOptions(uri=a.replay, storage_id="mcap"), rosbag2_py.ConverterOptions("cdr", "cdr"))
-    have_cmd = "/cmd_vel_nav_raw" in [t.name for t in rd.get_all_topics_and_types()]
+    have_cmd = any(t.topic_metadata.name == "/cmd_vel_nav_raw" and t.message_count > 0
+                   for t in rd.get_metadata().topics_with_message_count)
     rd.set_filter(rosbag2_py.StorageFilter(topics=["/patchworkpp/nonground", "/odometry/filtered", "/cmd_vel_nav_raw"]))
     RES, OBS_MAX, RT_MIN = 0.1, 8.0, 4.0
     # Where the box can show up in the start frame. Its top edge read 7.24 m from 7.2 m away;
@@ -212,6 +229,8 @@ else:
     BOX_F = (6.4, 8.0)
     grid = {}                                         # remembered (marked) cells
     swept = []                                        # remembered cells the rover then drove over
+    ever = {}                                         # every cell ever remembered -> first mark time
+    traj = []                                         # (t, x, y) of the rover
     first = None; rows = []; t_start = None; odom_msg = None; start = None
     while rd.has_next():
         topic, data, ts = rd.read_next(); ts *= 1e-9
@@ -247,7 +266,9 @@ else:
                     grid.pop(key, None); break
         for bb in np.where(np.isfinite(r) & (r < OBS_MAX))[0]:   # mark
             wx, wy = pose["x"] + r[bb] * math.cos(ang[bb]), pose["y"] + r[bb] * math.sin(ang[bb])
-            grid.setdefault((int(math.floor(wx / RES)), int(math.floor(wy / RES))), (ts, pose["x"], pose["y"], r[bb]))
+            key = (int(math.floor(wx / RES)), int(math.floor(wy / RES)))
+            grid.setdefault(key, (ts, pose["x"], pose["y"], r[bb])); ever.setdefault(key, ts)
+        traj.append((ts, pose["x"], pose["y"]))
         if start is not None:
             def loc(x, y):
                 dx, dy = x - start[0], y - start[1]
@@ -274,19 +295,36 @@ else:
         if start is not None:
             on_box = [k for k, _ in swept if (lambda f, l: BOX_F[0] < f < BOX_F[1] and -0.55 < l < 0.30)(*loc((k[0] + 0.5) * RES, (k[1] + 0.5) * RES))]
             print(f"     remembered cells the rover then drove over: {len(swept)} ({len(on_box)} of them the box)")
-        cells = np.array([loc((k[0] + 0.5) * RES, (k[1] + 0.5) * RES) for k in grid])
-        if len(cells):
-            hist = np.histogram(cells[:, 1], bins=[-9, -2.0, -1.2, 1.8, 3.0, 9])[0]
-            print(f"     ... by lateral position (m left of the start line): < -2.0: {hist[0]}, -2.0..-1.2 (wall side): {hist[1]}, "
-                  f"-1.2..+1.8 (lane): {hist[2]}, +1.8..+3.0: {hist[3]}, > +3.0 (plants/steps side): {hist[4]}")
-            lane = cells[(cells[:, 1] > -1.2) & (cells[:, 1] < 1.8) & (cells[:, 0] > -1) & (cells[:, 0] < 12)]
-            phantom = lane[~((lane[:, 0] > BOX_F[0]) & (lane[:, 0] < BOX_F[1]) & (lane[:, 1] > -0.55) & (lane[:, 1] < 0.30))]
-            if len(phantom):
-                keys = [k for k in grid if (lambda f, l: -1 < f < 12 and -1.2 < l < 1.8 and not (BOX_F[0] < f < BOX_F[1] and -0.55 < l < 0.30))(*loc((k[0] + 0.5) * RES, (k[1] + 0.5) * RES))]
-                for k in keys[:12]:
-                    f, l = loc((k[0] + 0.5) * RES, (k[1] + 0.5) * RES); t_, rx, ry, rng = grid[k]
-                    print(f"     lane cell ({f:.2f} along, {l:+.2f}) first marked at {t_ - t_start:.1f} s, rover {loc(rx, ry)[0]:.2f} m along, range {rng:.2f} m")
-            check("no remembered cell in the lane the rover drove, other than the box", len(phantom) == 0, f"{len(phantom)} cells")
+        TR = np.array(traj)
+        moved = float(np.sum(np.hypot(np.diff(TR[:, 1]), np.diff(TR[:, 2])))) if len(TR) > 1 else 0.0
+        def is_box(k):
+            f, l = loc((k[0] + 0.5) * RES, (k[1] + 0.5) * RES)
+            return BOX_F[0] < f < BOX_F[1] and -0.55 < l < 0.30
+        if moved > 1.0:
+            # phantom = remembered BEFORE the rover passed within 0.7 m of it (half the hull + 12 cm):
+            # an obstacle in or beside its later path that was not the box
+            bad = []
+            for k, t_mark in ever.items():
+                cx, cy = (k[0] + 0.5) * RES, (k[1] + 0.5) * RES
+                after = TR[TR[:, 0] > t_mark]
+                if len(after) and np.min(np.hypot(after[:, 1] - cx, after[:, 2] - cy)) < 0.7 and not is_box(k):
+                    bad.append(k)
+            print(f"     rover drove {moved:.1f} m; remembered cells it later passed within 0.7 m of, other than the box: {len(bad)}")
+            for k in bad[:8]:
+                f, l = loc((k[0] + 0.5) * RES, (k[1] + 0.5) * RES)
+                print(f"       ({f:.2f} along, {l:+.2f}) marked at {ever[k] - t_start:.1f} s")
+            check("no remembered cell in the rover's later path, other than the box", len(bad) == 0, f"{len(bad)} cells")
+        else:
+            # parked (walk-by): nothing may stay remembered in front of the rover where people walked
+            px, py = TR[-1, 1], TR[-1, 2]; yaw_ = pose["yaw"]
+            front = []
+            for k in grid:
+                dx, dy = (k[0] + 0.5) * RES - px, (k[1] + 0.5) * RES - py
+                f, l = dx * math.cos(yaw_) + dy * math.sin(yaw_), -dx * math.sin(yaw_) + dy * math.cos(yaw_)
+                if 1.0 < f < 8.0 and abs(l) < 2.6 and not is_box(k):
+                    front.append((round(f, 2), round(l, 2), round(ever[k] - t_start, 1)))
+            print(f"     parked; remembered cells in front of the rover (1-8 m, +-2.6 m) at the end: {len(front)} {sorted(front)[:8]}")
+            check("parked: no remembered cell in front of the rover at the end", len(front) == 0, f"{len(front)} cells")
 
 print(f"\n{sum(checks)}/{len(checks)} passed")
 n.destroy_node(); rclpy.shutdown()

@@ -195,8 +195,8 @@ def generate_launch_description():
     # ---- Low-obstacle memory (costmap low_obstacle_layer) -----------------------
     # low_scan (dagger_perception, C++) makes /scan_low from Patchwork++'s non-ground
     # cloud in one pass: low returns (12-35 cm) with nothing tall (40-160 cm) within
-    # +-2 bearings, and only once their odom cell has been hit in >= 3 scans within
-    # 2 s (people move, boxes don't). The layer clears only beyond 4 m, so a low
+    # 0.5 m, and only once their odom cell has been hit in >= 5 scans spanning >= 1.0 s
+    # (people move, boxes don't; a standing person's feet sit next to their body). The layer clears only beyond 4 m, so a low
     # object seen from afar is remembered while the rover closes in (Q68: without it
     # a 26 cm box was erased 3.8 m out and driven over). Replaces two extra p2l
     # instances and the Python low_scan_filter (2026-10-03).
@@ -216,14 +216,14 @@ def generate_launch_description():
             "low_max_height": low_max_height,
             "tall_min_height": 0.40,
             "tall_max_height": 1.60,
-            "tall_bins": 2,
-            "tall_margin": 0.5,
+            "tall_radius": 0.5,     # anything tall this close: part of a tall thing
             "range_min": 0.5,
             "range_max": 30.0,
             "persistence": True,
             "cell_size": 0.15,
             "persist_window": 2.0,
-            "min_hits": 3,
+            "min_hits": 5,
+            "min_span": 1.0,
             "body_box": [-0.90, 0.50, -0.60, 0.60],
             "use_sim_time": use_sim_time,
         }],

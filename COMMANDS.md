@@ -216,7 +216,7 @@ stack — because the scene tests are timing-sensitive under load.
 |---|---|---|
 | `python3 tools/test_person_tracking.py` | 64/64 | Person tracker rules |
 | `python3 tools/test_marker_tracking.py` | 43/43 | Marker geometry, detection on real frames, tracker rules |
-| `python3 tools/test_low_scan.py` | 12/12 | Low-obstacle memory: static box confirmed, people / walkers / no odometry never; replay of the 10-03 low-box run keeps the box to the bumper, nothing else in the lane. `--replay <bag>` for another approach / drive (box checks then do not apply). |
+| `python3 tools/test_low_scan.py` | 13/13 | Low-obstacle memory: static box confirmed, people (standing, crouching) / walkers / no odometry never; replay of the 10-03 low-box run keeps the box to the bumper, nothing else in the lane. `--replay <bag> [--replay-only] [--params "-p min_span:=1.0"]` for another recording (box checks then do not apply). |
 | `python3 tools/test_estimator_checks.py` | 9/9 | preflight GNSS-heading / FCU-estimator checks and the odometry relay's speed gate, against a fake FCU |
 | `python3 tools/test_safety_scan.py` | 25/25 | `/scan_safety` node: body box, band, bins; identical to p2l on the 10-02 captures; parked + walk-around captures |
 | `python3 tools/test_follow_controller.py` | 26/26 | Follow controller: speeds, search, close-range hold, CLEAR |

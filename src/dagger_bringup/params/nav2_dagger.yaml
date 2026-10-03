@@ -169,7 +169,7 @@ local_costmap:
       # the normal layer's empty rays then erase it: live 2026-09-26, a box
       # marked lethal at 4.4 m was cleared at 3.2 m. This layer holds only
       # low-ONLY, PERSISTENT returns from low_scan (dagger_perception): nothing tall
-      # within +-2 bearings, and the same odom cell hit in >= 3 scans within 2 s,
+      # within 0.5 m, and the same odom cell hit in >= 5 scans spanning >= 1 s,
       # so people and walls stay out) and only ray-clears beyond 4 m, where a low
       # object would be visible again if still present. Being a separate layer,
       # the normal layer's clearing cannot reach it. A wrong low mark stays until
@@ -265,7 +265,7 @@ global_costmap:
       # the normal layer's empty rays then erase it: live 2026-09-26, a box
       # marked lethal at 4.4 m was cleared at 3.2 m. This layer holds only
       # low-ONLY, PERSISTENT returns from low_scan (dagger_perception): nothing tall
-      # within +-2 bearings, and the same odom cell hit in >= 3 scans within 2 s,
+      # within 0.5 m, and the same odom cell hit in >= 5 scans spanning >= 1 s,
       # so people and walls stay out) and only ray-clears beyond 4 m, where a low
       # object would be visible again if still present. Being a separate layer,
       # the normal layer's clearing cannot reach it. A wrong low mark stays until

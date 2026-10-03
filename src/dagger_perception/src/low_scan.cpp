@@ -10,18 +10,23 @@
 //
 // Per bearing (same 723 bins as the other scans), from one pass over the cloud:
 //   low  = nearest return 12-35 cm high,   tall = nearest return 40-160 cm high.
-//   low with something tall within +-tall_bins bearings, nearer than low + tall_margin
-//        -> NaN  (part of something tall: legs under a torso; Q32's blobs came from a
-//                 torso one ray away, so the check spans neighbouring bearings)
+//   low with ANY tall point within tall_radius of it (2D, any bearing, any range)
+//        -> NaN  (part of something tall: feet and knees around a body. Two weaker checks
+//                 failed on the 2026-10-03 walk-by: a count of bearings -- at 4 m two
+//                 bearings are 7 cm, a crouching person's feet escaped it -- and the
+//                 NEAREST tall return per bearing -- when something tall stood nearer on
+//                 those bearings, the walker's own torso right beside their feet was never
+//                 looked at. Q32's blobs came from a torso one ray away)
 //   low only, cell CONFIRMED                     -> its range   (marked, then remembered)
 //   low only, not confirmed yet                  -> NaN         (not marked, not cleared)
 //   tall only                                    -> NaN         (cannot clear through it)
 //   neither                                      -> inf         (clears, beyond 4 m only)
 // CONFIRMED = the low return's 15 cm cell in the ODOM frame (with its 8 neighbours) was
-// hit in >= min_hits scans within persist_window s, and those hits span >= min_span s.
-// A box stays in its cell for seconds; a walker crosses a 45 cm neighbourhood in ~0.3 s
-// at 1.4 m/s (without min_span, 3 consecutive scans of a walker still landed in one
-// neighbourhood). Without odometry nothing is confirmed (fails toward "not remembered").
+// hit in >= min_hits (5) scans within persist_window (2 s), and those hits span >= min_span
+// (1.0 s). A box stays in its cell for seconds; a walker crosses a 45 cm neighbourhood in
+// ~0.3 s at 1.4 m/s. Tuned on 4 recordings (Q68): 3 hits / 0.5 s still remembered a walker's
+// feet lingering 0.5-0.8 s and 7 brief returns beside a 41 m drive; 5 / 1.0 s: none, and the
+// low box is still remembered from 7.2 m. Without odometry nothing is confirmed.
 
 #include <algorithm>
 #include <chrono>
@@ -31,6 +36,7 @@
 #include <map>
 #include <memory>
 #include <set>
+#include <unordered_map>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -65,16 +71,15 @@ public:
     low_max_ = declare_parameter<double>("low_max_height", 0.35);
     tall_min_ = declare_parameter<double>("tall_min_height", 0.40);
     tall_max_ = declare_parameter<double>("tall_max_height", 1.60);
-    tall_margin_ = declare_parameter<double>("tall_margin", 0.5);
-    tall_bins_ = declare_parameter<int>("tall_bins", 2);
+    tall_radius_ = declare_parameter<double>("tall_radius", 0.5);
     range_min_ = declare_parameter<double>("range_min", 0.5);
     range_max_ = declare_parameter<double>("range_max", 30.0);
     box_ = declare_parameter<std::vector<double>>("body_box", {-0.90, 0.50, -0.60, 0.60});
     persist_ = declare_parameter<bool>("persistence", true);
     cell_ = declare_parameter<double>("cell_size", 0.15);
     window_ = declare_parameter<double>("persist_window", 2.0);
-    min_hits_ = declare_parameter<int>("min_hits", 3);
-    min_span_ = declare_parameter<double>("min_span", 0.5);
+    min_hits_ = declare_parameter<int>("min_hits", 5);
+    min_span_ = declare_parameter<double>("min_span", 1.0);
     odom_timeout_ = declare_parameter<double>("odom_timeout", 0.5);
     const double stats_period = declare_parameter<double>("stats_period", 60.0);
     if (box_.size() != 4 || !(box_[0] < box_[1]) || !(box_[2] < box_[3])) {
@@ -120,9 +125,9 @@ public:
       std::chrono::duration<double>(stats_period), [this]() {stats();});
 
     RCLCPP_INFO(
-      get_logger(), "low_scan: low %.2f-%.2f m, tall %.2f-%.2f m within +-%d bins, persistence %s "
+      get_logger(), "low_scan: low %.2f-%.2f m, tall %.2f-%.2f m within %.2f m, persistence %s "
       "(%.2f m cells, %d hits over >= %.1f s within %.1f s)", low_min_, low_max_, tall_min_, tall_max_,
-      tall_bins_, persist_ ? "ON" : "OFF", cell_, min_hits_, min_span_, window_);
+      tall_radius_, persist_ ? "ON" : "OFF", cell_, min_hits_, min_span_, window_);
   }
 
 private:
@@ -185,6 +190,15 @@ private:
     const double a_min = proto_.angle_min, a_max = proto_.angle_max, a_inc = proto_.angle_increment;
     std::vector<double> low(n_bins_, inf), tall(n_bins_, inf);
     std::vector<float> low_x(n_bins_, 0.f), low_y(n_bins_, 0.f);
+    // every tall point, hashed into tall_radius/2 cells, for the veto
+    const double tc = tall_radius_ / 2.0;
+    std::unordered_map<uint64_t, std::vector<std::pair<float, float>>> tall_pts;
+    auto ckey = [](int64_t ix, int64_t iy) {      // unsigned: no shift of a negative value
+        return (static_cast<uint64_t>(ix) << 32) ^ (static_cast<uint64_t>(iy) & 0xffffffffULL);
+      };
+    auto tkey = [tc, &ckey](double x, double y) {
+        return ckey(static_cast<int64_t>(std::floor(x / tc)), static_cast<int64_t>(std::floor(y / tc)));
+      };
 
     sensor_msgs::PointCloud2ConstIterator<float> ix(*msg, "x"), iy(*msg, "y"), iz(*msg, "z");
     for (; ix != ix.end(); ++ix, ++iy, ++iz) {
@@ -215,8 +229,9 @@ private:
         low_x[b] = x;
         low_y[b] = y;
       }
-      if (is_tall && range < tall[b]) {
-        tall[b] = range;
+      if (is_tall) {
+        tall[b] = std::min(tall[b], range);
+        tall_pts[tkey(x, y)].push_back({x, y});
       }
     }
 
@@ -237,12 +252,24 @@ private:
         }
         continue;                                                     // neither: inf (clears)
       }
-      // Something tall nearer than (or just behind) the low return, on this bearing or a
-      // neighbouring one, makes it part of a tall thing. A wall well behind a box does not.
+      // Any tall point within tall_radius of the low return makes it part of a tall thing.
+      // A wall 4 m behind a box does not.
       bool tall_near = false;
-      for (int k = -tall_bins_; k <= tall_bins_ && !tall_near; ++k) {
-        const int j = (b + k + n_bins_) % n_bins_;
-        tall_near = std::isfinite(tall[j]) && tall[j] < low[b] + tall_margin_;
+      const int64_t cx = static_cast<int64_t>(std::floor(low_x[b] / tc));
+      const int64_t cy = static_cast<int64_t>(std::floor(low_y[b] / tc));
+      for (int64_t dx = -2; dx <= 2 && !tall_near; ++dx) {
+        for (int64_t dy = -2; dy <= 2 && !tall_near; ++dy) {
+          auto it = tall_pts.find(ckey(cx + dx, cy + dy));
+          if (it == tall_pts.end()) {
+            continue;
+          }
+          for (const auto & q : it->second) {
+            if (std::hypot(q.first - low_x[b], q.second - low_y[b]) < tall_radius_) {
+              tall_near = true;
+              break;
+            }
+          }
+        }
       }
       if (tall_near) {
         scan->ranges[b] = std::numeric_limits<float>::quiet_NaN();
@@ -310,8 +337,8 @@ private:
   }
 
   std::string target_frame_;
-  double low_min_, low_max_, tall_min_, tall_max_, tall_margin_, range_min_, range_max_;
-  int tall_bins_, min_hits_, n_bins_;
+  double low_min_, low_max_, tall_min_, tall_max_, tall_radius_, range_min_, range_max_;
+  int min_hits_, n_bins_;
   double min_span_;
   std::vector<double> box_;
   bool persist_;
