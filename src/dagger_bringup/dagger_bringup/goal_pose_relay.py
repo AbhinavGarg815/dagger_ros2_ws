@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Foxglove click -> Nav2 goal / SLAM pose estimate, made safe to use.
 
-    Foxglove 3D panel (display frame `map`):
+    Foxglove 3D panel (display + fixed frame `odom` for goals; `map` for pose estimates):
       publish tool "Pose"           -> /goal_pose_ui     -> /goal_pose     (bt_navigator)
       publish tool "Pose estimate"  -> /initialpose_ui   -> /initialpose   (slam_toolbox)
 
@@ -13,7 +13,11 @@ Why a relay instead of letting Foxglove publish /goal_pose directly:
     stamp 0 = "latest transform".
   - FRAME: a click in a moving frame (base_footprint, ...) with stamp 0 would be
     re-read relative to the rover every replan and never reached, so only map
-    and odom goals are forwarded ("set the Foxglove display frame to map").
+    and odom goals are forwarded. Use odom for clicked goals: in GPS mode map->odom
+    follows the GNSS position, and without RTK that wanders (2026-10-03: 3D fix,
+    h_acc ~3 m, map->odom moved 0.68 m in 27 s parked) -- a goal clicked in map
+    slid as the rover drove to it. odom is the rover's continuous frame, the one the
+    planner and costmaps use. map is for lat/lon goals and SLAM.
     No TF listener on purpose: in Python it decodes all of /tf (~16 % CPU,
     measured 2026-09-29) for a conversion the documented setup never needs.
   - LOCALIZATION: in SLAM mode a goal is refused while /slam/localized is false.
@@ -67,8 +71,11 @@ class GoalPoseRelay(Node):
         frame, pose = m.header.frame_id or "map", m.pose
         if frame not in FIXED:
             self.get_logger().error(f"goal REFUSED: clicked in '{frame}' -- set the Foxglove "
-                                    "3D panel display frame to map")
+                                    "3D panel display frame to odom")
             return
+        if frame == "map" and self.localized is None:
+            self.get_logger().warn("goal in map, GPS mode: it moves with the GNSS position "
+                                   "(no RTK: metres) -- set the display frame to odom")
         out = PoseStamped()
         out.header.frame_id = frame           # stamp stays 0 = latest transform
         out.pose = pose

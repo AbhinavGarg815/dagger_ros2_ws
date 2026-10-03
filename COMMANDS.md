@@ -87,7 +87,7 @@ Needs T1 + T2 and a preflight PASS.
 | `python3 tools/gps_goal.py --mission --dry-run` | FCU mission converted to map coordinates, nothing sent. |
 | `python3 tools/gps_goal.py --mission` | **[MOTION]** Drive the FCU mission's waypoints. |
 | `python3 tools/gps_goal.py --ll "26.74798,75.85534 26.74801,75.85540"` | **[MOTION]** Lat/lon waypoints. `--enu "8,0 8,5"` = metres east,north of the rover. In SLAM mode add `--anchor geo` (default) or `--anchor live`. |
-| Foxglove 3D panel → publish **Pose** on `/goal_pose_ui` | **[MOTION]** Click-to-goal. **Pose estimate** on `/initialpose_ui` re-seeds SLAM localization. |
+| Foxglove 3D panel (display + fixed frame **`odom`**) → publish **Pose** on `/goal_pose_ui` | **[MOTION]** Click-to-goal, planned around obstacles. Not `map` without RTK: map→odom follows the GNSS walk and the goal slides. Never click near drop-offs (Nav2 cannot see them). **Pose estimate** (frame `map`) on `/initialpose_ui` re-seeds SLAM localization. |
 | `bash tools/solo_goal.sh <bag> "8" 15:20:00 15:22:00` | **[MOTION]** Solo test: at each clock slot, if the safety gate passes, records and sends the goal. |
 | `python3 tools/solo_gate.py --save` | Remember the start pose for the solo gate (`solo_gate.py` alone = check it). |
 | `bash tools/pf_tune.sh show` | Current path-following parameters. `tuned` / `base` apply a profile live (lost at T2 restart). |
