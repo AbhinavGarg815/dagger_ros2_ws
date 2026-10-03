@@ -80,6 +80,12 @@ class FcuOdomRelay(Node):
         self.declare_parameter("zupt_hold_s", 1.0)
         self.declare_parameter("zupt_rc_topic", "/mavros/rc/out")
         self.declare_parameter("zupt_channels", [0, 2])   # SERVO1 left, SERVO3 right
+        # Plausibility gate (Q67). With its dual-antenna heading gone, EK3 diverged and
+        # reported body speeds of 20-260 m/s while the rover stood still; whenever the
+        # tracks moved (ZUPT off) the fused odom integrated them and jumped 88 m. A sample
+        # faster than this is dropped, so robot_localization holds its own estimate instead
+        # of integrating garbage. Parked (ZUPT) the relay still publishes its zero. 0 = off.
+        self.declare_parameter("max_plausible_speed", 0.0)
 
         g = self.get_parameter
         self.odom_frame = g("odom_frame").value
@@ -94,6 +100,9 @@ class FcuOdomRelay(Node):
         self.zupt_band = int(g("zupt_band_us").value)
         self.zupt_hold = float(g("zupt_hold_s").value)
         self.zupt_ch = [int(c) for c in g("zupt_channels").value]
+        self.max_speed = float(g("max_plausible_speed").value)
+        self.rejected = 0
+        self.reject_log_time = 0.0
         self.rc_time = 0.0            # monotonic time of the last rc/out message
         self.neutral_since = None     # monotonic time both tracks became neutral
 
@@ -138,13 +147,25 @@ class FcuOdomRelay(Node):
         if self.flatten_z:
             out.pose.pose.position.z = 0.0
         lin = out.twist.twist.linear
-        if self.zv_deadband > 0.0 and math.hypot(lin.x, lin.y) < self.zv_deadband:
+        zupt = self.zupt_active()
+        speed = math.hypot(lin.x, lin.y)
+        if self.max_speed > 0.0 and speed > self.max_speed and not zupt:
+            self.rejected += 1
+            now = time.monotonic()
+            if now - self.reject_log_time > 2.0:
+                self.reject_log_time = now
+                self.get_logger().error(
+                    f"FCU body speed {speed:.1f} m/s is implausible (> {self.max_speed:g}) -- "
+                    f"dropped ({self.rejected} so far). EK3 unhealthy: stop driving, check the "
+                    f"GNSS heading and run tools/preflight.py")
+            return
+        if self.zv_deadband > 0.0 and speed < self.zv_deadband:
             lin.x = lin.y = 0.0
         if self.pivot_gate > 0.0 and abs(out.twist.twist.angular.z) > self.pivot_gate:
             lin.x = lin.y = 0.0
         if self.zero_lateral:
             lin.y = 0.0
-        if self.zupt_active():
+        if zupt:
             lin.x = lin.y = 0.0
         if any(self.twist_var):
             cov = list(out.twist.covariance)

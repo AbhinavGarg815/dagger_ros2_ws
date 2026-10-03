@@ -1,7 +1,7 @@
 # Dagger UGV — command reference
 
 Every command used to build, run, test and debug the rover, in the order you need them.
-Last updated: 2026-10-02 (near-field safety scan: `near_field`, safety_scan, test_safety_scan; detour_record.sh).
+Last updated: 2026-10-03 (preflight: GNSS heading + FCU estimator checks; test_estimator_checks).
 
 **Conventions**
 
@@ -55,6 +55,7 @@ Then, **before any drive and again after every T1 or mavros restart**:
 
 ```bash
 python3 tools/preflight.py            # configure the FCU link + health check: must end in PASS
+                                      # (incl. GNSS heading valid >= 90 % and FCU estimator still while parked)
 python3 tools/preflight.py --no-config   # check only
 python3 tools/preflight.py --no-nav2     # T1 only
 python3 tools/preflight.py -t 60         # 60 s sample: stationary pose-noise baseline
@@ -186,6 +187,7 @@ Names are timestamped automatically; start the recorder before the test and stop
 |---|---|
 | Is the FCU connected, armed, which mode? | `ros2 topic echo /mavros/state --once` |
 | Is FCU telemetry really arriving? | `python3 tools/fcu_flowing.py` |
+| Is the FCU estimator healthy (GNSS heading, no drift)? | `python3 tools/preflight.py --no-config` (FCU / GNSS section). The FCU's own messages (`FCU: AHRS: DCM active` ↔ `EKF3 active` flipping = EKF3 unhealthy) appear only in the T1 terminal. A full power-restart of the rover cleared one such divergence (2026-10-03). |
 | Is a sensor or topic alive, at what rate? | `ros2 topic hz /rslidar_points` · `/scan` · `/scan_safety` · `/odometry/filtered` · `/d435/color/image_raw` |
 | What is following doing? | `ros2 topic echo /follow/state` · `python3 tools/follow_status.py` |
 | Who publishes / subscribes a topic? | `ros2 topic info -v <topic>` |
@@ -214,6 +216,7 @@ stack — because the scene tests are timing-sensitive under load.
 |---|---|---|
 | `python3 tools/test_person_tracking.py` | 64/64 | Person tracker rules |
 | `python3 tools/test_marker_tracking.py` | 43/43 | Marker geometry, detection on real frames, tracker rules |
+| `python3 tools/test_estimator_checks.py` | 9/9 | preflight GNSS-heading / FCU-estimator checks and the odometry relay's speed gate, against a fake FCU |
 | `python3 tools/test_safety_scan.py` | 25/25 | `/scan_safety` node: body box, band, bins; identical to p2l on the 10-02 captures; parked + walk-around captures |
 | `python3 tools/test_follow_controller.py` | 26/26 | Follow controller: speeds, search, close-range hold, CLEAR |
 | `python3 tools/test_click_follow.py all` | 53/53 | Person following scenes (or one of `main cross occlude reid beside close hug sign wall`) |

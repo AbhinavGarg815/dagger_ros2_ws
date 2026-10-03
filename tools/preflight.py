@@ -48,7 +48,9 @@ TOPICS = [
     ("/mavros/rc/out", RCOut, 20.0, False),
     ("/mavros/rc/in", RCIn, 5.0, False),
     ("/mavros/gpsstatus/gps1/raw", GPSRAW, 4.0, False),
-    ("/gps/heading_imu", Imu, 0.0, False),
+    # 3.6 Hz healthy; 0.4 Hz on 2026-10-03 when the GNSS heading was valid 8 % of the time
+    # and EK3 (EK3_SRC1_YAW=2, GPS yaw only) diverged (Q67)
+    ("/gps/heading_imu", Imu, 2.0, False),
     ("/mavros/global_position/compass_hdg", Float64, 1.0, False),
     ("/mavros/state", State, 0.5, False),
     ("/rslidar_points", PointCloud2, 8.0, True),
@@ -67,6 +69,12 @@ class Preflight(Node):
         super().__init__("dagger_preflight")
         self.stats = {t: {"n": 0, "t0": None, "t1": None, "last": None} for t, *_ in TOPICS}
         self.odom_xy = []  # (x, y, yaw) from /odometry/filtered for noise baseline
+        # Q67: judge the GNSS heading and the FCU estimator over the WHOLE window, not
+        # from the last message (the heading was valid 8 % of the time and the last
+        # message happened to be valid, so preflight passed with EK3 diverged).
+        self.gps_yaw_valid = []   # per gps1/raw message
+        self.fcu = []             # (x, y, body speed) per /mavros/local_position/odom
+        self.rc_neutral = []      # per rc/out: both track outputs at neutral
         self.lat = []      # now - stamp for /odometry/filtered
         be = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
                         history=HistoryPolicy.KEEP_LAST, depth=50)
@@ -93,6 +101,15 @@ class Preflight(Node):
             s["t1"] = now
             if not raw:
                 s["last"] = msg
+            if topic == "/mavros/gpsstatus/gps1/raw":
+                self.gps_yaw_valid.append(msg.yaw not in (0, 65535))
+            elif topic == "/mavros/local_position/odom":
+                p, v = msg.pose.pose.position, msg.twist.twist.linear
+                self.fcu.append((p.x, p.y, math.hypot(v.x, v.y)))
+            elif topic == "/mavros/rc/out":
+                ch = msg.channels
+                self.rc_neutral.append(len(ch) > 2 and abs(ch[0] - 1500) <= 25
+                                       and abs(ch[2] - 1500) <= 25)
             if topic == "/odometry/filtered":
                 p = msg.pose.pose
                 self.odom_xy.append((p.position.x, p.position.y, yaw_of(p.orientation)))
@@ -191,6 +208,9 @@ def main():
             s.update(n=0, t0=None, t1=None)
         n.odom_xy.clear()
         n.lat.clear()
+        n.gps_yaw_valid.clear()
+        n.fcu.clear()
+        n.rc_neutral.clear()
 
     print(f"== sampling {a.sample:g} s ...")
     end = time.monotonic() + a.sample
@@ -199,7 +219,7 @@ def main():
 
     print("== topic rates")
     for topic, _, min_hz, _ in TOPICS:
-        if a.no_nav2 and topic in ("/odometry/filtered", "/scan"):
+        if a.no_nav2 and topic in ("/odometry/filtered", "/scan", "/gps/heading_imu"):
             continue
         s = n.stats[topic]
         hz = (s["n"] - 1) / (s["t1"] - s["t0"]) if s["n"] > 1 and s["t1"] > s["t0"] else 0.0
@@ -230,10 +250,30 @@ def main():
               f"hdg_acc={g.hdg_acc / 1e5:.2f} deg")
         if g.fix_type < 3:
             fails.append("gps-fix")
-        if not yaw_ok:
+        nv = len(n.gps_yaw_valid)
+        frac = sum(n.gps_yaw_valid) / nv if nv else 0.0
+        good = nv >= 5 and frac >= 0.9
+        print(f"  [{'OK' if good else 'FAIL'}] GNSS heading valid in {100 * frac:.0f} % of {nv} messages "
+              f"(min 90 %: EK3_SRC1_YAW=2 has no other yaw source)")
+        if not good:
             fails.append("gps-yaw")
     else:
         fails.append("gps1/raw")
+    # FCU estimator sanity while parked (Q67: EK3 reported 20-260 m/s and its position
+    # jumped 109 m in 10 s with the rover standing still). Healthy: < 0.02 m/s, < 0.2 m.
+    if len(n.fcu) >= 10 and len(n.rc_neutral) >= 3 and all(n.rc_neutral):
+        sp = max(f[2] for f in n.fcu)
+        moved = math.hypot(n.fcu[-1][0] - n.fcu[0][0], n.fcu[-1][1] - n.fcu[0][1])
+        good = sp <= 0.5 and moved <= 2.0
+        print(f"  [{'OK' if good else 'FAIL'}] FCU estimator while parked: speed max {sp:.2f} m/s "
+              f"(max 0.5), position moved {moved:.2f} m in {a.sample:g} s (max 2.0)")
+        if not good:
+            fails.append("fcu-estimator")
+    elif n.fcu:
+        print("  [--] FCU estimator check skipped: tracks not at neutral (rover being driven?)")
+    else:
+        fails.append("fcu-estimator")
+        print("  [FAIL] no /mavros/local_position/odom")
     c = n.stats["/mavros/global_position/compass_hdg"]["last"]
     if c:
         print(f"  compass_hdg (EK3 yaw) = {c.data:.1f} deg")

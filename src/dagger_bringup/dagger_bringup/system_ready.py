@@ -101,9 +101,10 @@ class SystemReady(Node):
             self.get_logger().info(
                 f"{GREEN}{BOLD}"
                 f"\n================================================\n"
-                f"          ALL SYSTEMS READY\n"
+                f"          SENSORS UP\n"
                 f"   FCU connected | GPS fix ({self.satellites} sats) | LiDAR OK | IMU OK\n"
-                f"   -> safe to drive and start recording\n"
+                f"   -> run tools/preflight.py before driving (checks the\n"
+                f"      GNSS heading + FCU estimator, which this does not)\n"
                 f"================================================{RESET}"
             )
         elif not ready and self.all_ready:

@@ -100,6 +100,7 @@ def generate_launch_description():
             "base_frame": "base_footprint",
             "flatten_z": True,
             "publish_tf": True,
+            "max_plausible_speed": 2.0,   # m/s; rover max 0.6 (Q67)
         }],
         condition=IfCondition(use_fcu),
     )
@@ -119,6 +120,7 @@ def generate_launch_description():
             "base_frame": "base_footprint",
             "flatten_z": True,
             "publish_tf": False,
+            "max_plausible_speed": 2.0,   # m/s; rover max 0.6 (Q67)
             "twist_variance": [0.01, 0.01, 0.01],
             "zero_velocity_deadband": 0.02,
             "pivot_yaw_rate_gate": 0.25,
