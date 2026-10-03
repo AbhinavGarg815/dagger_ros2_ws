@@ -37,11 +37,11 @@ def generate_launch_description():
                                            choices=["gps", "slam"])
     # Source of /scan_safety (both collision monitors): see nav2.launch.py.
     near_field = LaunchConfiguration("near_field")
-    near_field_arg = DeclareLaunchArgument("near_field", default_value="false",
+    near_field_arg = DeclareLaunchArgument("near_field", default_value="true",
                                            choices=["true", "false"])
     # Low-obstacle memory (low_scan + the costmaps' low_obstacle_layer): see nav2.launch.py.
     low_memory = LaunchConfiguration("low_obstacle_memory")
-    low_memory_arg = DeclareLaunchArgument("low_obstacle_memory", default_value="false",
+    low_memory_arg = DeclareLaunchArgument("low_obstacle_memory", default_value="true",
                                            choices=["true", "false"])
 
     localization = IncludeLaunchDescription(

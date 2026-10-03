@@ -36,11 +36,12 @@ def generate_launch_description():
     # misses anything under ~35 cm (kerbs, low debris).
     ground_seg = LaunchConfiguration("ground_seg")
     ground_seg_arg = DeclareLaunchArgument("ground_seg", default_value="true")
-    # Low-obstacle memory (costmap low_obstacle_layer + low_scan). Off by default until
-    # validated live: v1 was shelved 2026-09-26 (people left persistent blobs, Q32);
-    # v2 adds the +-2-bearing tall check and the persistence gate (Q68).
+    # Low-obstacle memory (costmap low_obstacle_layer + low_scan). ON by default since
+    # 2026-10-03 (operator OK) after live validation (Q68: walk-by leaves nothing, a low
+    # box held to the bumper). v1 was shelved 2026-09-26 (people left blobs, Q32).
+    # low_obstacle_memory:=false reverts to the plain costmap.
     low_memory = LaunchConfiguration("low_obstacle_memory")
-    low_memory_arg = DeclareLaunchArgument("low_obstacle_memory", default_value="false")
+    low_memory_arg = DeclareLaunchArgument("low_obstacle_memory", default_value="true")
     costmap_cloud = PythonExpression(
         ["'/patchworkpp/nonground' if '", ground_seg, "' == 'true' else '/rslidar_points'"])
     costmap_min_height = PythonExpression(
@@ -56,8 +57,9 @@ def generate_launch_description():
     # safety_scan (dagger_perception) -- the rover's own frame removed by a body box,
     # range_min 0.3, so a person beside the hull (inside the 1.03 m circle the corners
     # sweep) is seen. false: p2l_safety with range_min 1.0, blind inside 1.0 m.
+    # Default true since 2026-10-03 (operator OK): driven all day with no false stop (Q65-Q68).
     near_field = LaunchConfiguration("near_field")
-    near_field_arg = DeclareLaunchArgument("near_field", default_value="false")
+    near_field_arg = DeclareLaunchArgument("near_field", default_value="true")
 
     # low_obstacle_memory:=true also ENABLES the costmaps' low_obstacle_layer (off in
     # nav2_dagger.yaml) through this overlay; otherwise extra_params is applied again,

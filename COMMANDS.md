@@ -1,7 +1,7 @@
 # Dagger UGV — command reference
 
 Every command used to build, run, test and debug the rover, in the order you need them.
-Last updated: 2026-10-03 (low-obstacle memory v2: `low_obstacle_memory`, low_scan, test_low_scan; preflight estimator checks).
+Last updated: 2026-10-03 (`near_field` + `low_obstacle_memory` on by default; low_scan; preflight estimator checks).
 
 **Conventions**
 
@@ -46,7 +46,7 @@ The install is not symlinked — an edit in `src/` does nothing until built.
 | Terminal | Command | What it starts |
 |---|---|---|
 | T1 | `ros2 launch dagger_bringup drive_bringup.launch.py` | FCU link (mavros), LiDAR, robot model. Add `use_camera:=true` for following. |
-| T2 | `ros2 launch dagger_bringup nav2_gps.launch.py` | Odometry, GPS map frame, Nav2, costmaps, collision monitor, command path to the FCU. Add `map_source:=slam` when T5 localizes. `near_field:=true`: the collision monitors' scan also sees a person beside the hull (safety_scan instead of p2l_safety). `low_obstacle_memory:=true`: low obstacles seen from afar stay in the costmaps while the rover closes in (low_scan + low_obstacle_layer). |
+| T2 | `ros2 launch dagger_bringup nav2_gps.launch.py` | Odometry, GPS map frame, Nav2, costmaps, collision monitor, command path to the FCU. Add `map_source:=slam` when T5 localizes. On by default: the near-field safety scan (sees a person beside the hull) and the low-obstacle memory (low obstacles seen from afar stay in the costmaps); `near_field:=false` / `low_obstacle_memory:=false` revert either. |
 | T3 | `ros2 launch dagger_bringup foxglove.launch.py` | Foxglove bridge on `ws://<rover-ip>:8765`. Add `with_cloud:=true` for the raw point cloud (not while driving). |
 | T4 | `ros2 launch dagger_bringup follow.launch.py …` | Person / marker following and its web page (section 7). |
 | T5 | `ros2 launch dagger_bringup slam.launch.py …` | 2D SLAM (section 6). |

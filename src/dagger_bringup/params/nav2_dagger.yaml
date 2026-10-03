@@ -296,8 +296,13 @@ global_costmap:
         # obstacle area"). Steeper decay + 0.8 m keeps the hard no-go zone (inscribed
         # 0.58 m from the footprint) but frees the soft margin. Corner clearance is
         # still enforced by RPP's footprint collision check (use_collision_detection).
-        cost_scaling_factor: 6.0
-        inflation_radius: 0.8
+        # GLOBAL (planner) only, 2026-10-03: 1.1 m / 4.0. With 0.8 / 6 the band was zero
+        # beyond 0.8 m, so Theta* passed obstacles with the hull ~0.22 m away (three
+        # detours: 0.2-0.3 m). Now: hull 0.36 m from a low box and 1.18 m from the
+        # wall-side objects (Q66, bag detour_clear1). The local costmap (controller, the
+        # 2026-09-17 lane view) stays 0.8 / 6; lane centres > 1.1 m from walls cost nothing.
+        cost_scaling_factor: 4.0
+        inflation_radius: 1.1
       always_send_full_costmap: true
 
 planner_server:
