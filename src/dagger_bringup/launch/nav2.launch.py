@@ -327,7 +327,29 @@ def generate_launch_description():
         }],
     )
 
-    # /cmd_vel_nav_raw -> stop / slowdown / approach -> /cmd_vel_nav (twist_mux).
+    # Slow zone that leaves in-place turns alone (Q70): Humble's monitor scales the whole
+    # twist in a slowdown polygon, which stalled turns near obstacles below the tracks'
+    # deadband. /cmd_vel_nav_raw -> nav_slow_zone -> /cmd_vel_nav_slow -> collision_monitor.
+    nav_slow_zone = Node(
+        package="dagger_bringup",
+        executable="nav_slow_zone",
+        name="nav_slow_zone",
+        output="screen",
+        respawn=True,
+        respawn_delay=1.0,
+        parameters=[{
+            "cmd_in": "/cmd_vel_nav_raw",
+            "cmd_out": "/cmd_vel_nav_slow",
+            "scan_topic": "/scan_safety",
+            "zone": [0.85, 2.60, 0.85],
+            "ratio": 0.4,
+            "max_points": 3,
+            "scan_timeout": 0.5,
+            "use_sim_time": use_sim_time,
+        }],
+    )
+
+    # /cmd_vel_nav_raw -> nav_slow_zone -> stop / approach -> /cmd_vel_nav (twist_mux).
     # Lifecycle-managed with Nav2: if it cannot activate, Nav2 does not come up.
     collision_monitor = Node(
         package="nav2_collision_monitor",
@@ -404,6 +426,7 @@ def generate_launch_description():
         safety_scan,
         p2l_safety,
         scan_safety_watchdog,
+        nav_slow_zone,
         collision_monitor,
         controller_server,
         planner_server,

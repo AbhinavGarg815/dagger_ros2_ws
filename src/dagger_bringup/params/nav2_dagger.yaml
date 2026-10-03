@@ -74,8 +74,12 @@ controller_server:
       # stalled; 1.5 rad/s (near FCU ATC_STR_RAT_MAX ~2.1) + high accel snaps
       # past stiction. Tuned live on-vehicle 2026-07 then persisted here.
       # (comment above is historical.) 0.45: above the ~0.3 rad/s track-stiction floor.
-      rotate_to_heading_angular_vel: 0.45
-      max_angular_accel: 1.2
+      # 2026-10-03 (Q70, operator): 0.45 -> 0.6 rad/s, and max_angular_accel 1.2 -> 3.5.
+      # RPP limits each turn command to the MEASURED rate + accel x 0.1 s: from standstill
+      # 1.2 allowed only 0.12 rad/s, under the ~0.3 breakaway, so a final heading turn
+      # never started (bag detour_fox1_132302). 3.5 -> 0.35 rad/s from standstill.
+      rotate_to_heading_angular_vel: 0.6
+      max_angular_accel: 3.5
       simulate_ahead_time: 1.0
       rotate_to_heading_once: false
       # LONG lookahead for a 350 kg tracked rover (validated 2026-09-14, legs A vs C):

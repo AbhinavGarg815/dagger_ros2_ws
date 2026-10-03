@@ -24,8 +24,9 @@ all. A FootprintApproach point count of 0 here means that gate is dead.
 Expected, standing (not crouching -- the LiDAR cannot see below ~0.93 m beside
 the front half of the hull, ~0.8 m at the rear):
   forward, walking in down the centre line:
-      CLEAR -> SLOW (x0.4 from ~2.6 m; nav only -- the follow controller slows itself)
+      CLEAR -> SLOW (x0.4 from ~2.6 m; nav only: nav_slow_zone -- the follow controller slows itself)
             -> STOP (0, from ~1.45 m) -> CLEAR again
+  turn in place (--vx 0) with something 0.85-2.6 m ahead: the turn passes UNscaled (Q70);
   turn in place (--vx 0), standing beside a side, a hand's width off the hull:
       beside the front half (x > 0.50) -> STOP (the stop zone starts at x 0.50);
       beside the middle / rear -> APPROACH: the turn is scaled by time-to-contact /
@@ -52,9 +53,10 @@ PATHS = {
     "follow": ("/cmd_vel_follow_raw", "/cmd_vel_follow",
                {"PolygonStop": "/collision_monitor_follow/stop_zone",
                 "FootprintApproach": "/collision_monitor_follow/footprint"}),
+    # nav: /cmd_vel_nav_raw passes nav_slow_zone (the slow zone, in-place turns untouched,
+    # Q70) before the monitor, so the test covers both.
     "nav": ("/cmd_vel_nav_raw", "/cmd_vel_nav",
             {"PolygonStop": "/collision_monitor/stop_zone",
-             "PolygonSlow": "/collision_monitor/slow_zone",
              "FootprintApproach": "/collision_monitor/footprint"}),
 }
 
@@ -198,7 +200,7 @@ def main():
         print(f"  smallest turn passed: x{min_ratio:.2f}")
     else:
         ok.append(("CLEAR passes the command through", "CLEAR" in seen))
-        if "PolygonSlow" in zones:
+        if a.path == "nav":
             ok.append(("SLOW zone engaged (x0.4)", "SLOW" in seen))
         ok.append(("STOP zone engaged (0)", "STOP" in seen))
         print(f"  closest approach seen: {nearest_ever:.2f} m "

@@ -1,7 +1,7 @@
 # Dagger UGV — command reference
 
 Every command used to build, run, test and debug the rover, in the order you need them.
-Last updated: 2026-10-03 (`near_field` + `low_obstacle_memory` on by default; low_scan; preflight estimator checks).
+Last updated: 2026-10-03 (nav_slow_zone, turns 0.6 rad/s; `near_field` + `low_obstacle_memory` on by default).
 
 **Conventions**
 
@@ -216,6 +216,7 @@ stack — because the scene tests are timing-sensitive under load.
 |---|---|---|
 | `python3 tools/test_person_tracking.py` | 64/64 | Person tracker rules |
 | `python3 tools/test_marker_tracking.py` | 43/43 | Marker geometry, detection on real frames, tracker rules |
+| `python3 tools/test_nav_slow_zone.py` | 11/11 | Nav2 slow zone: x0.4 while driving near obstacles, in-place turns untouched (the 0.12 rad/s turn start passes) |
 | `python3 tools/test_low_scan.py` | 13/13 | Low-obstacle memory: static box confirmed, people (standing, crouching) / walkers / no odometry never; replay of the 10-03 low-box run keeps the box to the bumper, nothing else in the lane. `--replay <bag> [--replay-only] [--params "-p min_span:=1.0"]` for another recording (box checks then do not apply). |
 | `python3 tools/test_estimator_checks.py` | 9/9 | preflight GNSS-heading / FCU-estimator checks and the odometry relay's speed gate, against a fake FCU |
 | `python3 tools/test_safety_scan.py` | 25/25 | `/scan_safety` node: body box, band, bins; identical to p2l on the 10-02 captures; parked + walk-around captures |

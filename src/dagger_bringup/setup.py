@@ -27,6 +27,7 @@ setup(
     tests_require=["pytest"],
     entry_points={
         "console_scripts": [
+            "nav_slow_zone = dagger_bringup.nav_slow_zone:main",
             "cmd_vel_safety = dagger_bringup.cmd_vel_safety:main",
             "cmd_vel_to_rc = dagger_bringup.cmd_vel_to_rc:main",
             "system_ready = dagger_bringup.system_ready:main",

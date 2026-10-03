@@ -2,7 +2,8 @@
 #
 # Last software gate on the Nav2 command path, independent of the planner,
 # controller and costmaps:
-#   controller/behavior_server -> /cmd_vel_nav_raw -> collision_monitor
+#   controller/behavior_server -> /cmd_vel_nav_raw -> nav_slow_zone (Q70)
+#   -> /cmd_vel_nav_slow -> collision_monitor
 #   -> /cmd_vel_nav -> twist_mux -> cmd_vel_safety -> mavros
 # Teleop (/cmd_vel_teleop) is NOT gated -- the RC transmitter is the manual override.
 #
@@ -36,13 +37,17 @@ collision_monitor:
     use_sim_time: false
     base_frame_id: "base_footprint"
     odom_frame_id: "odom"
-    cmd_vel_in_topic: "/cmd_vel_nav_raw"
+    # via nav_slow_zone (the slow zone, in-place turns untouched -- Q70)
+    cmd_vel_in_topic: "/cmd_vel_nav_slow"
     cmd_vel_out_topic: "/cmd_vel_nav"
     transform_tolerance: 0.5
     source_timeout: 0.5
     base_shift_correction: true
     stop_pub_timeout: 2.0
-    polygons: ["PolygonStop", "PolygonSlow", "FootprintApproach"]
+    # PolygonSlow moved to nav_slow_zone (2026-10-03, Q70): Humble scales the whole twist,
+    # which cut in-place turns near obstacles below the tracks' deadband. Kept below for
+    # reference, not in this list.
+    polygons: ["PolygonStop", "FootprintApproach"]
 
     # 0.6 m ahead of the bumper, a little wider than the hull. At 0.4 m/s the
     # chain latency (~0.3 s) + braking of a 350 kg tracked hull is ~0.3-0.4 m.
