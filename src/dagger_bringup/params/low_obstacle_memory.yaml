@@ -1,0 +1,13 @@
+# Overlay applied by nav2.launch.py only with low_obstacle_memory:=true: enables the
+# low_obstacle_layer in both costmaps (it is `enabled: false` in nav2_dagger.yaml).
+# Its source /scan_low comes from low_scan (dagger_perception); see Q68.
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      low_obstacle_layer:
+        enabled: true
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      low_obstacle_layer:
+        enabled: true

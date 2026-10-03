@@ -39,6 +39,10 @@ def generate_launch_description():
     near_field = LaunchConfiguration("near_field")
     near_field_arg = DeclareLaunchArgument("near_field", default_value="false",
                                            choices=["true", "false"])
+    # Low-obstacle memory (low_scan + the costmaps' low_obstacle_layer): see nav2.launch.py.
+    low_memory = LaunchConfiguration("low_obstacle_memory")
+    low_memory_arg = DeclareLaunchArgument("low_obstacle_memory", default_value="false",
+                                           choices=["true", "false"])
 
     localization = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -70,8 +74,9 @@ def generate_launch_description():
         launch_arguments={
             "extra_params": os.path.join(bringup_dir, "params", "nav2_odom_test.yaml"),
             "near_field": near_field,
+            "low_obstacle_memory": low_memory,
         }.items(),
     )
 
-    return LaunchDescription([tau_xy_arg, tau_yaw_arg, map_source_arg, near_field_arg,
+    return LaunchDescription([tau_xy_arg, tau_yaw_arg, map_source_arg, near_field_arg, low_memory_arg,
                               localization, gps_map_odom, nav2])

@@ -1,7 +1,7 @@
 # Dagger UGV — command reference
 
 Every command used to build, run, test and debug the rover, in the order you need them.
-Last updated: 2026-10-03 (preflight: GNSS heading + FCU estimator checks; test_estimator_checks).
+Last updated: 2026-10-03 (low-obstacle memory v2: `low_obstacle_memory`, low_scan, test_low_scan; preflight estimator checks).
 
 **Conventions**
 
@@ -36,7 +36,7 @@ Engines in `models/` are tied to this GPU and TensorRT version: rebuild them aft
 | `colcon build --packages-select dagger_bringup` | Rebuild our nodes, launch files, params, web page (seconds). |
 | `colcon build --packages-select dagger_msgs dagger_bringup` | After changing a message definition (about 1 min). |
 | `colcon build --packages-select dagger_description` | After changing the URDF or its launch files. |
-| `colcon build --packages-select dagger_perception` | After changing `safety_scan` (C++, about 50 s). |
+| `colcon build --packages-select dagger_perception` | After changing `safety_scan` / `low_scan` (C++, about 50 s). |
 
 A running node keeps its old code: restart the terminal that runs it after a build.
 The install is not symlinked — an edit in `src/` does nothing until built.
@@ -46,7 +46,7 @@ The install is not symlinked — an edit in `src/` does nothing until built.
 | Terminal | Command | What it starts |
 |---|---|---|
 | T1 | `ros2 launch dagger_bringup drive_bringup.launch.py` | FCU link (mavros), LiDAR, robot model. Add `use_camera:=true` for following. |
-| T2 | `ros2 launch dagger_bringup nav2_gps.launch.py` | Odometry, GPS map frame, Nav2, costmaps, collision monitor, command path to the FCU. Add `map_source:=slam` when T5 localizes. `near_field:=true`: the collision monitors' scan also sees a person beside the hull (safety_scan instead of p2l_safety). |
+| T2 | `ros2 launch dagger_bringup nav2_gps.launch.py` | Odometry, GPS map frame, Nav2, costmaps, collision monitor, command path to the FCU. Add `map_source:=slam` when T5 localizes. `near_field:=true`: the collision monitors' scan also sees a person beside the hull (safety_scan instead of p2l_safety). `low_obstacle_memory:=true`: low obstacles seen from afar stay in the costmaps while the rover closes in (low_scan + low_obstacle_layer). |
 | T3 | `ros2 launch dagger_bringup foxglove.launch.py` | Foxglove bridge on `ws://<rover-ip>:8765`. Add `with_cloud:=true` for the raw point cloud (not while driving). |
 | T4 | `ros2 launch dagger_bringup follow.launch.py …` | Person / marker following and its web page (section 7). |
 | T5 | `ros2 launch dagger_bringup slam.launch.py …` | 2D SLAM (section 6). |
@@ -216,6 +216,7 @@ stack — because the scene tests are timing-sensitive under load.
 |---|---|---|
 | `python3 tools/test_person_tracking.py` | 64/64 | Person tracker rules |
 | `python3 tools/test_marker_tracking.py` | 43/43 | Marker geometry, detection on real frames, tracker rules |
+| `python3 tools/test_low_scan.py` | 12/12 | Low-obstacle memory: static box confirmed, people / walkers / no odometry never; replay of the 10-03 low-box run keeps the box to the bumper, nothing else in the lane. `--replay <bag>` for another approach / drive (box checks then do not apply). |
 | `python3 tools/test_estimator_checks.py` | 9/9 | preflight GNSS-heading / FCU-estimator checks and the odometry relay's speed gate, against a fake FCU |
 | `python3 tools/test_safety_scan.py` | 25/25 | `/scan_safety` node: body box, band, bins; identical to p2l on the 10-02 captures; parked + walk-around captures |
 | `python3 tools/test_follow_controller.py` | 26/26 | Follow controller: speeds, search, close-range hold, CLEAR |

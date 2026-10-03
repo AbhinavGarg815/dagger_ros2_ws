@@ -36,8 +36,9 @@ def generate_launch_description():
     # misses anything under ~35 cm (kerbs, low debris).
     ground_seg = LaunchConfiguration("ground_seg")
     ground_seg_arg = DeclareLaunchArgument("ground_seg", default_value="true")
-    # Low-obstacle memory (costmap low_obstacle_layer + its three feeder nodes).
-    # Off: shelved 2026-09-26 -- people left persistent blobs. See nav2_dagger.yaml.
+    # Low-obstacle memory (costmap low_obstacle_layer + low_scan). Off by default until
+    # validated live: v1 was shelved 2026-09-26 (people left persistent blobs, Q32);
+    # v2 adds the +-2-bearing tall check and the persistence gate (Q68).
     low_memory = LaunchConfiguration("low_obstacle_memory")
     low_memory_arg = DeclareLaunchArgument("low_obstacle_memory", default_value="false")
     costmap_cloud = PythonExpression(
@@ -58,7 +59,13 @@ def generate_launch_description():
     near_field = LaunchConfiguration("near_field")
     near_field_arg = DeclareLaunchArgument("near_field", default_value="false")
 
-    nav2_params = [params_file, extra_params]
+    # low_obstacle_memory:=true also ENABLES the costmaps' low_obstacle_layer (off in
+    # nav2_dagger.yaml) through this overlay; otherwise extra_params is applied again,
+    # which changes nothing.
+    low_memory_overlay = PythonExpression(
+        ["'" + os.path.join(bringup_dir, "params", "low_obstacle_memory.yaml") + "' if '",
+         low_memory, "' == 'true' else '", extra_params, "'"])
+    nav2_params = [params_file, extra_params, low_memory_overlay]
 
     pointcloud_to_laserscan = Node(
         package="pointcloud_to_laserscan",
@@ -186,48 +193,40 @@ def generate_launch_description():
     )
 
     # ---- Low-obstacle memory (costmap low_obstacle_layer) -----------------------
-    # Two scans from the same cloud: everything 12-35 cm, and everything tall
-    # (40-160 cm). low_scan_filter keeps only bearings where something is low and
-    # NOT tall, so people and walls stay out of the remembering layer.
-    def p2l_band_node(name, scan, lo, hi):
-        return Node(
-            package="pointcloud_to_laserscan",
-            executable="pointcloud_to_laserscan_node",
-            name=name,
-            output="screen",
-            respawn=True,
-            respawn_delay=1.0,
-            condition=IfCondition(low_memory),
-            remappings=[("cloud_in", costmap_cloud), ("scan", scan)],
-            parameters=[{
-                "target_frame": "base_footprint",
-                "transform_tolerance": 0.1,
-                "min_height": lo,
-                "max_height": hi,
-                # identical geometry in both: the filter pairs them ray by ray
-                "angle_min": -3.14159,
-                "angle_max": 3.14159,
-                "angle_increment": 0.0087,
-                "scan_time": 0.1,
-                "range_min": 0.5,
-                "range_max": 30.0,
-                "use_inf": True,
-                "inf_epsilon": 1.0,
-                "use_sim_time": use_sim_time,
-            }],
-        )
-
-    p2l_low_all = p2l_band_node("p2l_low_all", "/scan_low_all", low_min_height, low_max_height)
-    p2l_tall = p2l_band_node("p2l_tall", "/scan_tall", 0.40, 1.60)
-    low_scan_filter = Node(
-        package="dagger_bringup",
-        executable="low_scan_filter",
-        name="low_scan_filter",
+    # low_scan (dagger_perception, C++) makes /scan_low from Patchwork++'s non-ground
+    # cloud in one pass: low returns (12-35 cm) with nothing tall (40-160 cm) within
+    # +-2 bearings, and only once their odom cell has been hit in >= 3 scans within
+    # 2 s (people move, boxes don't). The layer clears only beyond 4 m, so a low
+    # object seen from afar is remembered while the rover closes in (Q68: without it
+    # a 26 cm box was erased 3.8 m out and driven over). Replaces two extra p2l
+    # instances and the Python low_scan_filter (2026-10-03).
+    low_scan = Node(
+        package="dagger_perception",
+        executable="low_scan",
+        name="low_scan",
         output="screen",
-        condition=IfCondition(low_memory),
         respawn=True,
         respawn_delay=1.0,
-        parameters=[{"use_sim_time": use_sim_time}],
+        condition=IfCondition(low_memory),
+        remappings=[("cloud_in", costmap_cloud), ("odom", "/odometry/filtered"),
+                    ("scan", "/scan_low")],
+        parameters=[{
+            "target_frame": "base_footprint",
+            "low_min_height": low_min_height,
+            "low_max_height": low_max_height,
+            "tall_min_height": 0.40,
+            "tall_max_height": 1.60,
+            "tall_bins": 2,
+            "tall_margin": 0.5,
+            "range_min": 0.5,
+            "range_max": 30.0,
+            "persistence": True,
+            "cell_size": 0.15,
+            "persist_window": 2.0,
+            "min_hits": 3,
+            "body_box": [-0.90, 0.50, -0.60, 0.60],
+            "use_sim_time": use_sim_time,
+        }],
     )
 
     # Permanent /scan subscriber (prevents the p2l lazy-subscribe flap) + restarts
@@ -397,9 +396,7 @@ def generate_launch_description():
         near_field_arg,
         patchworkpp,
         p2l_band,
-        p2l_low_all,
-        p2l_tall,
-        low_scan_filter,
+        low_scan,
         pointcloud_to_laserscan,
         scan_watchdog,
         safety_scan,

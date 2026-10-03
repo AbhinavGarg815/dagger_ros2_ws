@@ -3,7 +3,7 @@
 <package format="3">
   <name>dagger_perception</name>
   <version>0.1.0</version>
-  <description>Dagger UGV point-cloud nodes in C++: safety_scan (the collision monitors' /scan_safety, with the rover's own body removed).</description>
+  <description>Dagger UGV point-cloud nodes in C++: safety_scan (the collision monitors' /scan_safety, with the rover's own body removed) and low_scan (low-only, persistent returns for the costmap's low-obstacle memory).</description>
   <maintainer email="abhinavgrg815@gmail.com">Abhinav</maintainer>
   <license>Proprietary</license>
 
@@ -15,6 +15,7 @@
   <depend>rclcpp</depend>
   <depend>sensor_msgs</depend>
   <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
   <depend>tf2</depend>
   <depend>tf2_msgs</depend>
 
