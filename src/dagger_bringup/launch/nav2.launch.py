@@ -8,6 +8,17 @@ from launch.conditions import IfCondition, UnlessCondition
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
+# Top of the safety band (/scan_safety) and of the overhang band (/scan_overhang), in
+# base_footprint. Anything entirely above it passes over the rover: the tallest part is
+# the LiDAR housing, ~1.17 m (operator, 2026-10-03; the GNSS posts beside it ~1.11 m),
+# + 0.18 m for the 2 deg beam spacing (5 cm at 1.5 m) and ~4 deg of pitch.
+# 1.60 -> 1.35 (2026-10-03, operator OK, Q71): a canopy at 1.41-1.47 m held Nav2 in
+# STOP for 36 s. Raise it if anything taller is mounted on the rover.
+SAFETY_BAND_TOP = 1.35
+# The rover's own frame, GNSS posts and mast (x_min, x_max, y_min, y_max in
+# base_footprint, all heights; Q65): dropped from every cloud-to-scan conversion here.
+BODY_BOX = [-0.90, 0.50, -0.60, 0.60]
+
 
 def generate_launch_description():
     bringup_dir = get_package_share_directory("dagger_bringup")
@@ -60,6 +71,12 @@ def generate_launch_description():
     # Default true since 2026-10-03 (operator OK): driven all day with no false stop (Q65-Q68).
     near_field = LaunchConfiguration("near_field")
     near_field_arg = DeclareLaunchArgument("near_field", default_value="true")
+    # Overhang layer (P19, report Q71). true: overhang_scan + the costmaps'
+    # overhang_layer, so the planner and the Foxglove costmap see canopies and branches
+    # between the costmap band (<= 0.75 m) and SAFETY_BAND_TOP -- until now only the
+    # collision monitor saw them. false: the costmaps as before.
+    overhang = LaunchConfiguration("overhang")
+    overhang_arg = DeclareLaunchArgument("overhang", default_value="true")
 
     # low_obstacle_memory:=true also ENABLES the costmaps' low_obstacle_layer (off in
     # nav2_dagger.yaml) through this overlay; otherwise extra_params is applied again,
@@ -67,7 +84,10 @@ def generate_launch_description():
     low_memory_overlay = PythonExpression(
         ["'" + os.path.join(bringup_dir, "params", "low_obstacle_memory.yaml") + "' if '",
          low_memory, "' == 'true' else '", extra_params, "'"])
-    nav2_params = [params_file, extra_params, low_memory_overlay]
+    overhang_overlay = PythonExpression(
+        ["'" + os.path.join(bringup_dir, "params", "overhang_layer.yaml") + "' if '",
+         overhang, "' == 'true' else '", extra_params, "'"])
+    nav2_params = [params_file, extra_params, low_memory_overlay, overhang_overlay]
 
     pointcloud_to_laserscan = Node(
         package="pointcloud_to_laserscan",
@@ -226,7 +246,41 @@ def generate_launch_description():
             "persist_window": 2.0,
             "min_hits": 5,
             "min_span": 1.0,
-            "body_box": [-0.90, 0.50, -0.60, 0.60],
+            "body_box": BODY_BOX,
+            "use_sim_time": use_sim_time,
+        }],
+    )
+
+    # ---- Overhang layer (costmap overhang_layer, P19) ---------------------------
+    # Canopies, branches and anything else 0.75 m - SAFETY_BAND_TOP high: above the
+    # costmap's /scan and /scan_band, below the top of the rover. A second safety_scan
+    # instance on the costmap's cloud (Patchwork++ non-ground with ground_seg, so a
+    # slope is not an overhang), same body box, range_min 0.5 as /scan. The planner
+    # then keeps its inflation clearance from what the collision monitor would stop
+    # for (live 2026-10-03: a canopy the planner could not see ended a goal in STOP).
+    overhang_scan = Node(
+        package="dagger_perception",
+        executable="safety_scan",
+        name="overhang_scan",
+        output="screen",
+        respawn=True,
+        respawn_delay=1.0,
+        condition=IfCondition(overhang),
+        remappings=[("cloud_in", costmap_cloud), ("scan", "/scan_overhang")],
+        parameters=[{
+            "target_frame": "base_footprint",
+            "min_height": 0.75,
+            "max_height": SAFETY_BAND_TOP,
+            "angle_min": -3.14159,
+            "angle_max": 3.14159,
+            "angle_increment": 0.0087,
+            "scan_time": 0.1,
+            "range_min": 0.5,
+            "range_max": 30.0,
+            "use_inf": True,
+            "inf_epsilon": 1.0,
+            "body_filter": True,
+            "body_box": BODY_BOX,
             "use_sim_time": use_sim_time,
         }],
     )
@@ -247,7 +301,8 @@ def generate_launch_description():
 
     # ---- Collision monitor: independent last gate on the Nav2 command path ----
     # Dedicated scan for the safety layer, separate from the costmap /scan: taller
-    # band (0.30-1.60 m, a person is seen right up to the bumper). Two sources,
+    # band (0.30-1.35 m = SAFETY_BAND_TOP, a person is seen right up to the bumper;
+    # anything entirely above the rover is ignored). Two sources,
     # chosen by near_field, with the same band, bins and range_max:
     #  safety_scan -- drops the rover's own top frame and GNSS posts with a body box
     #    in base_footprint (all of it lies inside x -0.85..0.42, y +-0.56; Q65),
@@ -266,7 +321,7 @@ def generate_launch_description():
         parameters=[{
             "target_frame": "base_footprint",
             "min_height": 0.30,
-            "max_height": 1.60,
+            "max_height": SAFETY_BAND_TOP,
             "angle_min": -3.14159,
             "angle_max": 3.14159,
             "angle_increment": 0.0087,
@@ -275,11 +330,11 @@ def generate_launch_description():
             "range_max": 20.0,
             "use_inf": True,
             "inf_epsilon": 1.0,
-            # x_min, x_max, y_min, y_max (m, base_footprint, all heights). Margins >= 4 cm
-            # over the frame; the front deck (x 0.50-0.85) stays visible. Re-check with
-            # the empty capture (COMMANDS.md section 8) after mounting anything on top.
+            # BODY_BOX: margins >= 4 cm over the frame; the front deck (x 0.50-0.85)
+            # stays visible. Re-check with the empty capture (COMMANDS.md section 8)
+            # after mounting anything on top.
             "body_filter": True,
-            "body_box": [-0.90, 0.50, -0.60, 0.60],
+            "body_box": BODY_BOX,
             "use_sim_time": use_sim_time,
         }],
     )
@@ -297,7 +352,7 @@ def generate_launch_description():
             "target_frame": "base_footprint",
             "transform_tolerance": 0.1,
             "min_height": 0.30,
-            "max_height": 1.60,
+            "max_height": SAFETY_BAND_TOP,
             "angle_min": -3.14159,
             "angle_max": 3.14159,
             "angle_increment": 0.0087,
@@ -418,9 +473,11 @@ def generate_launch_description():
         ground_seg_arg,
         low_memory_arg,
         near_field_arg,
+        overhang_arg,
         patchworkpp,
         p2l_band,
         low_scan,
+        overhang_scan,
         pointcloud_to_laserscan,
         scan_watchdog,
         safety_scan,

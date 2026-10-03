@@ -1,0 +1,14 @@
+# Overlay applied by nav2.launch.py only with overhang:=true (the default): enables the
+# overhang_layer in both costmaps (it is `enabled: false` in nav2_dagger.yaml).
+# Its source /scan_overhang comes from overhang_scan (dagger_perception safety_scan);
+# see Q71 / P19.
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      overhang_layer:
+        enabled: true
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      overhang_layer:
+        enabled: true

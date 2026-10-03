@@ -1,7 +1,7 @@
 # Dagger UGV — command reference
 
 Every command used to build, run, test and debug the rover, in the order you need them.
-Last updated: 2026-10-03 (nav_slow_zone, turns 0.6 rad/s; `near_field` + `low_obstacle_memory` on by default).
+Last updated: 2026-10-03 (overhang layer; safety band top 1.35 m; nav_slow_zone, turns 0.6 rad/s; `near_field` + `low_obstacle_memory` on by default).
 
 **Conventions**
 
@@ -46,7 +46,7 @@ The install is not symlinked — an edit in `src/` does nothing until built.
 | Terminal | Command | What it starts |
 |---|---|---|
 | T1 | `ros2 launch dagger_bringup drive_bringup.launch.py` | FCU link (mavros), LiDAR, robot model. Add `use_camera:=true` for following. |
-| T2 | `ros2 launch dagger_bringup nav2_gps.launch.py` | Odometry, GPS map frame, Nav2, costmaps, collision monitor, command path to the FCU. Add `map_source:=slam` when T5 localizes. On by default: the near-field safety scan (sees a person beside the hull) and the low-obstacle memory (low obstacles seen from afar stay in the costmaps); `near_field:=false` / `low_obstacle_memory:=false` revert either. |
+| T2 | `ros2 launch dagger_bringup nav2_gps.launch.py` | Odometry, GPS map frame, Nav2, costmaps, collision monitor, command path to the FCU. Add `map_source:=slam` when T5 localizes. On by default: the near-field safety scan (sees a person beside the hull), the low-obstacle memory (low obstacles seen from afar stay in the costmaps) and the overhang layer (canopies and branches 0.75–1.35 m in the costmaps); `near_field:=false` / `low_obstacle_memory:=false` / `overhang:=false` revert each. Things entirely above 1.35 m (above the rover) are ignored by the stop path: `SAFETY_BAND_TOP` in nav2.launch.py — raise it if anything taller is mounted. |
 | T3 | `ros2 launch dagger_bringup foxglove.launch.py` | Foxglove bridge on `ws://<rover-ip>:8765`. Add `with_cloud:=true` for the raw point cloud (not while driving). |
 | T4 | `ros2 launch dagger_bringup follow.launch.py …` | Person / marker following and its web page (section 7). |
 | T5 | `ros2 launch dagger_bringup slam.launch.py …` | 2D SLAM (section 6). |
@@ -188,7 +188,7 @@ Names are timestamped automatically; start the recorder before the test and stop
 | Is the FCU connected, armed, which mode? | `ros2 topic echo /mavros/state --once` |
 | Is FCU telemetry really arriving? | `python3 tools/fcu_flowing.py` |
 | Is the FCU estimator healthy (GNSS heading, no drift)? | `python3 tools/preflight.py --no-config` (FCU / GNSS section). The FCU's own messages (`FCU: AHRS: DCM active` ↔ `EKF3 active` flipping = EKF3 unhealthy) appear only in the T1 terminal. A full power-restart of the rover cleared one such divergence (2026-10-03). |
-| Is a sensor or topic alive, at what rate? | `ros2 topic hz /rslidar_points` · `/scan` · `/scan_safety` · `/odometry/filtered` · `/d435/color/image_raw` |
+| Is a sensor or topic alive, at what rate? | `ros2 topic hz /rslidar_points` · `/scan` · `/scan_safety` · `/scan_overhang` · `/odometry/filtered` · `/d435/color/image_raw` |
 | What is following doing? | `ros2 topic echo /follow/state` · `python3 tools/follow_status.py` |
 | Who publishes / subscribes a topic? | `ros2 topic info -v <topic>` |
 | Is a lifecycle node active? | `ros2 lifecycle get /collision_monitor_follow` (or `/controller_server`, `/planner_server`, …) |
@@ -219,7 +219,7 @@ stack — because the scene tests are timing-sensitive under load.
 | `python3 tools/test_nav_slow_zone.py` | 11/11 | Nav2 slow zone: x0.4 while driving near obstacles, in-place turns untouched (the 0.12 rad/s turn start passes) |
 | `python3 tools/test_low_scan.py` | 13/13 | Low-obstacle memory: static box confirmed, people (standing, crouching) / walkers / no odometry never; replay of the 10-03 low-box run keeps the box to the bumper, nothing else in the lane. `--replay <bag> [--replay-only] [--params "-p min_span:=1.0"]` for another recording (box checks then do not apply). |
 | `python3 tools/test_estimator_checks.py` | 9/9 | preflight GNSS-heading / FCU-estimator checks and the odometry relay's speed gate, against a fake FCU |
-| `python3 tools/test_safety_scan.py` | 25/25 | `/scan_safety` node: body box, band, bins; identical to p2l on the 10-02 captures; parked + walk-around captures |
+| `python3 tools/test_safety_scan.py` | 33/33 | `/scan_safety` + `/scan_overhang` (same node, live params): body box, bands 0.30–1.35 / 0.75–1.35, bins; identical to p2l on the 10-02 captures; parked + walk-around captures; fox2 canopy no longer stops, Q66 plant reaches the overhang scan |
 | `python3 tools/test_follow_controller.py` | 26/26 | Follow controller: speeds, search, close-range hold, CLEAR |
 | `python3 tools/test_click_follow.py all` | 53/53 | Person following scenes (or one of `main cross occlude reid beside close hug sign wall`) |
 | `python3 tools/test_marker_follow.py all` | 25/25 | Marker following scenes (`follow`, `switch`) |

@@ -8,7 +8,9 @@
 # Teleop (/cmd_vel_teleop) is NOT gated -- the RC transmitter is the manual override.
 #
 # Geometry (base_footprint = hull centre; hull +-0.85 x +-0.58 m; LiDAR at x 0.29,
-# z 1.12). Source = /scan_safety (band 0.30-1.60 m), from nav2.launch.py:
+# z 1.12). Source = /scan_safety (band 0.30-1.35 m, SAFETY_BAND_TOP in nav2.launch.py:
+# the LiDAR housing, the rover's top, is ~1.17 m, so a canopy entirely above 1.35 m
+# passes over and does not stop it -- 1.60 until 2026-10-03, Q71), from nav2.launch.py:
 #   near_field:=true  -- safety_scan: the rover's own frame removed by a body box
 #                        (x -0.90..0.50, y +-0.60), range_min 0.3. Sees a standing person
 #                        beside the hull, inside the 1.03 m circle the corners sweep.

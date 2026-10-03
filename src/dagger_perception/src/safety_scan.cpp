@@ -55,7 +55,9 @@ public:
   {
     target_frame_ = declare_parameter<std::string>("target_frame", "base_footprint");
     min_height_ = declare_parameter<double>("min_height", 0.30);
-    max_height_ = declare_parameter<double>("max_height", 1.60);
+    // 1.35: the rover's top (LiDAR, ~1.17 m) + margin; anything entirely above passes
+    // over (Q71). nav2.launch.py sets it from SAFETY_BAND_TOP.
+    max_height_ = declare_parameter<double>("max_height", 1.35);
     range_min_ = declare_parameter<double>("range_min", 0.3);
     range_max_ = declare_parameter<double>("range_max", 20.0);
     const bool use_inf = declare_parameter<bool>("use_inf", true);

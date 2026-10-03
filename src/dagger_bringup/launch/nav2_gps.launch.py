@@ -43,6 +43,10 @@ def generate_launch_description():
     low_memory = LaunchConfiguration("low_obstacle_memory")
     low_memory_arg = DeclareLaunchArgument("low_obstacle_memory", default_value="true",
                                            choices=["true", "false"])
+    # Overhang layer (overhang_scan + the costmaps' overhang_layer): see nav2.launch.py.
+    overhang = LaunchConfiguration("overhang")
+    overhang_arg = DeclareLaunchArgument("overhang", default_value="true",
+                                         choices=["true", "false"])
 
     localization = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -75,8 +79,9 @@ def generate_launch_description():
             "extra_params": os.path.join(bringup_dir, "params", "nav2_odom_test.yaml"),
             "near_field": near_field,
             "low_obstacle_memory": low_memory,
+            "overhang": overhang,
         }.items(),
     )
 
-    return LaunchDescription([tau_xy_arg, tau_yaw_arg, map_source_arg, near_field_arg, low_memory_arg,
+    return LaunchDescription([tau_xy_arg, tau_yaw_arg, map_source_arg, near_field_arg, low_memory_arg, overhang_arg,
                               localization, gps_map_odom, nav2])
