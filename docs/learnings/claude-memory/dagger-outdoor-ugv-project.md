@@ -1,13 +1,13 @@
 ---
 name: dagger-outdoor-ugv-project
-description: "Dagger — outdoor-only autonomous tracked UGV; stack, hardware, and target capabilities"
+description: "Dagger — autonomous tracked UGV, outdoor AND indoor (since 2026-10-03); stack, hardware, and target capabilities"
 metadata: 
   node_type: memory
   type: project
   originSessionId: 4d48c96a-557d-4105-b251-751ed27dee94
 ---
 
-**Dagger** is an autonomous **caterpillar/tracked diff-drive rover**, ~350 kg, **outdoor-use only** (user confirmed 2026-07-08).
+**Dagger** is an autonomous **caterpillar/tracked diff-drive rover**, ~350 kg. Was outdoor-only (2026-07-08); **user 2026-10-03: must work both outdoors and indoors** — design odometry/localization for GNSS-denied indoor use too (FCU will need ExternalNav indoors).
 
 Compute/stack: Jetson Orin Nano 8GB, JetPack 6 / L4T R36.5, ROS 2 Humble. Control chain: Jetson → **MAVROS** → **Cube Orange Plus running ArduPilot Rover** → track motors. Jetson commands velocity in GUIDED mode via `/mavros/setpoint_velocity/cmd_vel_unstamped`. IMU + GPS come from the Cube via MAVROS.
 

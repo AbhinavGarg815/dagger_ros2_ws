@@ -15,6 +15,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/MarkerDetections.msg"
   "msg/MarkerTrack.msg"
   "msg/MarkerTracks.msg"
+  "msg/LidarOdomStatus.msg"
   DEPENDENCIES std_msgs geometry_msgs
 )
 
