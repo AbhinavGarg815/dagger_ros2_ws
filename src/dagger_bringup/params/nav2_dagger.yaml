@@ -29,8 +29,12 @@ controller_server:
       required_movement_radius: 0.25
       movement_time_allowance: 25.0
     general_goal_checker:
-      stateful: true
-      plugin: "nav2_controller::SimpleGoalChecker"
+      # dagger_nav_plugins::StickyGoalChecker (2026-10-05, report Q76): SimpleGoalChecker whose
+      # xy tolerance widens to xy_goal_tolerance_sticky once the goal position is reached, until
+      # the heading is. RPP reads it every cycle; with a fixed 0.4 m the final 180 deg turn moved
+      # base_footprint (the tracks pivot ~0.07 m behind it) outside 0.4 m, RPP drove back,
+      # re-entered, turned again -- ~40 times (bag detour_heading1_122047).
+      plugin: "dagger_nav_plugins::StickyGoalChecker"
       # 0.25 -> 0.4 m (2026-09-16): pure pursuit steers as 1/distance^2, so chasing
       # the last 0.25 m turned a harmless 0.2-0.3 m lateral offset into a 57 deg
       # heading swing in the final metre (bag pf_lane_final), then ~3 s rotating
@@ -40,6 +44,7 @@ controller_server:
       # 0.4 -> 0.2 rad (2026-09-17): a 180 deg goal heading stopped 17 deg short --
       # the shim ends the final turn as soon as it enters the tolerance window.
       yaw_goal_tolerance: 0.2
+      xy_goal_tolerance_sticky: 0.8
     FollowPath:
       plugin: "nav2_rotation_shim_controller::RotationShimController"
       primary_controller: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"

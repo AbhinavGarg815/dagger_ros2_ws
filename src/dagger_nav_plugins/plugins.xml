@@ -1,0 +1,5 @@
+<library path="dagger_nav_plugins">
+  <class type="dagger_nav_plugins::StickyGoalChecker" base_class_type="nav2_core::GoalChecker">
+    <description>SimpleGoalChecker whose xy tolerance widens to xy_goal_tolerance_sticky once the goal position is reached, until the goal heading is reached or the goal changes.</description>
+  </class>
+</library>

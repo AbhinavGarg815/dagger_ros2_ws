@@ -37,6 +37,7 @@ Engines in `models/` are tied to this GPU and TensorRT version: rebuild them aft
 | `colcon build --packages-select dagger_msgs dagger_bringup` | After changing a message definition (about 1 min). |
 | `colcon build --packages-select dagger_description` | After changing the URDF or its launch files. |
 | `colcon build --packages-select dagger_perception` | After changing `safety_scan` / `low_scan` (C++, about 50 s). |
+| `colcon build --packages-select dagger_nav_plugins` | After changing the Nav2 plugins (StickyGoalChecker, about 40 s). |
 
 A running node keeps its old code: restart the terminal that runs it after a build.
 The install is not symlinked — an edit in `src/` does nothing until built.
@@ -221,6 +222,7 @@ stack — because the scene tests are timing-sensitive under load.
 | `python3 tools/test_estimator_checks.py` | 9/9 | preflight GNSS-heading / FCU-estimator checks and the odometry relay's speed gate, against a fake FCU |
 | `python3 tools/test_safety_scan.py` | 33/33 | `/scan_safety` + `/scan_overhang` (same node, live params): body box, bands 0.30–1.35 / 0.75–1.35, bins; identical to p2l on the 10-02 captures; parked + walk-around captures; fox2 canopy no longer stops, Q66 plant reaches the overhang scan |
 | `python3 tools/test_lidar_odom.py` | 12/12 | `lidar_odom` (dagger_perception): synthetic room/motion/rejects/corridor + lockstep replay of fox3 vs a direct registration |
+| `colcon test --packages-select dagger_nav_plugins && colcon test-result --verbose --test-result-base build/dagger_nav_plugins` | 4/4 | StickyGoalChecker (Q76): the live hunting case, new goal, drift re-arm, plain goals |
 | `python tools/lo_bench.py <bag> <out.npz> [methods]` then `python tools/lo_eval.py <out.npz>` | — | LiDAR-odometry benchmark (KISS, GenZ, VGICP variants) without ground truth; needs a venv with the pip wheels `kiss-icp` 1.3.0, `small_gicp` 1.0.1, GenZ-ICP built from source, and `OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1` |
 | `python tools/lo_node_bench.py <bag> <out.npz> [--domain 86]` then `python tools/lo_eval.py <out.npz>` | — | the C++ `lidar_odom` node replayed in lockstep beside the Python VGICP reference, scored by the same evaluator (same venv) |
 | `python tools/lo_bag_to_bench.py <bag> <out.npz>` then `python tools/lo_eval.py <out.npz>` | — | a recorded drive with `lidar_odom` running: live `/lidar_odom/odometry` vs `/odometry/filtered` against direct registrations; health + start→end check (same venv) |
