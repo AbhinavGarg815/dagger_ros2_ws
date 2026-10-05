@@ -18,6 +18,7 @@ Variants (heading inputs of the odometry EKF):
     V4  no GNSS heading: gyro only
     V5  LiDAR POSE (x, y, yaw; odom1_relative) + FCU velocity + gyro, no GNSS heading
     V6  V5 + the GNSS heading as live
+    F9, F4  V0 with the FCU velocity's variance x9 / x4 (sigma 0.1 -> 0.3 / 0.2 m/s, by a relay)
 """
 import argparse, os, subprocess, sys, time
 
@@ -30,6 +31,8 @@ VARIANTS = {
     "V5": {"overrides": {"odom1_config": "lidar_pose", "odom1_relative": "true", "imu1": "/gps/heading_imu_disabled"},
            "heading_scale": None},
     "V6": {"overrides": {"odom1_config": "lidar_pose", "odom1_relative": "true"}, "heading_scale": None},
+    "F9": {"overrides": {}, "heading_scale": None, "fcu_scale": 9.0},
+    "F4": {"overrides": {}, "heading_scale": None, "fcu_scale": 4.0},
 }
 ODOM1_POSE = ("[true, true, false, false, false, true, false, false, false, "
               "false, false, false, false, false, false]")
@@ -80,8 +83,17 @@ def run_one(bag, out_dir, name, domain, rate):
         def relay(m, k=v["heading_scale"]):
             c = list(m.orientation_covariance); c[8] *= k; m.orientation_covariance = c; pub.publish(m)
         n.create_subscription(Imu, "/gps/heading_imu_raw", relay, 10)
+    if v.get("fcu_scale"):
+        fpub = n.create_publisher(Odometry, "/fcu/odom", 10)
+        def fscale(m, k=v["fcu_scale"]):
+            c = list(m.twist.covariance)
+            for i in (0, 7, 14): c[i] *= k
+            m.twist.covariance = c; fpub.publish(m)
+        n.create_subscription(Odometry, "/fcu/odom_raw", fscale, 10)
     time.sleep(4.0)
     remap = ["--remap", "/gps/heading_imu:=/gps/heading_imu_raw"] if v["heading_scale"] else []
+    if v.get("fcu_scale"):
+        remap += ["--remap", "/fcu/odom:=/fcu/odom_raw"]
     play = subprocess.Popen(
         ["bash", "-lc", f"{env} && exec ros2 bag play {bag} --clock 100 --rate {rate} --topics /fcu/odom "
          f"/mavros/imu/data_raw /gps/heading_imu /lidar_odom/odometry /tf_static {' '.join(remap)}"],
