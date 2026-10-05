@@ -1,4 +1,4 @@
-# Dagger UGV — session hand-off prompt (written 2026-10-03 wrap-up, for the next session)
+# Dagger UGV — session hand-off prompt (written 2026-10-05 wrap-up, for the next session)
 
 Paste everything below the line into a new session.
 
@@ -8,16 +8,14 @@ Continue the Dagger UGV project: a 350 kg tracked rover that must work **outdoor
 ROS 2 Humble on a Jetson Orin Nano 8 GB, ArduPilot Rover on a Cube Orange+ over MAVROS,
 RS-Helios-16P LiDAR, RealSense D435 (colour only), dual-antenna GNSS. Workspace
 `/home/jetson/ros2_ws` (git, private remote github.com/AbhinavGarg815/dagger_ros2_ws, pushed at the
-2026-10-03 wrap-up).
+2026-10-05 wrap-up).
 
-**This session's goal: finish the LiDAR odometry (P20, report Q72-Q73).** Plan first, get my OK, then build.
+**Next session: confirm the Q79 weighting live, then pick from the open items with me.** Plan first, get my OK, then build.
 
 ## Read first, in this order
-1. `docs/reports/issues_and_fixes.md`: Q72 (odometry stalled under degraded GNSS), Q73 (LiDAR-odometry
-   research + benchmark + the C++ node and its open bug), Q71 (band top 1.35 m, overhang layer), Open items.
-2. `src/dagger_perception/src/lidar_odom.cpp` (header says what is wrong), `tools/test_lidar_odom.py`,
-   `tools/lo_bench.py`, `tools/lo_eval.py`.
-3. `COMMANDS.md` sections 2 (terminals) and 11 (tests).
+1. `docs/reports/issues_and_fixes.md`: Q72-Q79 (LiDAR odometry: why, selection, the C++ bug, live shadow/fused runs,
+   sticky goal checker, heading replay, twist-spike gate reverted, indoor tape test), then Open items.
+2. `COMMANDS.md` sections 2 (terminals: T2 defaults) and 11 (tests).
 
 ## Standing rules (from me, still in force)
 
@@ -45,35 +43,31 @@ RS-Helios-16P LiDAR, RealSense D435 (colour only), dual-antenna GNSS. Workspace
 - I want a plan before implementation; recommend one option rather than listing all of them.
 
 
-## Where it stands (2026-10-03)
-- Obstacle avoidance: near field (P13), low-obstacle memory (P14), detour clearance, Foxglove goals in
-  odom, turn deadlock (Q70), overhangs (Q71: safety band top 1.60 -> 1.35 m = rover top 1.17 + margin;
-  overhang costmap layer) — all built, defaults on, live-checked. Remaining: drop-offs (P18),
-  follow-path avoidance, forward-only stop zone (a stop-zone hit blocks in-place turns; Q72 goal 3).
-- **P20 (Q72):** `/odometry/filtered` takes its velocity from the FCU's EK3 (GNSS velocity). Near the
-  wall / under the lane-end canopy (h_acc 3-4 m, dual-antenna heading invalid) it read stopped/backing
-  while the rover drove 1.1 m — costmap smeared, goal refused; the FCU also overspeeds there.
-- **Q73 selection (done):** small_gicp VGICP scan-to-model, 0.5 m Gaussian voxels (LRU 100/10), 0.2 m
-  downsampling, 10-neighbour covariances, constant-velocity guess, no deskew. Benchmark over 6 drives /
-  13 k scans beat KISS-ICP (pivot heading errors, jitter) and GenZ-ICP (CPU spikes > 1 s), ~35 % of a core.
-  Python reference (pip small_gicp) is stable on every drive.
-- **C++ `lidar_odom` (built, NOT launched):** fox3 lockstep replay matches the Python pipeline scan for
-  scan for ~35 parked scans, then the constant-velocity guess creeps (-0.003 -> -0.014 -> -0.02 m/scan)
-  and it diverges. Checked and ruled out: Eigen angle maths, the covariance setter, optimizer state
-  between calls, -march flags, float vs double transform (Python with float is stable). `debug:=true`
-  logs map size / guess / result / error per scan; the Python side is in lo_bench.py's vgicp05.
 
-## Next steps (my plan, for your OK)
-1. Find the C++/Python difference (first suspect: the step/guess bookkeeping or the voxel map built by
-   the node vs the pip build — e.g. build the node against the pip wheel's headers, or run the Python
-   pipeline through the node's exact inputs) until `tools/test_lidar_odom.py` passes on fox3, then on
-   all 6 drives with the same accuracy as lo_eval's vgicp05.
-2. Calibrate the covariance (cov_scale, degenerate_info: corridor 6.7 k vs real 150-180 k).
-3. Live, disarmed: run `lidar_odom` beside the stack, compare with `/odometry/filtered`, CPU by PID.
-4. EKF: fuse its LINEAR velocity (yaw stays gyro + dual-antenna heading), behind a launch arg; then
-   the guard (LiDAR vs FCU velocity disagreement -> zero Nav2 commands; stop path — needs my OK).
-5. Record an indoor corridor drive (RC) for validation. Indoors the FCU has no position/yaw source:
-   ExternalNav (EK3 source set 2) will be needed — FCU parameters are mine.
+## Where it stands (2026-10-05)
+- **LiDAR odometry is live and the T2 default** (`lidar_odom:=true`): `lidar_odom` (dagger_perception, small_gicp
+  VGICP, 0.5 m voxels) fused into `/odometry/filtered` as linear velocity; yaw stays gyro + dual-antenna heading.
+  `lidar_odom:=shadow` runs it unfused, `false` reverts. ~45 % of one core. Validated: 7 drives offline = the Python
+  reference; live shadow (outdoor + indoor), live fused (3/3, 5/5 goals); indoor tape: LiDAR 6.96/6.85 m vs ~7 m.
+- **Q79 (applied, NOT yet driven):** with LiDAR fusion the FCU velocity is σ 0.3 m/s (was 0.1) — the fused
+  odometry was 21-27 % short indoors; replay says −4/−6 % now. **First thing: one drive to confirm**
+  (`bash tools/detour_record.sh <name>`, a few straight legs + turns; `tools/lo_bag_to_bench.py` + `lo_eval.py`).
+- **Q76 StickyGoalChecker** (new pkg `dagger_nav_plugins`): goal xy tolerance 0.4 → 0.8 m once reached, so the
+  final turn (tracks pivot ~0.07 m behind base_footprint) no longer hunts. Live 5/5. Known: after a big final
+  turn the rover sits ~0.4-0.6 m from the clicked point.
+- **Decided with data, no change:** heading set-up (Q77, offline EKF replay — keep gyro + GNSS heading);
+  no stop-path speed guard (FCU overspeed p95 ≤ 0.10 m/s); LiDAR twist spikes at turn ends minor — a gate was tried
+  and reverted (Q78). Future option only: lidar_odom as the primary odom (EKF fallback).
+- Obstacle avoidance (Q65-Q71) done: near field, low-obstacle memory, overhang layer, band top 1.35 m.
+- Tools: `tools/ekf_replay.py` (+ `ekf_replay_score.py`) replays ekf_local offline from bags recorded since Q75;
+  `lo_bag_to_bench.py`, `lo_node_bench.py`, `lo_eval.py` score odometries without ground truth (venv with the
+  small_gicp pip wheel; OMP/OPENBLAS threads = 1). Two replays at once collide (same domains) — run sequentially.
+
+## Open (pick with me)
+- Indoor GUIDED needs the FCU on ExternalNav (EK3 source set 2 from LiDAR odometry) — FCU parameters are mine.
+  Also `FS_EKF_ACTION = 0` (EKF failsafe disabled) — my call.
+- P18 drop-offs invisible to Nav2 · forward-only stop zone (a stop-zone hit blocks in-place turns) ·
+  follow-path avoidance · turn-into-box stop margin at 0.6 rad/s · Nav2 task 2 · handset latency/CPU (P17).
 
 ## Lessons that cost time before
 
@@ -95,6 +89,8 @@ RS-Helios-16P LiDAR, RealSense D435 (colour only), dual-antenna GNSS. Workspace
 - Foxglove `with_cloud:=true` eats a core; leave it off while driving.
 
 
-## Also open (details in the report's Open items)
-P18 drop-offs · forward-only stop zone · follow-path avoidance · turn-into-box stop margin at 0.6 rad/s ·
-Nav2 task 2 · handset latency/CPU options.
+- **Don't over-engineer:** check the live impact with data before building; small effect → record and move on;
+  a fix that doesn't clearly win → revert, don't stack another layer (2026-10-05).
+- When porting an odometry loop, never trust `Isometry3d::inverse()` on optimiser outputs — re-orthonormalise
+  (Q73: the rotation drift doubled per scan through the constant-velocity guess).
+- A new message field breaks decoding of recorded bags (Fast CDR is strict) — derive it from existing fields.

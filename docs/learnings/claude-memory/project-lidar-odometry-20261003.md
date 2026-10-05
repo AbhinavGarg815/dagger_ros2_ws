@@ -1,6 +1,6 @@
 ---
 name: project-lidar-odometry-20261003
-description: P20/Q73 LiDAR odometry — VGICP 0.5 m selected by 6-drive benchmark; C++ lidar_odom built but diverges on replay (open bug); next steps
+description: P20/Q73 LiDAR odometry — VGICP 0.5 m selected; C++ lidar_odom FIXED 10-05 (rotation drift via Isometry inverse) and equal to reference on 7 drives; T2 lidar_odom:=shadow|true built; next live shadow run
 metadata:
   type: project
 ---
@@ -12,3 +12,15 @@ metadata:
 **State:** C++ `lidar_odom` (dagger_perception) + dagger_msgs/LidarOdomStatus built, NOT launched. Replay of fox3 matches Python scan-for-scan ~35 scans then the CV guess creeps and diverges; Python stable. Ruled out: Eigen, cov setter, optimizer state, -march, float transform. `debug:=true` per-scan log. tools/test_lidar_odom.py synthetic 6/8.
 
 **How to apply:** next session = fix that bug first, then covariance calibration, disarmed live compare, fuse LINEAR velocity only into the EKF behind a launch arg, then a LiDAR-vs-FCU guard (stop path → needs user OK). Hand-off: docs/reports/next_session_prompt.md.
+
+**2026-10-05:** divergence root cause = small_gicp's T*exp(δ) makes R slowly non-orthonormal; `Isometry3d::inverse()` uses Rᵀ; via the CV guess the error doubled per scan. Fix: re-orthonormalise pose+step (quaternion round-trip) → C++ == Python digit for digit; lesson: when porting an odometry loop, never trust Isometry inverse on optimizer outputs. Also max_gap 2 s → map rebuild; degenerate_info 15k. Validated: lo_node_bench on 7 drives identical to reference, test_lidar_odom 12/12, CPU ~38 ms/scan. T2 arg `lidar_odom:=false|shadow|true` (default false; true = EKF odom1 vx,vy via params/ekf_fused_lidar.yaml). NEXT: live shadow comparison during a normal user drive, then true, then guard (needs OK). Commit 24b7f81 (not pushed).
+
+**2026-10-05 live shadow (Q74, 3012f62):** outdoor lane + indoor drive, 100 % accepted, 0 resets/drops, CPU ~58 ms/scan live. LiDAR start→end 0.20/0.26 m vs /odometry/filtered 0.61/1.26 m; FCU velocity reads 0.1-0.5 m/s LOW whenever h_acc > 3 m / heading invalid, and in every turn (yaw rate always fine). Open: indoor corridor stretch LiDAR reads +6-13 % vs ground-free direct registration (refs biased by 16-beam rings) → needs a TAPED run. Don't raise degenerate_info (indoors the FCU velocity is worse). User drives MANUAL on RC indoors (no GUIDED: FCU has no GPS; FS_EKF_ACTION=0). Next: tape test indoors; lidar_odom:=true outdoors with Nav2 goals.
+
+**2026-10-05 FUSED live (Q75, da76887):** T2 lidar_odom:=true, 3/3 Foxglove goals SUCCEEDED, fused speed tracks LiDAR (0 windows > 0.08 m/s), 5 s error p95 0.11 m (old odometry 1.02), start→end 0.24 m vs LiDAR 0.06. Live LiDAR σ ≈ 0.033 → ~9:1 over FCU. Residual = HEADING from gyro + GNSS heading (revisits 2-2.5° vs LiDAR 0.04°). Recorder now has EKF inputs for offline ekf replay. Open: make lidar_odom default true (needs OK), heading tuning (LiDAR yaw rate / less GNSS heading weight), indoor tape test, speed guard (stop path, needs OK).
+
+**2026-10-05 later:** lidar_odom:=true is the T2 DEFAULT (user OK). Truthful odometry exposed final-turn HUNTING (tracks pivot ~0.07 m behind base_footprint; fixed 0.4 m goal tol) → new pkg dagger_nav_plugins::StickyGoalChecker (0.4 → 0.8 m once reached; ignores reset(); new goal by pose) — Q76, live-verified 5/5 goals (859c7af + report). Next: heading tuning via offline EKF replay (bag detour_heading1_122047 has EKF inputs), tape test indoor, speed guard (needs OK).
+
+**2026-10-05 Q77 (b74c705):** offline EKF replay (tools/ekf_replay.py + ekf_replay_score.py) on heading1: KEEP the live EKF set-up — LiDAR yaw rate, weaker/no GNSS heading, LiDAR pose fusion all equal or worse; remaining 5× gap to LiDAR pose is velocity-integration + heading noise (future option: lidar_odom as primary odom). FCU overspeed p95 ≤ 0.10 m/s → no stop-path guard needed (user to confirm). LiDAR twist spikes (1-3 % scans, at turn ends; no deskew) → candidate acceleration gate / deskew. Remaining: indoor tape test.
+
+**2026-10-05 wrap-up:** Q78 gate reverted (hurt accuracy). Q79 indoor tape: LiDAR 6.96/6.85 m vs ~7 m (no corridor over-read — Q74's reference was ring-biased); fused was 21-27 % short (FCU velocity σ 0.1 vs LiDAR σ 0.057 indoors) → APPLIED (user OK) FCU σ 0.3 when lidar_odom:=true (replay −4/−6 %), NOT yet driven — first thing next session. P20 closed. Hand-off rewritten; pushed.
