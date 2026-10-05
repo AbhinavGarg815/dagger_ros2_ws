@@ -16,4 +16,4 @@ exec ros2 bag record -s mcap --include-hidden-topics -o "$out" \
   /plan /odometry/filtered /tf /tf_static /cmd_vel_nav /cmd_vel_nav_raw \
   /mavros/setpoint_velocity/cmd_vel_unstamped /global_costmap/costmap /local_costmap/costmap \
   /navigate_to_pose/_action/status /mavros/state \
-  /goal_pose_ui /goal_pose /rosout /mavros/gpsstatus/gps1/raw
+  /goal_pose_ui /goal_pose /rosout /mavros/gpsstatus/gps1/raw /lidar_odom/odometry /lidar_odom/status

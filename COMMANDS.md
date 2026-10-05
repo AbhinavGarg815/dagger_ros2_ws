@@ -223,6 +223,7 @@ stack — because the scene tests are timing-sensitive under load.
 | `python3 tools/test_lidar_odom.py` | 12/12 | `lidar_odom` (dagger_perception): synthetic room/motion/rejects/corridor + lockstep replay of fox3 vs a direct registration |
 | `python tools/lo_bench.py <bag> <out.npz> [methods]` then `python tools/lo_eval.py <out.npz>` | — | LiDAR-odometry benchmark (KISS, GenZ, VGICP variants) without ground truth; needs a venv with the pip wheels `kiss-icp` 1.3.0, `small_gicp` 1.0.1, GenZ-ICP built from source, and `OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1` |
 | `python tools/lo_node_bench.py <bag> <out.npz> [--domain 86]` then `python tools/lo_eval.py <out.npz>` | — | the C++ `lidar_odom` node replayed in lockstep beside the Python VGICP reference, scored by the same evaluator (same venv) |
+| `python tools/lo_bag_to_bench.py <bag> <out.npz>` then `python tools/lo_eval.py <out.npz>` | — | a recorded drive with `lidar_odom` running: live `/lidar_odom/odometry` vs `/odometry/filtered` against direct registrations; health + start→end check (same venv) |
 | `python3 tools/test_follow_controller.py` | 26/26 | Follow controller: speeds, search, close-range hold, CLEAR |
 | `python3 tools/test_click_follow.py all` | 53/53 | Person following scenes (or one of `main cross occlude reid beside close hug sign wall`) |
 | `python3 tools/test_marker_follow.py all` | 25/25 | Marker following scenes (`follow`, `switch`) |
