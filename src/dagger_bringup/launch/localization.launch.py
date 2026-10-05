@@ -1,4 +1,5 @@
 import os
+from typing import List
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -131,7 +132,13 @@ def generate_launch_description():
             "flatten_z": True,
             "publish_tf": False,
             "max_plausible_speed": 2.0,   # m/s; rover max 0.6 (Q67)
-            "twist_variance": [0.01, 0.01, 0.01],
+            # FCU velocity variance: 0.01 (sigma 0.1 m/s) alone; 0.09 (sigma 0.3) when the LiDAR
+            # velocity is fused (2026-10-05, operator OK, report Q79): at 0.1 the FCU, which reads
+            # 20-45 % low indoors / under weak GNSS, dragged the fused distance 21-27 % short on
+            # a taped 7 m corridor run; at 0.3 -4/-6 % (replay), outdoor 5 s accuracy better too.
+            "twist_variance": ParameterValue(PythonExpression(
+                ["[0.09, 0.09, 0.09] if '", lidar_odom, "' == 'true' else [0.01, 0.01, 0.01]"]),
+                value_type=List[float]),
             "zero_velocity_deadband": 0.02,
             "pivot_yaw_rate_gate": 0.25,
             "zero_lateral_velocity": True,
