@@ -15,7 +15,7 @@ base, rdir, out = sys.argv[1:4]
 B = dict(np.load(base, allow_pickle=True))
 st = B["stamps"]
 methods = list(B["methods"])
-for f in sorted(glob.glob(os.path.join(rdir, "V*.npz"))):
+for f in sorted(glob.glob(os.path.join(rdir, "*.npz"))):
     name = os.path.basename(f)[:-4]
     R = np.load(f)["odom"]
     k = np.clip(np.searchsorted(R[:, 0], st), 0, len(R) - 1)
