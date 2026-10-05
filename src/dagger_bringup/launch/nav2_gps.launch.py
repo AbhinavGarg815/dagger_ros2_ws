@@ -43,9 +43,9 @@ def generate_launch_description():
     low_memory = LaunchConfiguration("low_obstacle_memory")
     low_memory_arg = DeclareLaunchArgument("low_obstacle_memory", default_value="true",
                                            choices=["true", "false"])
-    # LiDAR odometry: false | shadow (runs, not fused) | true (fused): see localization.launch.py.
+    # LiDAR odometry: true (default, fused) | shadow (runs, not fused) | false: see localization.launch.py.
     lidar_odom = LaunchConfiguration("lidar_odom")
-    lidar_odom_arg = DeclareLaunchArgument("lidar_odom", default_value="false",
+    lidar_odom_arg = DeclareLaunchArgument("lidar_odom", default_value="true",
                                            choices=["false", "shadow", "true"])
     # Overhang layer (overhang_scan + the costmaps' overhang_layer): see nav2.launch.py.
     overhang = LaunchConfiguration("overhang")

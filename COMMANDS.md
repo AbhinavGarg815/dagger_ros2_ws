@@ -1,7 +1,7 @@
 # Dagger UGV — command reference
 
 Every command used to build, run, test and debug the rover, in the order you need them.
-Last updated: 2026-10-05 (lidar_odom shadow/true; overhang layer; safety band top 1.35 m; nav_slow_zone, turns 0.6 rad/s; `near_field` + `low_obstacle_memory` on by default).
+Last updated: 2026-10-05 (lidar_odom fused by default; overhang layer; safety band top 1.35 m; nav_slow_zone, turns 0.6 rad/s; `near_field` + `low_obstacle_memory` on by default).
 
 **Conventions**
 
@@ -46,7 +46,7 @@ The install is not symlinked — an edit in `src/` does nothing until built.
 | Terminal | Command | What it starts |
 |---|---|---|
 | T1 | `ros2 launch dagger_bringup drive_bringup.launch.py` | FCU link (mavros), LiDAR, robot model. Add `use_camera:=true` for following. |
-| T2 | `ros2 launch dagger_bringup nav2_gps.launch.py` | Odometry, GPS map frame, Nav2, costmaps, collision monitor, command path to the FCU. Add `map_source:=slam` when T5 localizes. On by default: the near-field safety scan (sees a person beside the hull), the low-obstacle memory (low obstacles seen from afar stay in the costmaps) and the overhang layer (canopies and branches 0.75–1.35 m in the costmaps); `near_field:=false` / `low_obstacle_memory:=false` / `overhang:=false` revert each. LiDAR odometry (Q73, default off): `lidar_odom:=shadow` runs it without fusing (compare `/lidar_odom/odometry` with `/odometry/filtered`), `lidar_odom:=true` also fuses its linear velocity. Things entirely above 1.35 m (above the rover) are ignored by the stop path: `SAFETY_BAND_TOP` in nav2.launch.py — raise it if anything taller is mounted. |
+| T2 | `ros2 launch dagger_bringup nav2_gps.launch.py` | Odometry, GPS map frame, Nav2, costmaps, collision monitor, command path to the FCU. Add `map_source:=slam` when T5 localizes. On by default: the near-field safety scan (sees a person beside the hull), the low-obstacle memory (low obstacles seen from afar stay in the costmaps) and the overhang layer (canopies and branches 0.75–1.35 m in the costmaps); `near_field:=false` / `low_obstacle_memory:=false` / `overhang:=false` revert each. LiDAR odometry fused into `/odometry/filtered` by default (Q75): `lidar_odom:=shadow` runs it without fusing, `lidar_odom:=false` reverts to the FCU velocity alone. Things entirely above 1.35 m (above the rover) are ignored by the stop path: `SAFETY_BAND_TOP` in nav2.launch.py — raise it if anything taller is mounted. |
 | T3 | `ros2 launch dagger_bringup foxglove.launch.py` | Foxglove bridge on `ws://<rover-ip>:8765`. Add `with_cloud:=true` for the raw point cloud (not while driving). |
 | T4 | `ros2 launch dagger_bringup follow.launch.py …` | Person / marker following and its web page (section 7). |
 | T5 | `ros2 launch dagger_bringup slam.launch.py …` | 2D SLAM (section 6). |

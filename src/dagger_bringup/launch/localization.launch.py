@@ -36,13 +36,15 @@ def generate_launch_description():
     # 'fused' = robot_localization EKF on EK3 VELOCITY + raw gyro only (no GPS
     # position/yaw) -> continuous odom that never jumps (params/ekf_fused.yaml).
     odom_source_arg = DeclareLaunchArgument("odom_source", default_value="fused")
-    # LiDAR odometry (P20, report Q72-Q73): GNSS-independent velocity from lidar_odom
-    # (dagger_perception, small_gicp VGICP). false: not run. shadow: runs and publishes
-    # /lidar_odom/odometry + /lidar_odom/status, NOT fused (live comparison). true: also fused
-    # into ekf_local (fused mode) as linear velocity (params/ekf_fused_lidar.yaml).
+    # LiDAR odometry (P20, report Q72-Q75): GNSS-independent velocity from lidar_odom
+    # (dagger_perception, small_gicp VGICP), fused mode only. true (DEFAULT since 2026-10-05,
+    # operator OK after the live fused run Q75: 5 s error p95 0.11 m vs 1.02 m before): runs
+    # and is fused into ekf_local as linear velocity (params/ekf_fused_lidar.yaml). shadow:
+    # runs and publishes /lidar_odom/odometry + /lidar_odom/status, NOT fused. false: not run
+    # (the EKF on FCU velocity alone, as before).
     lidar_odom = LaunchConfiguration("lidar_odom")
     lidar_odom_arg = DeclareLaunchArgument(
-        "lidar_odom", default_value="false", choices=["false", "shadow", "true"])
+        "lidar_odom", default_value="true", choices=["false", "shadow", "true"])
     use_kiss = PythonExpression(["'", odom_source, "' == 'kiss'"])
     use_fcu = PythonExpression(["'", odom_source, "' == 'fcu'"])
     use_fused = PythonExpression(["'", odom_source, "' == 'fused'"])
@@ -155,7 +157,8 @@ def generate_launch_description():
         output="screen",
         respawn=True,
         respawn_delay=1.0,
-        condition=IfCondition(PythonExpression(["'", lidar_odom, "' != 'false'"])),
+        condition=IfCondition(PythonExpression(
+            ["'", lidar_odom, "' != 'false' and '", odom_source, "' == 'fused'"])),
         remappings=[("cloud_in", "/rslidar_points"), ("odometry", "/lidar_odom/odometry"),
                     ("status", "/lidar_odom/status")],
     )
