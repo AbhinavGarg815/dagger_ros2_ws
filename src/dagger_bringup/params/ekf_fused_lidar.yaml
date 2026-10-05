@@ -1,0 +1,19 @@
+# Overlay on ekf_fused.yaml, applied by localization.launch.py only with lidar_odom:=true (Q73).
+# A second, GNSS-independent velocity source: lidar_odom's LINEAR velocity (vx, vy). Yaw stays
+# on the gyro rate + dual-antenna heading. Its twist covariance (floor 0.02 m/s, from the scan
+# registration's information matrix) outweighs the FCU velocity's 0.1 m/s ~25:1, so under a wall
+# or canopy -- where the FCU velocity read stopped while the rover drove (Q72) -- the LiDAR
+# carries the estimate; along a direction the scan cannot pin down (corridor axis, open ground)
+# lidar_odom inflates its variance to 1 m/s and the FCU velocity takes over. A rejected scan
+# publishes nothing, so the EKF then runs on the FCU alone, as without this overlay.
+ekf_local:
+  ros__parameters:
+    odom1: /lidar_odom/odometry
+    odom1_config: [false, false, false,
+                   false, false, false,
+                   true,  true,  false,
+                   false, false, false,
+                   false, false, false]
+    odom1_differential: false
+    odom1_relative: false
+    odom1_queue_size: 10

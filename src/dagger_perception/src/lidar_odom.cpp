@@ -1,12 +1,5 @@
 // lidar_odom: LiDAR odometry from /rslidar_points, independent of GNSS (P20, report Q72-Q73).
 //
-// ⚠️ WORK IN PROGRESS (2026-10-03) -- NOT LAUNCHED ANYWHERE. Replaying detour_fox3_144415
-// (parked start) it matches the Python small_gicp pipeline exactly for ~35 scans, then the
-// constant-velocity guess creeps (-0.003 -> -0.014 -> -0.02 m/scan) and it diverges, while
-// the Python reference (same parameters, float or double transform) stays within 1 mm.
-// tools/test_lidar_odom.py: synthetic 6/8, replay fails. Next: find the C++/Python difference
-// (debug:=true logs map size / guess / result / error per scan; compare with the Python run).
-//
 // /odometry/filtered took its velocity from the FCU's EK3 estimate, i.e. from GNSS velocity:
 // next to walls and under canopies (h_acc > 3 m, dual-antenna heading invalid) it read the
 // rover as stopped or backing while it drove 1.1 m forward (bag detour_fox3_144415).
@@ -64,6 +57,17 @@
 #include "tf2_msgs/msg/tf_message.hpp"
 
 using dagger_msgs::msg::LidarOdomStatus;
+
+// small_gicp composes T * exp(delta) every iteration, so the rotation slowly stops being
+// orthonormal; Isometry3d::inverse() assumes R^-1 = R^T, and fed back through the
+// constant-velocity guess (T * delta) that error roughly doubled every scan: the first
+// version diverged ~35 scans into a parked replay (report Q73). Every pose and step is
+// therefore re-orthonormalised (with it the output matches the Python small_gicp exactly).
+static Eigen::Isometry3d orthonormal(Eigen::Isometry3d x)
+{
+  x.linear() = Eigen::Quaterniond(x.linear()).normalized().toRotationMatrix();
+  return x;
+}
 using nav_msgs::msg::Odometry;
 using sensor_msgs::msg::PointCloud2;
 
@@ -94,7 +98,10 @@ public:
     cov_scale_ = declare_parameter<double>("cov_scale", 1.0);
     lin_floor_ = declare_parameter<double>("twist_linear_sigma_min", 0.02);    // m/s
     ang_floor_ = declare_parameter<double>("twist_angular_sigma_min", 0.005);  // rad/s
-    degenerate_info_ = declare_parameter<double>("degenerate_info", 1000.0);
+    // Smallest translational information below this = a direction the scan cannot pin down.
+    // 15000: a synthetic 60 m corridor gives 6.7 k; real scans 35-180 k (fox3, report Q73).
+    degenerate_info_ = declare_parameter<double>("degenerate_info", 15000.0);
+    max_gap_ = declare_parameter<double>("max_gap", 2.0);   // s without a scan -> map rebuilt
     degenerate_sigma_ = declare_parameter<double>("degenerate_sigma", 1.0);    // m/s
     const double stats_period = declare_parameter<double>("stats_period", 60.0);
     debug_ = declare_parameter<bool>("debug", false);
@@ -185,7 +192,12 @@ private:
     st.header.stamp = msg->header.stamp;
     st.header.frame_id = target_frame_;
     const double stamp = rclcpp::Time(msg->header.stamp).seconds();
-    if (have_last_ && stamp <= last_stamp_) {          // time went back (bag restart): start over
+    if (have_last_ && (stamp <= last_stamp_ || stamp - last_stamp_ > max_gap_)) {
+      // Time went back (bag restart) or no scan for max_gap: the map and the motion guess are
+      // stale -- rebuild the map from this scan, keep the pose.
+      RCLCPP_WARN(
+        get_logger(), "lidar_odom: %.1f s since the last scan -- map rebuilt, pose kept",
+        stamp - last_stamp_);
       map_.reset();
       delta_.setIdentity();
       have_last_ = false;
@@ -239,13 +251,14 @@ private:
 
     const Eigen::Isometry3d init = T_ * delta_;
     const auto result = reg_.align(*map_, *src, *map_, init);
-    const Eigen::Isometry3d step = T_.inverse() * result.T_target_source;
+    const Eigen::Isometry3d T_new = orthonormal(result.T_target_source);
+    const Eigen::Isometry3d step = orthonormal(T_.inverse() * T_new);
     const double dt = stamp - last_stamp_;
     if (debug_) {
       RCLCPP_INFO(
         get_logger(), "DBG map %zu src %zu init (%.4f %.4f) res (%.4f %.4f) it %zu inl %zu err %.3f",
         map_->size(), src->size(), init.translation().x(), init.translation().y(),
-        result.T_target_source.translation().x(), result.T_target_source.translation().y(),
+        T_new.translation().x(), T_new.translation().y(),
         result.iterations, result.num_inliers, result.error);
     }
     st.dt = dt;
@@ -283,7 +296,7 @@ private:
     } else {
       consecutive_rejects_ = 0;
       delta_ = step;
-      T_ = result.T_target_source;
+      T_ = T_new;
       map_->insert(*src, T_);
       last_stamp_ = stamp;
       st.accepted = true;
@@ -379,7 +392,7 @@ private:
   std::vector<double> box_;
   double range_min_, range_max_, downsample_, voxel_, max_corr_, min_inlier_ratio_;
   double max_speed_, max_turn_rate_, cov_scale_, lin_floor_, ang_floor_;
-  double degenerate_info_, degenerate_sigma_;
+  double degenerate_info_, degenerate_sigma_, max_gap_;
   int neighbours_, lru_horizon_, lru_clear_cycle_, max_iter_, threads_, min_points_, reset_after_;
 
   small_gicp::Registration<small_gicp::GICPFactor, small_gicp::ParallelReductionOMP> reg_;

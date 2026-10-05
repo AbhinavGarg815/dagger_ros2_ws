@@ -43,6 +43,10 @@ def generate_launch_description():
     low_memory = LaunchConfiguration("low_obstacle_memory")
     low_memory_arg = DeclareLaunchArgument("low_obstacle_memory", default_value="true",
                                            choices=["true", "false"])
+    # LiDAR odometry: false | shadow (runs, not fused) | true (fused): see localization.launch.py.
+    lidar_odom = LaunchConfiguration("lidar_odom")
+    lidar_odom_arg = DeclareLaunchArgument("lidar_odom", default_value="false",
+                                           choices=["false", "shadow", "true"])
     # Overhang layer (overhang_scan + the costmaps' overhang_layer): see nav2.launch.py.
     overhang = LaunchConfiguration("overhang")
     overhang_arg = DeclareLaunchArgument("overhang", default_value="true",
@@ -51,7 +55,7 @@ def generate_launch_description():
     localization = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(bringup_dir, "launch", "localization.launch.py")),
-        launch_arguments={"use_ekf": "true", "odom_source": "fused"}.items(),
+        launch_arguments={"use_ekf": "true", "odom_source": "fused", "lidar_odom": lidar_odom}.items(),
     )
 
     gps_map_odom = Node(
@@ -83,5 +87,5 @@ def generate_launch_description():
         }.items(),
     )
 
-    return LaunchDescription([tau_xy_arg, tau_yaw_arg, map_source_arg, near_field_arg, low_memory_arg, overhang_arg,
+    return LaunchDescription([tau_xy_arg, tau_yaw_arg, map_source_arg, near_field_arg, low_memory_arg, overhang_arg, lidar_odom_arg,
                               localization, gps_map_odom, nav2])

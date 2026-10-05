@@ -14,6 +14,7 @@ def generate_launch_description():
     kiss_config = os.path.join(pkg, "params", "kiss_icp.yaml")
     ekf_local_config = os.path.join(pkg, "params", "ekf_local.yaml")
     ekf_fused_config = os.path.join(pkg, "params", "ekf_fused.yaml")
+    ekf_lidar_overlay = os.path.join(pkg, "params", "ekf_fused_lidar.yaml")
 
     pointcloud_topic = LaunchConfiguration("pointcloud_topic")
     base_frame = LaunchConfiguration("base_frame")
@@ -35,6 +36,13 @@ def generate_launch_description():
     # 'fused' = robot_localization EKF on EK3 VELOCITY + raw gyro only (no GPS
     # position/yaw) -> continuous odom that never jumps (params/ekf_fused.yaml).
     odom_source_arg = DeclareLaunchArgument("odom_source", default_value="fused")
+    # LiDAR odometry (P20, report Q72-Q73): GNSS-independent velocity from lidar_odom
+    # (dagger_perception, small_gicp VGICP). false: not run. shadow: runs and publishes
+    # /lidar_odom/odometry + /lidar_odom/status, NOT fused (live comparison). true: also fused
+    # into ekf_local (fused mode) as linear velocity (params/ekf_fused_lidar.yaml).
+    lidar_odom = LaunchConfiguration("lidar_odom")
+    lidar_odom_arg = DeclareLaunchArgument(
+        "lidar_odom", default_value="false", choices=["false", "shadow", "true"])
     use_kiss = PythonExpression(["'", odom_source, "' == 'kiss'"])
     use_fcu = PythonExpression(["'", odom_source, "' == 'fcu'"])
     use_fused = PythonExpression(["'", odom_source, "' == 'fused'"])
@@ -140,12 +148,26 @@ def generate_launch_description():
         condition=IfCondition(use_fused),
     )
 
+    lidar_odom_node = Node(
+        package="dagger_perception",
+        executable="lidar_odom",
+        name="lidar_odom",
+        output="screen",
+        respawn=True,
+        respawn_delay=1.0,
+        condition=IfCondition(PythonExpression(["'", lidar_odom, "' != 'false'"])),
+        remappings=[("cloud_in", "/rslidar_points"), ("odometry", "/lidar_odom/odometry"),
+                    ("status", "/lidar_odom/status")],
+    )
+
     ekf_fused_node = Node(
         package="robot_localization",
         executable="ekf_node",
         name="ekf_local",
         output="screen",
-        parameters=[ekf_fused_config],
+        parameters=[ekf_fused_config, PythonExpression(
+            ["'" + ekf_lidar_overlay + "' if '", lidar_odom, "' == 'true' else '",
+             ekf_fused_config, "'"])],
         remappings=[("odometry/filtered", "/odometry/filtered")],
         condition=IfCondition(use_fused),
     )
@@ -172,6 +194,7 @@ def generate_launch_description():
         lidar_odom_frame_arg,
         use_ekf_arg,
         odom_source_arg,
+        lidar_odom_arg,
         extnav_yaw_arg,
         extnav_manual_offset_arg,
         kiss_icp_node,
@@ -179,6 +202,7 @@ def generate_launch_description():
         fcu_odom_relay_node,
         fcu_twist_relay_node,
         gps_heading_node,
+        lidar_odom_node,
         ekf_fused_node,
         extnav_yaw_relay,
     ])

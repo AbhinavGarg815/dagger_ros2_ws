@@ -1,7 +1,7 @@
 # Dagger UGV — command reference
 
 Every command used to build, run, test and debug the rover, in the order you need them.
-Last updated: 2026-10-03 (overhang layer; safety band top 1.35 m; nav_slow_zone, turns 0.6 rad/s; `near_field` + `low_obstacle_memory` on by default).
+Last updated: 2026-10-05 (lidar_odom shadow/true; overhang layer; safety band top 1.35 m; nav_slow_zone, turns 0.6 rad/s; `near_field` + `low_obstacle_memory` on by default).
 
 **Conventions**
 
@@ -46,7 +46,7 @@ The install is not symlinked — an edit in `src/` does nothing until built.
 | Terminal | Command | What it starts |
 |---|---|---|
 | T1 | `ros2 launch dagger_bringup drive_bringup.launch.py` | FCU link (mavros), LiDAR, robot model. Add `use_camera:=true` for following. |
-| T2 | `ros2 launch dagger_bringup nav2_gps.launch.py` | Odometry, GPS map frame, Nav2, costmaps, collision monitor, command path to the FCU. Add `map_source:=slam` when T5 localizes. On by default: the near-field safety scan (sees a person beside the hull), the low-obstacle memory (low obstacles seen from afar stay in the costmaps) and the overhang layer (canopies and branches 0.75–1.35 m in the costmaps); `near_field:=false` / `low_obstacle_memory:=false` / `overhang:=false` revert each. Things entirely above 1.35 m (above the rover) are ignored by the stop path: `SAFETY_BAND_TOP` in nav2.launch.py — raise it if anything taller is mounted. |
+| T2 | `ros2 launch dagger_bringup nav2_gps.launch.py` | Odometry, GPS map frame, Nav2, costmaps, collision monitor, command path to the FCU. Add `map_source:=slam` when T5 localizes. On by default: the near-field safety scan (sees a person beside the hull), the low-obstacle memory (low obstacles seen from afar stay in the costmaps) and the overhang layer (canopies and branches 0.75–1.35 m in the costmaps); `near_field:=false` / `low_obstacle_memory:=false` / `overhang:=false` revert each. LiDAR odometry (Q73, default off): `lidar_odom:=shadow` runs it without fusing (compare `/lidar_odom/odometry` with `/odometry/filtered`), `lidar_odom:=true` also fuses its linear velocity. Things entirely above 1.35 m (above the rover) are ignored by the stop path: `SAFETY_BAND_TOP` in nav2.launch.py — raise it if anything taller is mounted. |
 | T3 | `ros2 launch dagger_bringup foxglove.launch.py` | Foxglove bridge on `ws://<rover-ip>:8765`. Add `with_cloud:=true` for the raw point cloud (not while driving). |
 | T4 | `ros2 launch dagger_bringup follow.launch.py …` | Person / marker following and its web page (section 7). |
 | T5 | `ros2 launch dagger_bringup slam.launch.py …` | 2D SLAM (section 6). |
@@ -220,8 +220,9 @@ stack — because the scene tests are timing-sensitive under load.
 | `python3 tools/test_low_scan.py` | 13/13 | Low-obstacle memory: static box confirmed, people (standing, crouching) / walkers / no odometry never; replay of the 10-03 low-box run keeps the box to the bumper, nothing else in the lane. `--replay <bag> [--replay-only] [--params "-p min_span:=1.0"]` for another recording (box checks then do not apply). |
 | `python3 tools/test_estimator_checks.py` | 9/9 | preflight GNSS-heading / FCU-estimator checks and the odometry relay's speed gate, against a fake FCU |
 | `python3 tools/test_safety_scan.py` | 33/33 | `/scan_safety` + `/scan_overhang` (same node, live params): body box, bands 0.30–1.35 / 0.75–1.35, bins; identical to p2l on the 10-02 captures; parked + walk-around captures; fox2 canopy no longer stops, Q66 plant reaches the overhang scan |
-| `python3 tools/test_lidar_odom.py` | WIP (synthetic 6/8, fox3 replay fails, Q73) | `lidar_odom` (dagger_perception): synthetic room/motion/rejects/corridor + lockstep replay of fox3 vs a direct registration |
+| `python3 tools/test_lidar_odom.py` | 12/12 | `lidar_odom` (dagger_perception): synthetic room/motion/rejects/corridor + lockstep replay of fox3 vs a direct registration |
 | `python tools/lo_bench.py <bag> <out.npz> [methods]` then `python tools/lo_eval.py <out.npz>` | — | LiDAR-odometry benchmark (KISS, GenZ, VGICP variants) without ground truth; needs a venv with the pip wheels `kiss-icp` 1.3.0, `small_gicp` 1.0.1, GenZ-ICP built from source, and `OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1` |
+| `python tools/lo_node_bench.py <bag> <out.npz> [--domain 86]` then `python tools/lo_eval.py <out.npz>` | — | the C++ `lidar_odom` node replayed in lockstep beside the Python VGICP reference, scored by the same evaluator (same venv) |
 | `python3 tools/test_follow_controller.py` | 26/26 | Follow controller: speeds, search, close-range hold, CLEAR |
 | `python3 tools/test_click_follow.py all` | 53/53 | Person following scenes (or one of `main cross occlude reid beside close hug sign wall`) |
 | `python3 tools/test_marker_follow.py all` | 25/25 | Marker following scenes (`follow`, `switch`) |

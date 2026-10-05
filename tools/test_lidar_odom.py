@@ -193,13 +193,15 @@ s, o = run(cloud(seen_from(W, *pose)))
 check("room again after the rejections: accepted, pose continuous", s.accepted and o is not None and
       abs(o.pose.pose.position.x - pose[0]) < 0.05, f"x {o.pose.pose.position.x:.3f}" if o else "none")
 C = corridor()
-info, weak, cov = [], [], []
-for k in range(15):
-    s, o = run(cloud(seen_from(C, 0.03 * k, 0, 0)))
+info, weak, cov, degen = [], [], [], []
+for k in range(15):                                   # 3 s gap first: the map is rebuilt from the corridor
+    s, o = run(cloud(seen_from(C, 0.03 * k, 0, 0), dt=3.0 if k == 0 else 0.1))
     if s.accepted and o is not None:
-        info.append(s.info_min); weak.append(abs(s.weak_axis[0])); cov.append((o.twist.covariance[0], o.twist.covariance[7]))
-check("corridor: degenerate, weak axis along the corridor (x)", len(info) > 5 and s.degenerate and np.median(weak) > 0.9,
-      f"info_min {np.median(info):.0f}, |weak.x| {np.median(weak):.2f}")
+        info.append(s.info_min); weak.append(abs(s.weak_axis[0])); degen.append(s.degenerate)
+        cov.append((o.twist.covariance[0], o.twist.covariance[7]))
+check("corridor (after a 3 s gap -> map rebuilt): degenerate, weak axis along the corridor (x)",
+      len(info) >= 12 and all(degen) and np.median(weak) > 0.9,
+      f"{len(info)} published, {sum(degen)} degenerate, info_min {np.median(info):.0f}, |weak.x| {np.median(weak):.2f}")
 check("... twist variance along x >> across (y)", cov and cov[-1][0] > 100 * cov[-1][1],
       f"var x {cov[-1][0]:.3g}, var y {cov[-1][1]:.3g}" if cov else "")
 
@@ -229,10 +231,16 @@ else:
     st = [r[1] for r in rows if r[1] is not None]
     acc = sum(s.accepted for s in st); ms = np.array([s.cpu_ms for s in st])
     check("every scan answered", len(st) == len(rows), f"{len(st)}/{len(rows)}")
-    check("all but the first accepted, no map reset", acc >= len(st) - 1 and st[-1].resets_total == 0,
-          f"{acc}/{len(st)} accepted, {st[-1].rejected_total} rejected, {st[-1].resets_total} resets")
+    check("all but the first accepted, no map reset during the drive", acc >= len(st) - 1 and
+          st[-1].resets_total == st[0].resets_total,
+          f"{acc}/{len(st)} accepted, {st[-1].rejected_total - st[0].rejected_total} rejected, "
+          f"{st[-1].resets_total - st[0].resets_total} resets")
     check("CPU per scan (one thread): mean < 50 ms, p95 < 80 ms", ms.mean() < 50 and np.percentile(ms, 95) < 80,
           f"mean {ms.mean():.1f}, p95 {np.percentile(ms, 95):.1f}, max {ms.max():.1f} ms")
+    rej = [(tb, s) for tb, s, _ in rows if s is not None and (not s.accepted or s.degenerate)]
+    for tb, s in rej[:40]:
+        print(f"     {tb:7.1f} s  {'accepted' if s.accepted else 'REJECTED'} {s.reject_reason:16s} inliers {s.inlier_ratio:.2f}"
+              f"  it {s.iterations:2d}  info_min {s.info_min:8.0f}  points {s.points}  dt {s.dt:.2f}")
     deg = sum(s.degenerate for s in st); info = np.array([s.info_min for s in st if s.accepted and s.info_min > 0])
     print(f"     degenerate scans: {deg}; translational information min {info.min():.0f}, p5 {np.percentile(info, 5):.0f}, median {np.median(info):.0f}")
     if scans and small_gicp is None:
