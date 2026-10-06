@@ -1227,6 +1227,12 @@ Same stop test, same FCU params (IMAX 0.1, DECEL 2.0), only change = mavros 65 �
 - *Localization replay on its own drive* (`slam_loc_replay.sh <bag> mixed1_self mixed1`; optimistic — the same drive built the map): seeded + localized (start moved 3.9 m from GNSS), scan-to-map score median 0.038 m (3/460 checks ≥ 0.35); map→odom corrections driving median 0.05 / p90 0.18 / max 0.99 m (25/290 > 0.2 m), pivots median 0.05 / max 0.46 m; SLAM-GNSS median 3.7 m = this site's GNSS error. Next: first live localization drive on `mixed1` (start outdoors). `slam_replay_eval.py --loc <label> … <bag>` crashed (argparse's `nargs="+"` took the bag as a label) — fixed: a trailing bag directory is now taken as the bag.
 - *Procedure:* MANUAL drive starting outdoors in open sky → outdoor area → through the door → indoor area → back out the same door → end near the start (loop closure); 0.3-0.4 m/s; then `slam_replay.sh` → map + poses → `slam_georef.py` → `slam.launch.py mode:=localization map:=<name>`.
 
+## Next session plan — indoor + outdoor map (written 2026-10-06 wrap-up)
+Hand-off prompt `docs/reports/next_session_prompt.md`. 1) First LIVE localization on `mixed1` (Q82), starting outdoors: parked
+seed/localize check, RC loop through the door and back, then map-frame goals / a waypoint route across the door. 2) Same drive:
+a taped straight distance to confirm Q79. 3) Then with the operator: P18 drop-off detection (recommended), default flips for
+`near_field` / `low_obstacle_memory`, P19 overhang live check. FCU decisions stay the operator's (PreArm GPS-AHRS, P4, P5).
+
 ## Next session plan — obstacle avoidance day 2 (written 2026-10-02 wrap-up)
 Gap 1 (near field, P13) done today (Q65). Tomorrow, gap 2 (P14), hand-off prompt `docs/reports/next_session_prompt.md`:
 1. **Approach-and-stop baseline in the test lane** (no detour: the lane is a wall on the right and steps on the left, which Nav2 cannot see — P18): low cardboard box 20–25 cm × 40–60 cm, 8 m ahead at the rover's distance from the wall (~2.2 m); `bash tools/detour_record.sh approach_low`; operator sends a 6 m goal parallel to the wall; the rover stops ~2 m before the box. Shows when the box is erased from both costmaps and gives real clouds for replay. T2 with `near_field:=true`.
