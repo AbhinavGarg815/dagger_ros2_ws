@@ -227,8 +227,11 @@ def main():
         log(a.log)
         return
     if a.loc:
-        od = read_odom_full(os.path.expanduser(a.bag)) if a.bag else None
-        for label in a.loc:
+        labels, bag = a.loc, a.bag
+        if not bag and len(labels) > 1 and os.path.isdir(os.path.expanduser(labels[-1])):
+            labels, bag = labels[:-1], labels[-1]      # --loc <label> ... <bag>: nargs="+" took the bag
+        od = read_odom_full(os.path.expanduser(bag)) if bag else None
+        for label in labels:
             score_loc(label, od)
         return
     if not a.bag or not a.labels:
