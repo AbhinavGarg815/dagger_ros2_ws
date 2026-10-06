@@ -52,13 +52,14 @@ def generate_launch_description():
     #   setpoint_velocity  the GUIDED command path
     #   setpoint_raw       FCU echo of the executed target (latency checks)
     #   waypoint           /mavros/mission (tools/gps_goal.py --mission)
-    # Not included, add when needed: gps_rtk (RTCM injection over the RFD868),
-    # vision_pose (the superseded ExtNav yaw relay).
+    #   vision_pose, vision_speed (mavros_extras)  ExternalNav from LiDAR odometry for
+    #                      indoor GUIDED (extnav_relay, EK3 source set 2, Q80)
+    # Not included, add when needed: gps_rtk (RTCM injection over the RFD868).
     mavros_plugins = LaunchConfiguration("mavros_plugins")
     mavros_plugins_arg = DeclareLaunchArgument("mavros_plugins", default_value="minimal")
     minimal = ["sys_status", "sys_time", "command", "param", "rc_io", "imu",
                "local_position", "global_position", "home_position", "gps_status",
-               "setpoint_velocity", "setpoint_raw", "waypoint"]
+               "setpoint_velocity", "setpoint_raw", "waypoint", "vision_pose", "vision_speed"]
     mavros_node = Node(
         package="mavros",
         executable="mavros_node",

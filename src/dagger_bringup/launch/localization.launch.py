@@ -170,6 +170,17 @@ def generate_launch_description():
                     ("status", "/lidar_odom/status")],
     )
 
+    # LiDAR odometry -> ArduPilot ExternalNav (indoor GUIDED, Q80): runs with lidar_odom.
+    # The Cube fuses it only when the operator's RC switch selects EK3 source set 2.
+    extnav_relay_node = Node(
+        package="dagger_bringup",
+        executable="extnav_relay",
+        name="extnav_relay",
+        output="screen",
+        condition=IfCondition(PythonExpression(
+            ["'", lidar_odom, "' != 'false' and '", odom_source, "' == 'fused'"])),
+    )
+
     ekf_fused_node = Node(
         package="robot_localization",
         executable="ekf_node",
@@ -213,6 +224,7 @@ def generate_launch_description():
         fcu_twist_relay_node,
         gps_heading_node,
         lidar_odom_node,
+        extnav_relay_node,
         ekf_fused_node,
         extnav_yaw_relay,
     ])

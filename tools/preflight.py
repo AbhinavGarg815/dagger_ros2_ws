@@ -54,6 +54,8 @@ TOPICS = [
     ("/mavros/global_position/compass_hdg", Float64, 1.0, False),
     ("/mavros/state", State, 0.5, False),
     ("/rslidar_points", PointCloud2, 8.0, True),
+    # indoors (--indoor) the Cube's position, velocity and heading come from this (extnav_relay, Q80)
+    ("/lidar_odom/odometry", Odometry, 8.0, False),
     ("/scan", LaserScan, 8.0, True),
 ]
 NAV2_NODES = ["controller_server", "planner_server", "bt_navigator", "behavior_server"]
@@ -190,6 +192,9 @@ def main():
     ap.add_argument("-t", "--sample", type=float, default=5.0, help="sample window, s")
     ap.add_argument("--no-config", action="store_true", help="skip FCU config, check only")
     ap.add_argument("--no-nav2", action="store_true", help="T1 only: skip Nav2/odom checks")
+    ap.add_argument("--indoor", action="store_true",
+                    help="indoor GUIDED (EK3 source set 2 = ExternalNav, Q80): GNSS fix/heading reported, not required; "
+                         "/lidar_odom/odometry required instead")
     a = ap.parse_args()
 
     rclpy.init()
@@ -219,7 +224,9 @@ def main():
 
     print("== topic rates")
     for topic, _, min_hz, _ in TOPICS:
-        if a.no_nav2 and topic in ("/odometry/filtered", "/scan", "/gps/heading_imu"):
+        if a.no_nav2 and topic in ("/odometry/filtered", "/scan", "/gps/heading_imu", "/lidar_odom/odometry"):
+            continue
+        if a.indoor and topic in ("/gps/heading_imu", "/mavros/gpsstatus/gps1/raw"):
             continue
         s = n.stats[topic]
         hz = (s["n"] - 1) / (s["t1"] - s["t0"]) if s["n"] > 1 and s["t1"] > s["t0"] else 0.0
@@ -248,16 +255,18 @@ def main():
               f"h_acc={g.h_acc / 1000:.2f} m  eph={g.eph / 100:.2f}  "
               f"gps_yaw={'%.1f deg' % (g.yaw / 100) if yaw_ok else 'UNAVAILABLE'}  "
               f"hdg_acc={g.hdg_acc / 1e5:.2f} deg")
-        if g.fix_type < 3:
+        if g.fix_type < 3 and not a.indoor:
             fails.append("gps-fix")
         nv = len(n.gps_yaw_valid)
         frac = sum(n.gps_yaw_valid) / nv if nv else 0.0
         good = nv >= 5 and frac >= 0.9
         print(f"  [{'OK' if good else 'FAIL'}] GNSS heading valid in {100 * frac:.0f} % of {nv} messages "
               f"(min 90 %: EK3_SRC1_YAW=2 has no other yaw source)")
-        if not good:
+        if not good and not a.indoor:
             fails.append("gps-yaw")
-    else:
+        if a.indoor:
+            print("  (--indoor: GNSS fix and heading reported only; the Cube navigates on ExternalNav)")
+    elif not a.indoor:
         fails.append("gps1/raw")
     # FCU estimator sanity while parked (Q67: EK3 reported 20-260 m/s and its position
     # jumped 109 m in 10 s with the rover standing still). Healthy: < 0.02 m/s, < 0.2 m.
