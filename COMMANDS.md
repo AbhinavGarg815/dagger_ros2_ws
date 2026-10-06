@@ -101,7 +101,7 @@ Needs T1 + T2 and a preflight PASS.
 ros2 launch dagger_bringup slam.launch.py                     # T5, shadow mapping
 bash tools/slam_record.sh <name>                              # record the drive (add `clouds` for raw point clouds)
 # save, while T5 is still running:
-ros2 run nav2_map_server map_saver_cli -t /slam/map -f <path> --ros-args -p map_subscribe_transient_local:=true
+ros2 run nav2_map_server map_saver_cli -t /slam/map -f <path> --ros-args -p map_subscribe_transient_local:=true -p save_map_timeout:=20.0
 ros2 service call /slam_toolbox/serialize_map slam_toolbox/srv/SerializePoseGraph "{filename: '<path>'}"
 # tie the map to GPS (needed for lat/lon goals and the automatic start pose):
 python3 tools/slam_georef.py <bag> <poses.csv> src/dagger_bringup/maps/<name>_geo.yaml   # fixes weighted 1/sigma^2, sigma > 8 m dropped (--max-sigma): indoor parts of a drive don't pull the anchor

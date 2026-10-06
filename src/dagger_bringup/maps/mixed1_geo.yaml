@@ -1,0 +1,9 @@
+# slam_map -> local ENU at the datum:  p_enu = R(yaw) * p_map + t
+# made by tools/slam_georef.py from slam_mixed1_111854
+datum_lat: 26.747944406
+datum_lon: 75.855284239
+yaw_deg: 0.0450
+tx: -0.4427
+ty: -1.6349
+residual_rms_m: 5.170
+residual_max_m: 14.700
