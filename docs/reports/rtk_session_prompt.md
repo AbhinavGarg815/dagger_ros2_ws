@@ -17,6 +17,10 @@ editing, commit in small steps, and never commit or revert files you did not cha
 
 ## Hardware
 - **Base (on the ground, fixed):** u-blox ZED-F9P and an RFD868ux-IND radio.
+  - **The base must be STANDALONE:** no laptop, PC or phone attached while it runs. It may get a
+    microcontroller (and its own battery / power supply), but no other device. A computer, or the
+    Jetson over USB, is fine for a ONE-TIME configuration on the bench. After that, the base powers
+    up into base mode and transmits by itself.
 - **Rover GNSS:** CUAV **C-RTK 2HP**, dual antenna with moving-baseline heading.
   - On the Cube's **CAN1**: DroneCAN, `GPS1_TYPE 9`, antenna offsets `GPS1_POS_X/Y 0.33/0.29`.
 - **Rover radio:** RFD868ux-IND, installed 2026-09-11 on the Cube's **TELEM2** (`SERIAL2_PROTOCOL 2`,
@@ -64,21 +68,34 @@ editing, commit in small steps, and never commit or revert files you did not cha
      - A small ROS 2 node reads the serial port, frames RTCM3 by preamble, length and CRC24Q, and
        publishes `mavros_msgs/RTCM`.
      - mavros `gps_rtk` → Cube (USB) → CAN → 2HP.
-     - Pros: no laptop at the base; corrections are logged in bags; preflight can show their age.
-   - **B.** Base F9P on a laptop running Mission Planner (RTK inject) → MAVLink over the RFD pair →
-     TELEM2. Needs a laptop at the base for every drive.
+     - Pros: the base stays standalone; corrections are logged in bags; preflight can show their age.
+   - ~~B. Mission Planner on a laptop at the base~~ — **ruled out by me**: the base must be standalone.
+   - **D. A microcontroller at the base wraps RTCM into MAVLink.**
+     - Base F9P UART → microcontroller, which frames RTCM3 and sends MAVLink `GPS_RTCM_DATA`
+       (fragmented, sequence ids) → base RFD868.
+     - Rover radio stays on TELEM2 as it is → Cube → CAN → 2HP. No rover rewiring, and it works
+       even when the Jetson or ROS is down.
+     - Weigh it against A: microcontroller firmware to write and maintain, MAVLink system/component
+       ids, whether ArduPilot accepts `GPS_RTCM_DATA` from a non-GCS sender, and how I would see the
+       correction age on the Jetson (for example `/mavros/gpsstatus/gps1/raw` or the fix type only).
    - **C.** Rover radio wired straight into the 2HP. Only if the 2HP accepts corrections on its own
      port; check CUAV's docs.
-2. **Base position.** If the base runs a survey-in every day, its absolute position shifts by the
+2. **Standalone base** (applies to A, C and D). The F9P's base configuration (TMODE, RTCM output on UART2 at the radio's
+   baud) must be saved in its non-volatile layers (flash / BBR) so it starts at power-up; check what
+   the board can actually hold. Add a microcontroller only if the F9P cannot do this alone, for
+   example to re-send the configuration at boot. Also cover wiring (F9P UART2 ↔ radio, levels, GND),
+   the power budget (radio TX peaks) and a status LED or similar, so I can see that the base is
+   transmitting without a screen.
+3. **Base position.** If the base runs a survey-in every day, its absolute position shifts by the
    survey accuracy each time, and every georeferenced map shifts with it. Recommend how to get one
    fixed base coordinate: a long survey-in once, a known mark, or PPP. Then re-use it in fixed
    mode, with the antenna on the same mark every time.
-3. **RTCM messages and bandwidth.** Which RTCM3 message set the 2HP needs: 1005, plus MSM for the
+4. **RTCM messages and bandwidth.** Which RTCM3 message set the 2HP needs: 1005, plus MSM for the
    constellations both receivers track, plus 1230. Check that it fits the RFD868 air rate.
-4. **Radio settings** (SiK parameters): serial and air speed, NETID, ECC, MAVLink framing off for
+5. **Radio settings** (SiK parameters): serial and air speed, NETID, ECC, MAVLink framing off for
    raw RTCM, and the IND variant's band, LBT and duty cycle. Keep the India band and power within
    the IND limits.
-5. **FCU parameters** the chosen path needs: for example GPS inject, auto-config or driver options,
+6. **FCU parameters** the chosen path needs: for example GPS inject, auto-config or driver options,
    and `SERIAL2_*` if the radio leaves TELEM2. Read the current values first, confirm the names
    exist on 4.6.3, and don't break the moving-baseline heading.
 
@@ -112,8 +129,8 @@ editing, commit in small steps, and never commit or revert files you did not cha
 ## Ask me first
 - **The base F9P board:** a bare module or a carrier board, and does it break out USB and UART2?
 - **The base antenna** and how it is mounted.
-- **Base power.**
-- **A laptop at the base:** whether one can stay there during drives.
+- **Base power** (battery or supply, voltage).
+- **A microcontroller:** whether I already have one in mind.
 - **The rover radio's** exact connection.
 - **Base location:** where on the site the base can sit with open sky.
 - **A surveyed point:** whether I have one.
