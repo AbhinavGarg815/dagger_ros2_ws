@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tie a SLAM map to the Earth: fit slam_map -> local ENU from a mapping drive.
 
-  python3 tools/slam_georef.py <bag> <poses.csv> <out_geo.yaml>
+  python3 tools/slam_georef.py <bag> <poses.csv> <out_geo.yaml> [--max-sigma 8]
   python3 tools/slam_georef.py ~/dagger_bags/slam_lane3_164840 \
       ~/dagger_bags/replay/lane3fix/poses.csv src/dagger_bringup/maps/lane3fix_geo.yaml
 
@@ -15,6 +15,11 @@ good to a few degrees. Translation is then the least-squares fit of SLAM poses
 to GNSS positions (/mavros/global_position/global). The residual printed is the
 GNSS-vs-SLAM disagreement -- it bounds how well a GPS-derived start pose (and a
 lat/lon goal) can land on this map.
+
+Fixes are weighted by 1/sigma^2 (sigma from the NavSatFix covariance) and those above
+--max-sigma (default 8 m) dropped (2026-10-06): a drive that goes indoors carries fixes 4-17 m
+off, which must not pull the datum or the translation (outdoors in the lane mavros already
+reports 3-6 m, so a hard 3 m cut would drop nearly everything).
 """
 import bisect
 import csv
@@ -61,8 +66,9 @@ def read_bag(bag):
         else:
             m = deserialize_message(raw, NavSatFix)
             if m.status.status >= 0:
+                sigma = math.sqrt(max(m.position_covariance[0], m.position_covariance[4], 1e-4))
                 fixes.append((m.header.stamp.sec + m.header.stamp.nanosec * 1e-9,
-                              m.latitude, m.longitude))
+                              m.latitude, m.longitude, sigma))
     return fixes, heads
 
 
@@ -77,23 +83,31 @@ def nearest(series, t, tol):
 
 
 def main():
-    if len(sys.argv) != 4:
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    max_sigma = 8.0
+    if "--max-sigma" in sys.argv:
+        i = sys.argv.index("--max-sigma"); max_sigma = float(sys.argv[i + 1]); args.remove(sys.argv[i + 1])
+    if len(args) != 3:
         print(__doc__)
         return 2
-    bag, poses_csv, out = (os.path.expanduser(a) for a in sys.argv[1:])
+    bag, poses_csv, out = (os.path.expanduser(a) for a in args)
     fixes, heads = read_bag(bag)
+    n_all = len(fixes)
+    fixes = [f for f in fixes if f[3] <= max_sigma]
+    print(f"GNSS fixes: {len(fixes)} of {n_all} used (sigma <= {max_sigma:g} m), weighted 1/sigma^2")
     with open(poses_csv) as f:
         poses = [tuple(float(v) for v in row) for row in list(csv.reader(f))[1:]]
     if not fixes or not heads or len(poses) < 10:
         print(f"not enough data: {len(fixes)} fixes, {len(heads)} headings, {len(poses)} poses")
         return 1
 
-    lat0 = sum(f[1] for f in fixes) / len(fixes)
-    lon0 = sum(f[2] for f in fixes) / len(fixes)
+    wsum = sum(1 / f[3] ** 2 for f in fixes)
+    lat0 = sum(f[1] / f[3] ** 2 for f in fixes) / wsum
+    lon0 = sum(f[2] / f[3] ** 2 for f in fixes) / wsum
     kx, ky = enu_scale(lat0)
 
     dyaw = []
-    P, Q = [], []
+    P, Q, W = [], [], []
     for t, x, y, yaw in poses:
         h = nearest(heads, t, 0.2)
         if h is not None:
@@ -102,12 +116,13 @@ def main():
         if g is not None:
             P.append((x, y))
             Q.append(((g[2] - lon0) * kx, (g[1] - lat0) * ky))
+            W.append(1 / g[3] ** 2)
     # circular mean of the heading offsets
     rot = math.atan2(sum(math.sin(d) for d in dyaw), sum(math.cos(d) for d in dyaw))
     spread = max(abs(math.degrees(math.remainder(d - rot, 2 * math.pi))) for d in dyaw)
-    P, Q = np.array(P), np.array(Q)
+    P, Q, W = np.array(P), np.array(Q), np.array(W)
     R = np.array([[math.cos(rot), -math.sin(rot)], [math.sin(rot), math.cos(rot)]])
-    t = (Q - P @ R.T).mean(axis=0)
+    t = ((Q - P @ R.T) * W[:, None]).sum(axis=0) / W.sum()
     res = np.linalg.norm(P @ R.T + t - Q, axis=1)
 
     # for comparison: rotation from positions alone

@@ -104,7 +104,7 @@ bash tools/slam_record.sh <name>                              # record the drive
 ros2 run nav2_map_server map_saver_cli -t /slam/map -f <path> --ros-args -p map_subscribe_transient_local:=true
 ros2 service call /slam_toolbox/serialize_map slam_toolbox/srv/SerializePoseGraph "{filename: '<path>'}"
 # tie the map to GPS (needed for lat/lon goals and the automatic start pose):
-python3 tools/slam_georef.py <bag> <poses.csv> src/dagger_bringup/maps/<name>_geo.yaml
+python3 tools/slam_georef.py <bag> <poses.csv> src/dagger_bringup/maps/<name>_geo.yaml   # fixes weighted 1/sigma^2, sigma > 8 m dropped (--max-sigma): indoor parts of a drive don't pull the anchor
 ```
 
 **Localization** on a saved map (`src/dagger_bringup/maps/<name>.*`):

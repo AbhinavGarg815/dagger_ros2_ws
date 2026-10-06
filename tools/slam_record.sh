@@ -13,7 +13,8 @@ out=~/dagger_bags/slam_${name}_$(date +%H%M%S)
 topics="/scan /scan_band /scan_safety /odometry/filtered /mavros/imu/data_raw \
   /mavros/local_position/odom /mavros/gpsstatus/gps1/raw /mavros/global_position/global \
   /gps/heading_imu /tf /tf_static /slam/map /slam/pose \
-  /slam/match_score /slam/localized /slam/gnss_pose /initialpose /mavros/rc/in"
+  /slam/match_score /slam/localized /slam/gnss_pose /initialpose /mavros/rc/in \
+  /lidar_odom/odometry /lidar_odom/status"
 [ "${2:-}" = "clouds" ] && topics="$topics /rslidar_points /patchworkpp/nonground"
 mkdir -p ~/dagger_bags
 echo "recording -> $out   (Ctrl-C to stop)"
