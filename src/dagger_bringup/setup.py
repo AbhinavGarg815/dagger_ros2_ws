@@ -45,6 +45,7 @@ setup(
             "slam_pose_tf = dagger_bringup.slam_pose_tf:main",
             "slam_geo_init = dagger_bringup.slam_geo_init:main",
             "goal_pose_relay = dagger_bringup.goal_pose_relay:main",
+            "waypoint_queue = dagger_bringup.waypoint_queue:main",
             "person_tracker = dagger_bringup.person_tracker:main",
             "marker_tracker = dagger_bringup.marker_tracker:main",
             "ui_server = dagger_bringup.ui_server:main",

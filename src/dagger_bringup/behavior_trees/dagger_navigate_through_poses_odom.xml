@@ -1,0 +1,48 @@
+<!--
+  ODOM variant (2026-10-06): identical to dagger_navigate_through_poses.xml except that
+  RemovePassedGoals looks the rover up in odom -- the frame of waypoints clicked in Foxglove
+  (waypoint_queue requests this tree). The default tree stays for map-frame routes (gps_goal.py).
+
+  Dagger NavigateThroughPoses tree = Nav2 Humble
+  navigate_through_poses_w_replanning_and_recovery with the MOTION recoveries
+  (Spin 1.57, BackUp 0.30) REMOVED (2026-09-14); see dagger_navigate_to_pose.xml.
+  Replans at 1 Hz (default 0.333) so the path keeps up with odom on long routes.
+  RemovePassedGoals looks the robot up in 'map' (its Humble default), which is
+  why odom-only tests publish an identity map->odom placeholder.
+-->
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="3" name="NavigateRecovery">
+      <PipelineSequence name="NavigateWithReplanning">
+        <RateController hz="1.0">
+          <RecoveryNode number_of_retries="1" name="ComputePathThroughPoses">
+            <ReactiveSequence>
+              <!-- radius 0.7 -> 2.0 (2026-09-16): a waypoint is only dropped once the rover
+                   passes within this distance. At 0.7 m a 350 kg rover that drifts wider
+                   keeps the passed waypoint, so the planner routes BACK to it: the path
+                   doubles back, its first 0.5 m points backwards, the rotation shim tries
+                   to face backwards and the direction flips every replan -> 104 command
+                   reversals in 245 s (bag pf_lane_10hz_3). 2.0 m > our lane-change offsets. -->
+              <RemovePassedGoals input_goals="{goals}" output_goals="{goals}" radius="2.0"
+                                 global_frame="odom" robot_base_frame="base_footprint"/>
+              <ComputePathThroughPoses goals="{goals}" path="{path}" planner_id="GridBased"/>
+            </ReactiveSequence>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+          </RecoveryNode>
+        </RateController>
+        <RecoveryNode number_of_retries="1" name="FollowPath">
+          <FollowPath path="{path}" controller_id="FollowPath"/>
+          <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+        </RecoveryNode>
+      </PipelineSequence>
+      <ReactiveFallback name="RecoveryFallback">
+        <GoalUpdated/>
+        <Sequence name="ClearingActions">
+          <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
+          <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
+          <Wait wait_duration="3"/>
+        </Sequence>
+      </ReactiveFallback>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

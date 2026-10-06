@@ -54,6 +54,12 @@ def _bridge(context):
         executable="goal_pose_relay",
         name="goal_pose_relay",
         output="screen",
+    ), Node(
+        # Waypoint routes: pose tool on /waypoint_ui, then /waypoints/go (Publish panel).
+        package="dagger_bringup",
+        executable="waypoint_queue",
+        name="waypoint_queue",
+        output="screen",
     )]
 
 
