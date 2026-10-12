@@ -31,13 +31,11 @@ from rcl_interfaces.srv import GetParameters, SetParameters
 from rcl_interfaces.msg import Parameter, ParameterValue, ParameterType
 from lifecycle_msgs.srv import GetState
 
-# (msg_id, Hz) -- LOCAL_POSITION_NED, ATTITUDE, RAW_IMU, SERVO_OUTPUT_RAW, GPS_RAW_INT,
-# RC_CHANNELS (GPS_RAW_INT carries the dual-antenna heading fused by gps_heading_imu).
-# RC_CHANNELS (65) feeds /mavros/rc/in, which mavros does not publish otherwise. Without
-# it there is no way to tell pilot stick input from autonomous output: /mavros/rc/out is
-# the servo command and looks identical either way. That ambiguity made a stop-distance
-# measurement uninterpretable on 2026-09-25.
-STREAMS = [(32, 20.0), (30, 10.0), (27, 10.0), (36, 25.0), (24, 5.0), (65, 10.0)]
+# (msg_id, Hz): one list, shared with bring-up's fcu_config (which re-applies them on
+# every FCU connect). RC_CHANNELS (65) feeds /mavros/rc/in, which mavros does not
+# publish otherwise -- without it pilot stick input cannot be told from autonomous
+# output (/mavros/rc/out looks the same either way; 2026-09-25).
+from dagger_bringup.fcu_config import STREAMS  # noqa: E402
 
 # topic, type, min_rate_hz, raw (skip deserialization for big msgs)
 TOPICS = [

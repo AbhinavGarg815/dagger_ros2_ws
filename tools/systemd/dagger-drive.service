@@ -1,0 +1,21 @@
+[Unit]
+Description=Dagger T1: FCU link (mavros), LiDAR, camera, robot model, FCU config
+PartOf=dagger.target
+After=network-online.target 
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nvidia
+Group=dagger
+ExecStart=/home/jetson/ros2_ws/tools/systemd/dagger-ros-env.sh ros2 launch dagger_bringup drive_bringup.launch.py use_camera:=true
+Restart=on-failure
+RestartSec=3
+# ros2 launch shuts its nodes down on SIGINT; only it gets the signal (mixed),
+# anything left after the timeout is killed
+KillSignal=SIGINT
+KillMode=mixed
+TimeoutStopSec=20
+
+[Install]
+WantedBy=dagger.target

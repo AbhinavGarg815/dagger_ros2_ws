@@ -49,6 +49,7 @@ setup(
             "person_tracker = dagger_bringup.person_tracker:main",
             "marker_tracker = dagger_bringup.marker_tracker:main",
             "ui_server = dagger_bringup.ui_server:main",
+            "fcu_config = dagger_bringup.fcu_config:main",
         ],
     },
 )

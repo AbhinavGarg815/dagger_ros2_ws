@@ -82,6 +82,15 @@ def generate_launch_description():
         output="screen",
     )
 
+    # preflight's configuration (mav_frame BODY_NED + stream rates), re-applied on
+    # every FCU (re)connect so a rover started at boot is configured with nobody there
+    fcu_config = Node(
+        package="dagger_bringup",
+        executable="fcu_config",
+        name="fcu_config",
+        output="screen",
+    )
+
     camera = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(
@@ -93,5 +102,5 @@ def generate_launch_description():
 
     return LaunchDescription(
         [fcu_url_arg, use_camera_arg, mavros_plugins_arg, rsp, lidar, mavros_node,
-         mavros_node_all, system_ready, camera]
+         mavros_node_all, system_ready, fcu_config, camera]
     )

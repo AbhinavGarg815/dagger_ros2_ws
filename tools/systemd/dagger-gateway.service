@@ -1,0 +1,21 @@
+[Unit]
+Description=Dagger operator app gateway (ws://:8090/api)
+PartOf=dagger.target
+After=network-online.target dagger-follow.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nvidia
+Group=dagger
+ExecStart=/home/jetson/ros2_ws/tools/systemd/dagger-ros-env.sh ros2 run dagger_gateway gateway
+Restart=on-failure
+RestartSec=3
+# ros2 launch shuts its nodes down on SIGINT; only it gets the signal (mixed),
+# anything left after the timeout is killed
+KillSignal=SIGINT
+KillMode=mixed
+TimeoutStopSec=20
+
+[Install]
+WantedBy=dagger.target

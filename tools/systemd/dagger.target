@@ -1,0 +1,11 @@
+# The operator's rover stack, started at boot:
+#   dagger-drive (T1) -> dagger-nav (T2) -> dagger-follow (T4) -> dagger-gateway
+# T3 (Foxglove) and T5 (SLAM) stay manual engineer tools.
+#   sudo systemctl stop dagger.target     # hand the rover back to terminals
+#   sudo systemctl start dagger.target
+[Unit]
+Description=Dagger rover stack (operator app)
+Wants=dagger-drive.service dagger-nav.service dagger-follow.service dagger-gateway.service
+
+[Install]
+WantedBy=multi-user.target

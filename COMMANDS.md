@@ -1,7 +1,7 @@
 # Dagger UGV — command reference
 
 Every command used to build, run, test and debug the rover, in the order you need them.
-Last updated: 2026-10-05 (lidar_odom fused by default; overhang layer; safety band top 1.35 m; nav_slow_zone, turns 0.6 rad/s; `near_field` + `low_obstacle_memory` on by default).
+Last updated: 2026-10-12 (operator-app gateway `dagger_gateway` on :8090; `fcu_config` in T1; systemd units in `tools/systemd/`).
 
 **Conventions**
 
@@ -12,7 +12,7 @@ Last updated: 2026-10-05 (lidar_odom fused by default; overhang layer; safety ba
   ```
 - Tags: **[MOTION]** the rover may move — operator runs it, RC transmitter in hand ·
   **[SUDO]** needs root · everything else only reads or configures.
-- `T1`…`T5` are the terminals of the running stack (section 3). Start them in that order.
+- `T1`…`T6` are the terminals of the running stack (section 3). Start them in that order.
 - Bags go to `~/dagger_bags/`. Stop the recorder (Ctrl-C) before reading a bag.
 
 ---
@@ -26,6 +26,9 @@ Last updated: 2026-10-05 (lidar_odom fused by default; overhang layer; safety ba
 | `bash tools/fetch_patchworkpp.sh` | Fetch and build Patchwork++ (ground segmentation) at its pinned commit. |
 | `bash tools/fetch_model.sh yolox_s` | Download the person detector and build its TensorRT engine for this Jetson. Also: `yolox_nano` (default), `reid` (OSNet re-identification). |
 | `sudo apt install python3-tornado` | **[SUDO]** Web server for the follow page. |
+| `sudo apt install protobuf-compiler` | **[SUDO]** protoc 3.12.4 for the gateway (matches apt `python3-protobuf`). |
+| `git submodule update --init proto` | The app ↔ rover contract (`dagger_proto`) at `proto/`. |
+| `sudo bash tools/systemd/install.sh` | **[SUDO]** Install + enable the boot services (section 3); `--remove` undoes it. |
 
 Engines in `models/` are tied to this GPU and TensorRT version: rebuild them after a JetPack update.
 
@@ -38,6 +41,7 @@ Engines in `models/` are tied to this GPU and TensorRT version: rebuild them aft
 | `colcon build --packages-select dagger_description` | After changing the URDF or its launch files. |
 | `colcon build --packages-select dagger_perception` | After changing `safety_scan` / `low_scan` (C++, about 50 s). |
 | `colcon build --packages-select dagger_nav_plugins` | After changing the Nav2 plugins (StickyGoalChecker, about 40 s). |
+| `colcon build --packages-select dagger_gateway` | After changing the gateway or `proto/` (regenerates `api_pb2.py`, seconds). |
 
 A running node keeps its old code: restart the terminal that runs it after a build.
 The install is not symlinked — an edit in `src/` does nothing until built.
@@ -51,6 +55,17 @@ The install is not symlinked — an edit in `src/` does nothing until built.
 | T3 | `ros2 launch dagger_bringup foxglove.launch.py` | Foxglove bridge on `ws://<rover-ip>:8765`. Add `with_cloud:=true` for the raw point cloud (not while driving). |
 | T4 | `ros2 launch dagger_bringup follow.launch.py …` | Person / marker following and its web page (section 7). |
 | T5 | `ros2 launch dagger_bringup slam.launch.py …` | 2D SLAM (section 6). |
+| T6 | `ros2 run dagger_gateway gateway` | Operator-app gateway, `ws://<rover-ip>:8090/api` (protobuf, contract in `proto/`). `--stop-dry-run`: STOP changes the state only. |
+
+T1 also runs `fcu_config`: `mav_frame BODY_NED` + stream rates re-applied on every FCU connect (Q83).
+
+**At boot (systemd, once installed):** `dagger.target` = T1 (`use_camera:=true`) → T2 → T4 (people + marker) → gateway;
+T3 and T5 stay manual. Don't start those terminals by hand while the services run.
+
+```bash
+sudo systemctl stop dagger.target      # back to terminals     · sudo systemctl start dagger.target
+systemctl status 'dagger-*'            # what runs             · journalctl -fu dagger-gateway   (or -nav, -drive, -follow)
+```
 
 Then, **before any drive and again after every T1 or mavros restart**:
 
@@ -72,7 +87,8 @@ Arming and the GUIDED mode are set by the operator (RC transmitter / Mission Pla
 | RC transmitter | Primary stop. Always in hand when the rover can move. |
 | Web page: **STOP** button or `space` | Follow off. `esc` / **CLEAR** deselects the target (also ends following). |
 | `bash tools/estop.sh` | FCU to HOLD and `/estop` latched at 10 Hz. Leave it running. |
-| `bash tools/estop_clear.sh` | Release the E-stop. The mode stays HOLD: re-select GUIDED yourself. |
+| Operator app: **STOP** | Same as `estop.sh` (HOLD + `/estop` latched) plus Nav2 goals cancelled and follow off. Any `/estop true` shows the app STOPPED. |
+| `bash tools/estop_clear.sh` | Release the E-stop (also the app's STOP: the gateway stops streaming). The mode stays HOLD: re-select GUIDED yourself. |
 | `ros2 topic pub -t 10 -r 5 /follow/enable std_msgs/Bool "{data: false}"` | Follow off from a terminal (repeated: a single message can be dropped). |
 | `ros2 service call /navigate_to_pose/_action/cancel_goal action_msgs/srv/CancelGoal "{}"` | Cancel the Nav2 goal. Ctrl-C in `send_goal.py` does the same. |
 | `ros2 service call /mavros/cmd/arming mavros_msgs/srv/CommandBool "{value: false}"` | Disarm. |
@@ -223,6 +239,11 @@ stack — because the scene tests are timing-sensitive under load.
 | `python3 tools/test_safety_scan.py` | 33/33 | `/scan_safety` + `/scan_overhang` (same node, live params): body box, bands 0.30–1.35 / 0.75–1.35, bins; identical to p2l on the 10-02 captures; parked + walk-around captures; fox2 canopy no longer stops, Q66 plant reaches the overhang scan |
 | `python3 tools/test_lidar_odom.py` | 12/12 | `lidar_odom` (dagger_perception): synthetic room/motion/rejects/corridor + lockstep replay of fox3 vs a direct registration |
 | `python3 tools/test_extnav_relay.py` | 5/5 | extnav_relay (LiDAR odometry → ArduPilot ExternalNav, Q80) + mavros vision plugins load and subscribe (no FCU) |
+| `python3 src/dagger_gateway/test/test_vectors.py` | 19 vectors | Gateway bytes: every `proto/vectors/*.bin` decodes to its `.txtpb` and re-encodes identically |
+| `python3 src/dagger_gateway/test/test_rover_state.py` | 7/7 | Gateway state machine, alerts, link-loss policy (incl. route pause) |
+| `python3 src/dagger_gateway/test/test_gateway_ros.py` | 44/44 | Gateway vs a fake rover: telemetry, readiness, follow-off on app silence, real STOP + estop_clear release |
+| `python3 proto/contract_test.py --url ws://127.0.0.1:8090/api` | 29/29 | The app's contract against a running gateway (sends STOP: dry run, or rover parked + RC in hand). From the PC: `--url ws://192.168.144.100:8090/api --allow-real-rover` |
+| `python3 tools/test_fcu_config.py` | PASS | `fcu_config`: BODY_NED + stream rates on connect and reconnect (fake mavros) |
 | `python3 tools/test_waypoint_queue.py` | 7/7 | waypoint_queue (Foxglove clicks → NavigateThroughPoses, odom tree) against a stub Nav2 |
 | `colcon test --packages-select dagger_nav_plugins && colcon test-result --verbose --test-result-base build/dagger_nav_plugins` | 4/4 | StickyGoalChecker (Q76): the live hunting case, new goal, drift re-arm, plain goals |
 | `python tools/lo_bench.py <bag> <out.npz> [methods]` then `python tools/lo_eval.py <out.npz>` | — | LiDAR-odometry benchmark (KISS, GenZ, VGICP variants) without ground truth; needs a venv with the pip wheels `kiss-icp` 1.3.0, `small_gicp` 1.0.1, GenZ-ICP built from source, and `OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1` |
@@ -272,6 +293,7 @@ Not in it: bags (`~/dagger_bags/`), models (`models/`), third-party sources (`sr
 |---|---|
 | Workspace | `/home/jetson/ros2_ws` |
 | Follow page | `http://<rover-ip>:8080` |
+| Operator-app gateway | `ws://<rover-ip>:8090/api` (8081 round-trip test, 8082 fake rover on the PC) |
 | Foxglove | `ws://<rover-ip>:8765` |
 | SIYI link (Jetson port `enP8p1s0`) | Jetson `192.168.144.100` · air unit `.11` · ground unit `.12` · MK32 Android `.20` |
 | Bags | `~/dagger_bags/` (replays in `~/dagger_bags/replay/`) |
