@@ -33,3 +33,4 @@ src/patchwork-plusplus/
 
 # generated from proto/ by tools/gen_proto.sh
 src/dagger_gateway/dagger_gateway/api_pb2.py
+src/dagger_gateway/dagger_gateway/build_info.py

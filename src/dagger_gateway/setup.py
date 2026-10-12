@@ -9,10 +9,15 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 class GenerateThenBuild(build_py):
-    """api_pb2.py is generated from proto/ on every build, never committed."""
+    """api_pb2.py (from proto/) and build_info.py (the version HelloReply reports)
+    are generated on every build, never committed."""
 
     def run(self):
         subprocess.check_call(["bash", os.path.join(HERE, "..", "..", "tools", "gen_proto.sh")])
+        rev = subprocess.run(["git", "-C", HERE, "describe", "--always", "--dirty"],
+                             capture_output=True, text=True).stdout.strip() or "unknown"
+        with open(os.path.join(HERE, package_name, "build_info.py"), "w") as f:
+            f.write(f'VERSION = "gateway 0.1.0 ({rev})"\n')
         super().run()
 
 
