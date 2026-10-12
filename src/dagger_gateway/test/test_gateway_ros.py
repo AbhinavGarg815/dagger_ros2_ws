@@ -30,6 +30,10 @@ from rclpy.node import Node  # noqa: E402
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy  # noqa: E402
 from sensor_msgs.msg import BatteryState, CameraInfo, Imu, LaserScan, NavSatFix, PointCloud2  # noqa: E402
 from std_msgs.msg import Bool, String  # noqa: E402
+from geometry_msgs.msg import TransformStamped  # noqa: E402
+from lifecycle_msgs.msg import State as LcState  # noqa: E402
+from lifecycle_msgs.srv import GetState  # noqa: E402
+from tf2_ros import StaticTransformBroadcaster, TransformBroadcaster  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, ".."))
@@ -84,8 +88,29 @@ class FakeRover(Node):
         for a in ("navigate_to_pose", "navigate_through_poses"):
             self.create_service(CancelGoal, f"/{a}/_action/cancel_goal",
                                 lambda req, res, a=a: (self.cancels.append(a), res)[1])
+        self.nav2_active = {n: True for n in ("controller_server", "planner_server",
+                                                "bt_navigator", "behavior_server")}
+        for name in self.nav2_active:
+            self.create_service(GetState, f"/{name}/get_state",
+                                lambda req, res, name=name: self.on_lifecycle(name, res))
+        self.tfb = TransformBroadcaster(self)
+        self.static = StaticTransformBroadcaster(self)
+        self.static.sendTransform(self.tf("base_footprint", "rslidar"))
+        self.on = False                    # silent until a scene switches it on
         self.n = 0
         self.create_timer(0.04, self.tick)            # 25 Hz base
+
+    def tf(self, parent, child):
+        t = TransformStamped()
+        t.header.stamp = self.get_clock().now().to_msg()
+        t.header.frame_id, t.child_frame_id = parent, child
+        t.transform.rotation.w = 1.0
+        return t
+
+    def on_lifecycle(self, name, res):
+        res.current_state = LcState(id=3, label="active") if self.nav2_active[name] \
+            else LcState(id=2, label="inactive")
+        return res
 
     def on_mode(self, req, res):
         self.modes.append(req.custom_mode)
@@ -93,7 +118,10 @@ class FakeRover(Node):
         return res
 
     def tick(self):
+        if not self.on:
+            return
         self.n += 1
+        self.tfb.sendTransform([self.tf("odom", "base_footprint"), self.tf("map", "odom")])
         every = lambda k: self.n % k == 0  # noqa: E731
         stamp = self.get_clock().now().to_msg()
         p = self.pubs
@@ -237,13 +265,70 @@ async def scene_telemetry(rover):
     app.close()
 
 
+def checks_of(st):
+    return {pb.CheckId.Name(c.id)[6:]: (pb.CheckStatus.Name(c.status)[13:], dict(c.values))
+            for c in st.readiness}
+
+
+def alerts_of(st):
+    return [pb.AlertCode.Name(a.code)[6:] for a in st.active_alerts]
+
+
+async def scene_readiness(rover):
+    app = await App.connect()
+    await app.handshake()
+    st = await app.latest_state(0.3)
+    check(st.operating_state == pb.OPERATING_STATE_STARTING
+          and all(s == "PENDING" for s, _ in checks_of(st).values()),
+          "nothing heard yet: STARTING, all nine checks PENDING")
+    rover.on = True
+    st = await app.latest_state(5.5)               # past the 4 s grace and one window
+    c = checks_of(st)
+    want = {k: "PASS" for k in c}
+    want["BATTERY"] = "WARN"
+    check({k: s for k, (s, _) in c.items()} == want,
+          f"a healthy parked rover: all PASS but BATTERY WARN (cannot measure) {c}")
+    check(c["HEADING"][1] == {"valid_percent": 100.0}, "heading check carries valid_percent")
+    check(st.operating_state == pb.OPERATING_STATE_READY, "READY")
+    check(st.position.quality == pb.QUALITY_POOR and st.heading.quality == pb.QUALITY_GOOD,
+          "position POOR (3.2 m), heading GOOD (check passes)")
+
+    rover.gps_yaw = 65535
+    st = await app.latest_state(2.0)
+    c = checks_of(st)
+    check(c["HEADING"][0] == "FAIL" and c["HEADING"][1]["valid_percent"] < 90,
+          f"heading invalid -> HEADING FAIL ({c['HEADING'][1]['valid_percent']:.0f} % valid)")
+    check(st.operating_state == pb.OPERATING_STATE_NOT_READY, "a failing check: NOT_READY, never READY")
+    check("HEADING_UNKNOWN" in alerts_of(st), "alert HEADING_UNKNOWN")
+    rover.gps_yaw = 9050
+
+    rover.quiet.add("caminfo")
+    rover.nav2_active["planner_server"] = False
+    rover.battery = (0.10, 22.0)
+    st = await app.latest_state(3.5)
+    c = checks_of(st)
+    check(c["CAMERA"][0] == "FAIL", "camera silent -> CAMERA FAIL")
+    check(c["NAVIGATION"][0] == "FAIL", "a Nav2 node inactive -> NAVIGATION FAIL")
+    check(c["BATTERY"] == ("FAIL", {"percent": 10.0}) and "BATTERY_CRITICAL" in alerts_of(st),
+          "10 % -> BATTERY FAIL + BATTERY_CRITICAL")
+    check(alerts_of(st)[0] in ("BATTERY_CRITICAL",), f"highest severity first {alerts_of(st)}")
+    rover.quiet.discard("caminfo")
+    rover.nav2_active["planner_server"] = True
+    rover.battery = (float("nan"), 0.0)
+    st = await app.latest_state(6.0)               # heading back above 90 % over the window
+    check(st.operating_state == pb.OPERATING_STATE_READY and alerts_of(st) == [],
+          f"all back -> READY, no alerts {alerts_of(st)}")
+    app.close()
+
+
 async def scenes(rover):
+    await scene_readiness(rover)
     await scene_telemetry(rover)
 
 
 def main():
     gw = subprocess.Popen(["bash", "-lc", f"{SRC} && exec ros2 run dagger_gateway gateway "
-                           f"--ros-args -p port:={PORT}"],
+                           f"--ros-args -p port:={PORT} -p startup_grace_s:=4.0"],
                           stdout=open(LOG, "w"), stderr=subprocess.STDOUT, preexec_fn=os.setsid)
     rclpy.init()
     rover = FakeRover()

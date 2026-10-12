@@ -26,6 +26,9 @@ from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import BatteryState, CameraInfo, Imu, LaserScan, NavSatFix, PointCloud2
 from std_msgs.msg import Bool, String
 
+from .readiness import Readiness
+from .rover_state import pending_checks
+
 WINDOW_S = 5.0             # rates and fractions are judged over this, as preflight's 5 s sample
 SPEED_DEADBAND_MPS = 0.05  # a parked rover's /odometry/filtered shows a few mm/s
 
@@ -114,6 +117,8 @@ class RosIO(Node):
         p("good_position_accuracy_m", 0.5)
         p("battery_low_percent", 30.0)
         p("battery_critical_percent", 15.0)
+        # checks not yet heard stay PENDING (STARTING) this long while the stack comes up
+        p("startup_grace_s", 120.0)
         g = lambda n: self.get_parameter(n).value  # noqa: E731
         self.param = g
         self.dry_run = bool(g("stop_dry_run"))
@@ -141,6 +146,9 @@ class RosIO(Node):
                         history=HistoryPolicy.KEEP_LAST, depth=10)
         for topic, typ, raw in TOPICS:
             self.create_subscription(typ, topic, self._seen_cb(topic), be, raw=raw)
+        self.checks = pending_checks()     # replaced whole once a second; read by the loop
+        self.readiness = Readiness(self)
+        self.create_timer(1.0, self.evaluate)
 
     # ---------------- in ----------------
     def on_estop(self, m):
@@ -168,6 +176,9 @@ class RosIO(Node):
                 self.rc_neutral.add(len(ch) > 2 and abs(ch[0] - 1500) <= 25
                                     and abs(ch[2] - 1500) <= 25, now)
         return cb
+
+    def evaluate(self):
+        self.checks = self.readiness.evaluate()
 
     def fresh(self, topic, max_age_s=2.0):
         """The topic's latest message if it is recent, else None."""

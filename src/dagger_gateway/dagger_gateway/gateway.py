@@ -60,6 +60,7 @@ class Gateway:
                                  max_speed_mps=float(g("max_speed_mps")))
         self.sockets = set()
         self.results = collections.OrderedDict()   # command_id -> CommandResult (rule 3)
+        self.checks_in = None
         self.core = RoverCore(self.settings, self.broadcast, node)
         node.on_estop_edge = lambda on: loop.call_soon_threadsafe(self.on_estop_edge, on)
 
@@ -106,6 +107,10 @@ class Gateway:
         return st
 
     def tick_state(self):
+        checks = self.node.checks
+        if checks is not self.checks_in:   # readiness replaces the dict once a second
+            self.checks_in = checks
+            self.core.set_checks(checks)
         self.core.set_following(self.node.following())
         self.core.link_tick([s.silence_ms() for s in self.apps()])
         for s in self.apps():
