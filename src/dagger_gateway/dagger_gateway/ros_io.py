@@ -94,6 +94,10 @@ class Series:
         return [v for t, v in self.items if t >= now - WINDOW_S]
 
 FOLLOW_OFF_GRACE_S = 0.7   # ignore "following" from /follow/state this long after we turned it off
+# After a release, ignore /estop true this long: our own 10 Hz stream, sent just
+# before we heard the release, can still be in flight and must not re-latch.
+# A real tools/estop.sh streams at 10 Hz, so it still latches on its next message.
+RELEASE_GRACE_S = 0.5
 FOLLOW_STATE_TIMEOUT_S = 2.0   # follow_controller publishes /follow/state at 2 Hz
 
 
@@ -125,6 +129,7 @@ class RosIO(Node):
         self.on_estop_edge = None          # set by the gateway: called (in this thread) with True/False
 
         self.latched = False
+        self.released_at = -1e9            # monotonic s of the last /estop false edge
         self.follow_state = None           # (text, monotonic s)
         self.follow_off_at = -1e9
 
@@ -154,7 +159,12 @@ class RosIO(Node):
     def on_estop(self, m):
         if m.data == self.latched:
             return
+        now = time.monotonic()
+        if m.data and now - self.released_at < RELEASE_GRACE_S:
+            return                         # most likely our own stream, still in flight
         self.latched = m.data
+        if not m.data:
+            self.released_at = now
         self.get_logger().warn("/estop true: STOPPED latched" if m.data else
                                "/estop false: latch released (mode stays HOLD)")
         if self.on_estop_edge:
@@ -253,6 +263,9 @@ class RosIO(Node):
 
     def stop(self):
         if self.dry_run:
+            # Latched all the same (stream_estop publishes nothing in a dry run), so
+            # tools/estop_clear.sh's /estop false is an edge and releases it.
+            self.latched = True
             self.get_logger().warn("STOP (dry run: nothing published, FCU untouched)")
             return
         self.get_logger().error("STOP: /estop latched, FCU -> HOLD, Nav2 goals cancelled, follow off")
