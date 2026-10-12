@@ -99,7 +99,8 @@ class Gateway:
 
     # ---------------- state ----------------
     def state_msg(self):
-        st = pb.RoverState(operating_state=self.core.state, armed=False, speed_mps=0.0)
+        st = pb.RoverState(operating_state=self.core.state)
+        self.node.fill_state(st, self.core.checks)
         st.readiness.extend(self.core.readiness_msgs())
         st.active_alerts.extend(self.core.alerts.sorted())
         return st
