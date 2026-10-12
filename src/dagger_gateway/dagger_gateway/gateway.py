@@ -180,6 +180,7 @@ def main():
     finally:
         executor.shutdown(timeout_sec=1.0)
         spin.join(timeout=2.0)
+        node.readiness.close()             # the tf listener's own node and thread
         node.destroy_node()
         rclpy.try_shutdown()
     sys.exit(code)

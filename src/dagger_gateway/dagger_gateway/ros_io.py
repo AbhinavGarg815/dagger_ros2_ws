@@ -23,13 +23,21 @@ from mavros_msgs.srv import SetMode
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
-from sensor_msgs.msg import BatteryState, CameraInfo, Imu, LaserScan, NavSatFix, PointCloud2
+from rclpy.qos_event import PublisherEventCallbacks, SubscriptionEventCallbacks
+from sensor_msgs.msg import BatteryState, CameraInfo, Imu, LaserScan, NavSatFix
 from std_msgs.msg import Bool, String
 
 from .readiness import Readiness
 from .rover_state import pending_checks
 
 WINDOW_S = 5.0             # rates and fractions are judged over this, as preflight's 5 s sample
+
+# CPU (py-spy, 2026-10-12: 37 % of a core, most of it in rclpy's executor): by
+# default rclpy gives every subscription and publisher a QoS-event handler, and
+# every incoming message makes the executor rebuild its wait set with all of
+# them. The gateway does not use QoS events, so it creates none.
+QUIET_SUB = SubscriptionEventCallbacks(use_default_callbacks=False)
+QUIET_PUB = PublisherEventCallbacks(use_default_callbacks=False)
 SPEED_DEADBAND_MPS = 0.05  # a parked rover's /odometry/filtered shows a few mm/s
 
 # topic, type, raw (no deserialisation: only the arrival counts). The rates each
@@ -46,7 +54,9 @@ TOPICS = (
     ("/mavros/global_position/global", NavSatFix, False),
     ("/mavros/battery", BatteryState, False),
     ("/gps/heading_imu", Imu, True),
-    ("/rslidar_points", PointCloud2, True),
+    # Not /rslidar_points: ~1 MB x 10 Hz copied into Python only to be counted.
+    # /scan is made from it (pointcloud_to_laserscan, nav2.launch.py), so /scan
+    # at rate means the LiDAR is delivering.
     ("/scan", LaserScan, True),
     ("/d435/color/camera_info", CameraInfo, True),   # one per colour frame, ~1 KB
 )
@@ -133,10 +143,11 @@ class RosIO(Node):
         self.follow_state = None           # (text, monotonic s)
         self.follow_off_at = -1e9
 
-        self.estop_pub = self.create_publisher(Bool, "/estop", 10)
-        self.follow_pub = self.create_publisher(Bool, "/follow/enable", 10)
-        self.create_subscription(Bool, "/estop", self.on_estop, 10)
-        self.create_subscription(String, "/follow/state", self.on_follow_state, 10)
+        self.estop_pub = self.create_publisher(Bool, "/estop", 10, event_callbacks=QUIET_PUB)
+        self.follow_pub = self.create_publisher(Bool, "/follow/enable", 10, event_callbacks=QUIET_PUB)
+        self.create_subscription(Bool, "/estop", self.on_estop, 10, event_callbacks=QUIET_SUB)
+        self.create_subscription(String, "/follow/state", self.on_follow_state, 10,
+                                 event_callbacks=QUIET_SUB)
         self.mode_cli = self.create_client(SetMode, "/mavros/set_mode")
         self.cancel_clis = [self.create_client(CancelGoal, f"/{a}/_action/cancel_goal")
                             for a in ("navigate_to_pose", "navigate_through_poses")]
@@ -150,7 +161,8 @@ class RosIO(Node):
         be = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
                         history=HistoryPolicy.KEEP_LAST, depth=10)
         for topic, typ, raw in TOPICS:
-            self.create_subscription(typ, topic, self._seen_cb(topic), be, raw=raw)
+            self.create_subscription(typ, topic, self._seen_cb(topic), be, raw=raw,
+                                     event_callbacks=QUIET_SUB)
         self.checks = pending_checks()     # replaced whole once a second; read by the loop
         self.readiness = Readiness(self)
         self.create_timer(1.0, self.evaluate)

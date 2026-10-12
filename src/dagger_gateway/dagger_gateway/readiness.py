@@ -16,10 +16,12 @@ Not yet covered (preflight has them): exactly one map->odom owner; --indoor
 import math
 import time
 
+import rclpy
 import tf2_ros
 from lifecycle_msgs.srv import GetState
 from rclpy.duration import Duration
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.qos_event import SubscriptionEventCallbacks
 from rclpy.time import Time
 from std_msgs.msg import Bool
 
@@ -38,7 +40,9 @@ RATES = {
     pb.CHECK_POSITION: (("/mavros/gpsstatus/gps1/raw", 4.0),),
     # 3.6 Hz healthy; 0.4 Hz when the heading was valid 8 % of the time and EK3 diverged (Q67)
     pb.CHECK_HEADING: (("/mavros/gpsstatus/gps1/raw", 4.0), ("/gps/heading_imu", 2.0)),
-    pb.CHECK_OBSTACLE_SENSOR: (("/rslidar_points", 8.0), ("/scan", 8.0)),
+    # preflight also times /rslidar_points; /scan is made from it, so /scan alone
+    # shows the LiDAR delivering without copying ~1 MB a frame into Python
+    pb.CHECK_OBSTACLE_SENSOR: (("/scan", 8.0),),
     pb.CHECK_LOCALISATION: (("/odometry/filtered", 15.0),),
     pb.CHECK_BATTERY: (("/mavros/battery", 0.0),),
     pb.CHECK_CAMERA: (("/d435/color/camera_info", 10.0),),   # 30 fps profile
@@ -57,11 +61,23 @@ class Readiness:
         latched = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, depth=1,
                              durability=DurabilityPolicy.TRANSIENT_LOCAL)
         io.create_subscription(Bool, "/slam/localized",
-                               lambda m: setattr(self, "slam_localized", m.data), latched)
+                               lambda m: setattr(self, "slam_localized", m.data), latched,
+                               event_callbacks=SubscriptionEventCallbacks(use_default_callbacks=False))
+        # tf on its own small node and thread: /tf comes at hundreds of Hz, and on
+        # the gateway's node every message made rclpy rebuild the whole wait set
+        # (py-spy, 2026-10-12). Not TransformListener(spin_thread=True) on `io`:
+        # that would add the gateway's own node to a second executor.
+        self.tf_node = rclpy.create_node("dagger_gateway_tf")
         self.tf = tf2_ros.Buffer(cache_time=Duration(seconds=5))
-        self.tf_listener = tf2_ros.TransformListener(self.tf, io)
+        self.tf_listener = tf2_ros.TransformListener(self.tf, self.tf_node, spin_thread=True)
         self.lc_clients = {n: io.create_client(GetState, f"/{n}/get_state") for n in NAV2_NODES}
         io.create_timer(2.0, self.poll_lifecycle)
+
+    def close(self):
+        """Stops the tf thread (it is not a daemon: it would keep the process alive)."""
+        self.tf_listener.executor.shutdown()
+        self.tf_listener.dedicated_listener_thread.join(timeout=2.0)
+        self.tf_node.destroy_node()
 
     def poll_lifecycle(self):
         for n, cli in self.lc_clients.items():
