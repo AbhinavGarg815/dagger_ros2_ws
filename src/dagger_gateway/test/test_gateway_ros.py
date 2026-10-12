@@ -82,8 +82,7 @@ class FakeRover(Node):
         self.estop_seen, self.follow_enable_seen = [], []
         self.modes, self.cancels = [], []
         self.create_subscription(Bool, "/estop", lambda m: self.estop_seen.append((time.monotonic(), m.data)), 10)
-        self.create_subscription(Bool, "/follow/enable",
-                                 lambda m: self.follow_enable_seen.append((time.monotonic(), m.data)), 10)
+        self.create_subscription(Bool, "/follow/enable", self.on_follow_enable, 10)
         self.create_service(SetMode, "/mavros/set_mode", self.on_mode)
         for a in ("navigate_to_pose", "navigate_through_poses"):
             self.create_service(CancelGoal, f"/{a}/_action/cancel_goal",
@@ -111,6 +110,12 @@ class FakeRover(Node):
         res.current_state = LcState(id=3, label="active") if self.nav2_active[name] \
             else LcState(id=2, label="inactive")
         return res
+
+    def on_follow_enable(self, m):
+        """follow_controller: says so on /follow/state."""
+        self.follow_enable_seen.append((time.monotonic(), m.data))
+        if self.follow_text is not None:
+            self.follow_text = "following" if m.data else "disabled: enable false"
 
     def on_mode(self, req, res):
         self.modes.append(req.custom_mode)
@@ -321,9 +326,126 @@ async def scene_readiness(rover):
     app.close()
 
 
+def events_of(app):
+    out = []
+    while not app.inbox.empty():
+        env = app.inbox.get_nowait()
+        if env.WhichOneof("body") == "event":
+            out.append(env.event)
+    return out
+
+
+async def scene_link_loss(rover):
+    rover.follow_text = "following"
+    rover.follow_enable_seen.clear()
+    # a refused app and a half-open one (never says Hello), both silent
+    old = await App.connect()
+    await old.send(hello=pb.Hello(protocol_version=pb.PROTOCOL_VERSION_UNSPECIFIED))
+    half = await App.connect()
+    watcher = await App.connect()          # a healthy app, to watch the state
+    await watcher.handshake()
+    st = await watcher.latest_state(2.5)
+    check(st.operating_state == pb.OPERATING_STATE_FOLLOWING, "follow_controller enabled -> FOLLOWING")
+    check(rover.follow_enable_seen == [],
+          "a refused and a half-open connection, silent 2.5 s, change nothing")
+    old.close()
+    half.close()
+    await asyncio.sleep(0.5)
+    check(rover.follow_enable_seen == [], "...nor when they disconnect")
+
+    pilot = await App.connect()
+    await pilot.handshake()
+    await asyncio.sleep(0.5)
+    pilot.stop_beats()                     # the radio drops
+    t0 = time.monotonic() - 0.25           # its last heartbeat went out up to 250 ms ago
+    while not rover.follow_enable_seen and time.monotonic() - t0 < 4.0:
+        await asyncio.sleep(0.02)
+    check(rover.follow_enable_seen and rover.follow_enable_seen[0][1] is False,
+          "a handshaken app silent -> /follow/enable false")
+    took = rover.follow_enable_seen[0][0] - t0
+    check(1.3 <= took <= 2.0, f"after {took:.2f} s of silence (policy 1.5 s, state tick 0.2 s)")
+    st = await watcher.latest_state(0.5)
+    check(st.operating_state in (pb.OPERATING_STATE_READY, pb.OPERATING_STATE_NOT_READY),
+          f"FOLLOWING -> {pb.OperatingState.Name(st.operating_state)}")
+    ev = [e.state_changed for e in events_of(pilot) if e.WhichOneof("kind") == "state_changed"
+          and e.state_changed.from_state == pb.OPERATING_STATE_FOLLOWING]
+    check(len(ev) == 1 and ev[0].reason == pb.STATE_REASON_APP_SILENT,
+          "event state_changed out of FOLLOWING, reason APP_SILENT")
+    await asyncio.sleep(1.5)
+    check(rover.follow_text.startswith("disabled") and len(rover.follow_enable_seen) <= 6,
+          f"not repeated once follow is off ({len(rover.follow_enable_seen)} msgs = one burst of 3, "
+          "or two if the second-long resend raced the controller)")
+
+    pilot.start_beats()                    # back; follow on again from elsewhere
+    rover.follow_text = "following"
+    rover.follow_enable_seen.clear()
+    await asyncio.sleep(1.0)
+    check(rover.follow_enable_seen == [], "app back and beating: following is left alone")
+    pilot.close()                          # the app quits
+    await asyncio.sleep(0.3)
+    check(rover.follow_enable_seen and rover.follow_enable_seen[0][1] is False,
+          "a handshaken app disconnecting -> follow off at once")
+    rover.follow_text = None
+    watcher.close()
+
+
+async def scene_stop(rover):
+    rover.estop_seen.clear()
+    rover.follow_text = "following"
+    rover.follow_enable_seen.clear()
+    app = await App.connect()
+    await app.handshake()
+    await asyncio.sleep(1.0)
+    events_of(app)
+    stop = pb.Command(command_id="stop-1", stop=pb.Stop())
+    await app.send(command=stop)
+    res = await app.receive("command_result")
+    check(res.command_result.outcome == pb.COMMAND_OUTCOME_ACCEPTED, "STOP accepted")
+    st = await app.latest_state(1.0)
+    check(st.operating_state == pb.OPERATING_STATE_STOPPED
+          and alerts_of(st) == ["STOPPED_BY_OPERATOR"], "STOPPED + STOPPED_BY_OPERATOR")
+    check(rover.modes == ["HOLD"], "FCU -> HOLD (/mavros/set_mode)")
+    check(sorted(rover.cancels) == ["navigate_through_poses", "navigate_to_pose"],
+          "both Nav2 actions cancelled")
+    check(rover.follow_enable_seen and all(v is False for _, v in rover.follow_enable_seen),
+          "/follow/enable false")
+    trues = [t for t, v in rover.estop_seen if v]
+    rate = (len(trues) - 1) / (trues[-1] - trues[0]) if len(trues) > 2 else 0
+    check(len(trues) >= 8 and 8.0 <= rate <= 12.5, f"/estop true streamed at {rate:.1f} Hz")
+    await app.send(command=stop)
+    await app.receive("command_result")
+    await asyncio.sleep(0.3)
+    check(rover.modes == ["HOLD"] and len(rover.cancels) == 2, "the same STOP again: no second effect")
+
+    # tools/estop_clear.sh: /estop false x5 at 10 Hz
+    for _ in range(5):
+        rover.estop_pub.publish(Bool(data=False))
+        await asyncio.sleep(0.1)
+    t_clear = time.monotonic()
+    await asyncio.sleep(1.0)
+    late = [t for t, v in rover.estop_seen if v and t > t_clear - 0.35]
+    check(not late, "estop_clear.sh releases: the gateway stops streaming true at once")
+    st = await app.latest_state(0.3)
+    check(st.operating_state != pb.OPERATING_STATE_STOPPED and "STOPPED_BY_OPERATOR" not in alerts_of(st),
+          f"released -> {pb.OperatingState.Name(st.operating_state)}, its alert cleared")
+    check(rover.modes == ["HOLD"], "the mode is left in HOLD for the engineer")
+
+    # tools/estop.sh from a terminal also latches STOPPED
+    rover.estop_pub.publish(Bool(data=True))
+    st = await app.latest_state(0.6)
+    check(st.operating_state == pb.OPERATING_STATE_STOPPED, "/estop true from elsewhere -> STOPPED")
+    for _ in range(5):
+        rover.estop_pub.publish(Bool(data=False))
+        await asyncio.sleep(0.1)
+    rover.follow_text = None
+    app.close()
+
+
 async def scenes(rover):
     await scene_readiness(rover)
     await scene_telemetry(rover)
+    await scene_link_loss(rover)
+    await scene_stop(rover)
 
 
 def main():
