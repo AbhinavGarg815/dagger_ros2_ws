@@ -1,0 +1,74 @@
+#!/usr/bin/env python3
+"""Saved routes, the recorder and the route arithmetic. NO ROS, NO SOCKETS.
+
+    python3 src/dagger_gateway/test/test_routes.py     (or pytest)
+"""
+import os
+import sys
+import tempfile
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(HERE, ".."))
+from dagger_gateway.routes import (Recorder, RouteStore, distance_m, ll_to_en,  # noqa: E402
+                                   path_length, progress, window)
+
+LAT0, LON0 = 26.7480, 75.8553   # near the yard (Jaipur)
+
+
+def north(m, east=0.0):
+    """A point `m` metres north (and `east` metres east) of LAT0, LON0."""
+    return (LAT0 + m / 110_800.0, LON0 + east / (111_320.0 * 0.8930))
+
+
+def test_ll_to_en_is_metres():
+    e, n = ll_to_en(*north(10.0), LAT0, LON0)
+    assert abs(n - 10.0) < 0.05 and abs(e) < 0.01
+    assert abs(distance_m(north(0), north(0, east=5.0)) - 5.0) < 0.05
+
+
+def test_store_saves_reloads_and_names():
+    with tempfile.TemporaryDirectory() as d:
+        store = RouteStore(d)
+        assert store.all() == [] and store.suggested_name() == "Route 1"
+        r = store.save("Yard loop", [north(0), north(5), north(10)])
+        assert store.name_taken("Yard loop") and not store.name_taken("Gate")
+        assert store.suggested_name() == "Route 2"
+        again = RouteStore(d)                       # a gateway restart
+        assert [x.name for x in again.all()] == ["Yard loop"]
+        s = again.get(r.id).summary()
+        assert len(s.waypoints) == 3 and abs(s.length_m - 10.0) < 0.1
+        assert not [f for f in os.listdir(d) if f.endswith(".tmp")], "written atomically"
+
+
+def test_store_skips_a_damaged_file():
+    with tempfile.TemporaryDirectory() as d:
+        open(os.path.join(d, "bad.json"), "w").write("{not json")
+        assert RouteStore(d).all() == []
+
+
+def test_recorder_keeps_a_point_every_spacing_and_at_turns():
+    rec = Recorder(2.0)
+    for m in [0, 0.5, 1.0, 1.9, 2.1, 3.0, 4.2]:
+        rec.add(*north(m))
+    assert len(rec.points) == 3, rec.points            # 0, 2.1, 4.2
+    rec.add(*north(4.2, east=0.8))                      # a sharp turn, 0.8 m on
+    assert len(rec.points) == 4
+    assert abs(rec.length_m() - (4.2 + 0.8)) < 0.1
+
+
+def test_progress_and_window():
+    pts = [north(m) for m in (0, 10, 20, 30, 40)]
+    total = path_length(pts)
+    frac, left = progress(pts, 2, north(15), total)
+    assert abs(left - 25.0) < 0.2 and abs(frac - 0.375) < 0.01
+    assert window(pts, 0, north(0), 15.0) == (0, 2)      # 0 and 10 m: within 15 m
+    assert window(pts, 2, north(15), 15.0) == (2, 4)     # 20 and 30 m from the rover at 15 m
+    assert window(pts, 3, north(0), 15.0) == (3, 4), "a far point is still tried, alone"
+
+
+if __name__ == "__main__":
+    tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
+    for t in tests:
+        t()
+        print(f"ok    {t.__name__}")
+    print(f"\n{len(tests)} passed")

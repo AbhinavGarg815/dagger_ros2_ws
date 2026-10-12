@@ -111,15 +111,18 @@ class Readiness:
         now = time.monotonic()
         starting = now - self.t0 < self.grace_s
         out = {}
-        for cid, fn in ((pb.CHECK_FLIGHT_CONTROLLER, self.flight_controller),
-                        (pb.CHECK_REMOTE_CONTROL, self.remote_control),
+        checks = ((pb.CHECK_FLIGHT_CONTROLLER, self.flight_controller),
+                  (pb.CHECK_REMOTE_CONTROL, self.remote_control),
                         (pb.CHECK_POSITION, self.position),
                         (pb.CHECK_HEADING, self.heading),
                         (pb.CHECK_OBSTACLE_SENSOR, self.obstacle_sensor),
                         (pb.CHECK_LOCALISATION, self.localisation),
                         (pb.CHECK_NAVIGATION, self.navigation),
                         (pb.CHECK_BATTERY, self.battery),
-                        (pb.CHECK_CAMERA, self.camera)):
+                        (pb.CHECK_CAMERA, self.camera))
+        for cid, fn in checks:
+            if cid == pb.CHECK_BATTERY and not self.io.param("battery_monitor"):
+                continue          # no monitor on this rover: no check, not a standing warning
             status, values = fn(now)
             if starting and status != PASS and not self.heard(cid):
                 status = PENDING

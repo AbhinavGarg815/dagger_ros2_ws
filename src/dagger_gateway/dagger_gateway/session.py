@@ -91,6 +91,8 @@ class ApiSocket(tornado.websocket.WebSocketHandler):
         self.accepted = True
         self.last_heard = time.monotonic()
         self.send(settings=self.gw.settings.msg())
+        if self.gw.routes_on:
+            self.send(routes=self.gw.route_list())   # Phase 3: the saved routes
         if first:
             self.send_state()              # the picture at once, not 200 ms later
 

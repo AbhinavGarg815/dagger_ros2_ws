@@ -8,7 +8,7 @@ Wants=network-online.target
 Type=simple
 User=nvidia
 Group=dagger
-ExecStart=/home/jetson/ros2_ws/tools/systemd/dagger-ros-env.sh ros2 run dagger_gateway gateway
+ExecStart=/home/jetson/ros2_ws/tools/systemd/dagger-ros-env.sh ros2 run dagger_gateway gateway --ros-args -p battery_monitor:=false
 Restart=on-failure
 RestartSec=3
 # ros2 launch shuts its nodes down on SIGINT; only it gets the signal (mixed),

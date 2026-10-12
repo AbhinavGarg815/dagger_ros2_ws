@@ -133,6 +133,18 @@ class RosIO(Node):
         p("battery_critical_percent", 15.0)
         # checks not yet heard stay PENDING (STARTING) this long while the stack comes up
         p("startup_grace_s", 120.0)
+        # false: this rover has no battery monitor (Dagger, 2026-10-12): no battery check at
+        # all instead of a warning that never clears; the app reminds the operator to look
+        p("battery_monitor", True)
+        # Phase 3: routes recorded by driving and run with Nav2
+        p("routes_enabled", True)
+        p("route_dir", "~/dagger_routes")
+        p("record_point_spacing_m", 2.0)
+        # each Nav2 goal within this of the rover (global costmap: 40 m rolling window)
+        p("route_window_m", 15.0)
+        # the operator's slide to start / carry on also releases the STOP latch and sets
+        # GUIDED (owner, 2026-10-12). Arming stays on the RC switch.
+        p("set_guided_on_start", True)
         g = lambda n: self.get_parameter(n).value  # noqa: E731
         self.param = g
         self.dry_run = bool(g("stop_dry_run"))
@@ -293,6 +305,45 @@ class RosIO(Node):
                 cli.call_async(CancelGoal.Request())     # empty request = every goal
         self.follow_off("STOP")
 
+    def release_estop(self):
+        """A new job (the operator's slide) releases the STOP latch: the 10 Hz
+        stream stops and twist_mux / cmd_vel_safety are told so."""
+        if not self.latched:
+            return
+        self.latched = False
+        self.released_at = time.monotonic()   # our own trues still in flight are ignored
+        if not self.dry_run:
+            for _ in range(3):
+                self.estop_pub.publish(Bool(data=False))
+        self.get_logger().warn("STOP latch released by a new job")
+
+    def armed(self):
+        st = self.fresh("/mavros/state", 3.0)
+        return bool(st and st.armed)
+
+    def ensure_guided(self):
+        """Nav2 drives only in GUIDED; a STOP left HOLD. Asked for, not waited on."""
+        st = self.fresh("/mavros/state", 3.0)
+        if st is not None and st.mode == "GUIDED":
+            return
+        if not self.param("set_guided_on_start"):
+            self.get_logger().warn("route: FCU not in GUIDED and set_guided_on_start is off")
+            return
+        if self.mode_cli.service_is_ready():
+            self.mode_cli.call_async(SetMode.Request(base_mode=0, custom_mode="GUIDED"))
+            self.get_logger().warn("route: FCU -> GUIDED")
+        else:
+            self.get_logger().error("route: /mavros/set_mode not available -- FCU NOT set to GUIDED")
+
+    def good_fix(self):
+        """(lat, lon) of a 3-D fix, or None: what a recording keeps."""
+        fix, raw = self.fresh("/mavros/global_position/global"), self.fresh("/mavros/gpsstatus/gps1/raw")
+        if fix is None or raw is None or raw.fix_type < 3:
+            return None
+        if not (math.isfinite(fix.latitude) and math.isfinite(fix.longitude)):
+            return None
+        return fix.latitude, fix.longitude
+
     def _mode_done(self, fut):
         r = fut.result()
         if r is None or not r.mode_sent:
@@ -306,6 +357,4 @@ class RosIO(Node):
             self.follow_pub.publish(Bool(data=False))
         self.get_logger().warn(f"follow OFF ({why})")
 
-    def pause_route(self, why):
-        """Phase 3: the gateway runs no routes in v1."""
-        self.get_logger().warn(f"route pause requested ({why}) -- no gateway route in v1")
+

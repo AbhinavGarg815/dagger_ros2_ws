@@ -6,9 +6,10 @@ Everything runs on the asyncio loop thread. Tested offline by test/test_rover_st
 
 OPERATING STATE, first match wins:
     STOPPED        a STOP is latched (the app's, or /estop true from anywhere)
-    PAUSED         a route is paused (Phase 3)
+    PAUSED         a route is paused (by the operator, app silence, or Nav2 giving up)
     FOLLOWING      follow_controller says it is enabled
-    RUNNING_ROUTE  the gateway's own route is running (Phase 3)
+    RUNNING_ROUTE  the gateway's own route is running
+    RECORDING      the operator drives, the gateway notes the route
     STARTING       a readiness check is still PENDING
     NOT_READY      a check FAILs -- never READY next to a failing check
     READY
@@ -20,6 +21,11 @@ connection changes nothing): any such app silent for follow_stop_after_silence_m
 -> following off; for route_pause_after_silence_ms -> a running route pauses (reason
 APP_SILENT) and stays paused when the app returns, until the operator resumes it.
 An app that disconnects counts as silent at once.
+
+JOBS (Phase 3, docs/proposals/phase3-routes.md in DaggerGCS): `may_start` says
+whether a route or a recording may start and, if not, the reject reason; a new
+job releases a STOP. The ROS side (route_executor, the /estop latch, the mode)
+is the gateway's; here are only the rules and the state they produce.
 """
 import time
 
@@ -33,7 +39,7 @@ DRIVING_JOBS = (pb.JOB_RUN_ROUTE, pb.JOB_GO_TO_PLACE, pb.JOB_COME_HOME)
 CHECKS = (
     (pb.CHECK_FLIGHT_CONTROLLER, ALL_JOBS),
     (pb.CHECK_REMOTE_CONTROL, ALL_JOBS),
-    (pb.CHECK_POSITION, DRIVING_JOBS),
+    (pb.CHECK_POSITION, DRIVING_JOBS + (pb.JOB_RECORD_ROUTE,)),   # a recording is lat/lon
     (pb.CHECK_HEADING, DRIVING_JOBS),
     (pb.CHECK_OBSTACLE_SENSOR, ALL_JOBS),
     (pb.CHECK_LOCALISATION, DRIVING_JOBS),
@@ -64,12 +70,14 @@ class Settings:
     the gateway enforces its bounds."""
 
     def __init__(self, heartbeat_ms=250, state_ms=200, follow_stop_ms=1500, route_pause_ms=3000,
-                 route_pause_min_ms=1500, route_pause_max_ms=10000, max_speed_mps=0.6):
+                 route_pause_min_ms=1500, route_pause_max_ms=10000, max_speed_mps=0.6,
+                 record_spacing_m=2.0):
         self.heartbeat_ms, self.state_ms = heartbeat_ms, state_ms
         self.follow_stop_ms = follow_stop_ms
         self.route_pause_min_ms, self.route_pause_max_ms = route_pause_min_ms, route_pause_max_ms
         self.route_pause_ms = self.clamp_route_pause(route_pause_ms)
         self.max_speed_mps = max_speed_mps
+        self.record_spacing_m = record_spacing_m
 
     def clamp_route_pause(self, ms):
         return max(self.route_pause_min_ms, min(self.route_pause_max_ms, int(ms)))
@@ -81,7 +89,8 @@ class Settings:
             route_pause_after_silence_ms=self.route_pause_ms,
             route_pause_after_silence_min_ms=self.route_pause_min_ms,
             route_pause_after_silence_max_ms=self.route_pause_max_ms,
-            max_speed_mps=self.max_speed_mps)
+            max_speed_mps=self.max_speed_mps,
+            record_point_spacing_m=self.record_spacing_m)
 
 
 class Alerts:
@@ -118,25 +127,35 @@ class Alerts:
 
 class RoverCore:
 
-    def __init__(self, settings, emit, actions):
+    def __init__(self, settings, emit, actions, omit_checks=()):
         """emit(pb.Event): to every app that completed the handshake.
-        actions: follow_off(why), pause_route(why) -- the ROS side."""
+        actions: follow_off(why), pause_route(why) -- the ROS side.
+        omit_checks: CheckIds this rover does not have (e.g. CHECK_BATTERY with no
+        battery monitor): left out of readiness altogether, never a standing warning."""
         self.settings = settings
         self.emit = emit
         self.actions = actions
         self.alerts = Alerts(emit)
-        self.checks = pending_checks()     # CheckId -> (CheckStatus, values)
+        self.table = tuple((cid, blocks) for cid, blocks in CHECKS if cid not in set(omit_checks))
+        self.checks = {cid: (pb.CHECK_STATUS_PENDING, {}) for cid, _ in self.table}
         self.state = pb.OPERATING_STATE_STARTING
         self.stopped = False
         self.following = False
-        self.route = None                  # None | "running" | "paused" (Phase 3)
+        self.route = None                  # None | "running" | "paused"
+        self.pause_reason = None           # why the route is paused (a StateReason)
+        self.route_id = None
+        self.route_points = []
+        self.target = 0                    # index of the point being driven to
+        self.route_total_m = 0.0
+        self.recording = None              # routes.Recorder while recording, kept after a STOP
         self.pause_silence_s = 0.0
         self.follow_off_sent = -1e9        # monotonic s: link-loss follow-off, resent at most 1/s
 
     # ---------------- inputs ----------------
     def set_checks(self, checks):
-        """checks: CheckId -> (CheckStatus, values dict)."""
-        self.checks = dict(checks)
+        """checks: CheckId -> (CheckStatus, values dict). Omitted checks are dropped."""
+        ids = {cid for cid, _ in self.table}
+        self.checks = {cid: v for cid, v in checks.items() if cid in ids}
         self._readiness_alerts()
         self.update(pb.STATE_REASON_READINESS)
 
@@ -146,9 +165,11 @@ class RoverCore:
             self.update(reason)
 
     def stop(self):
-        """STOP: latched until released. Ends the jobs too."""
+        """STOP: latched until released. Ends a route; a recording is kept (owner,
+        2026-10-12) until the operator saves or discards it."""
         self.stopped = True
         self.route = None
+        self.pause_reason = None
         self.update(pb.STATE_REASON_OPERATOR)
 
     def release(self):
@@ -173,8 +194,72 @@ class RoverCore:
         if self.route == "running" and worst >= self.settings.route_pause_ms:
             self.actions.pause_route("app silent")
             self.route = "paused"
+            self.pause_reason = pb.STATE_REASON_APP_SILENT
             self.pause_silence_s = min(worst, 99999) / 1000.0
             self.update(pb.STATE_REASON_APP_SILENT)
+
+    # ---------------- jobs (Phase 3) ----------------
+    def blocks(self, cid):
+        return next((b for c, b in self.table if c == cid), ())
+
+    def may_start(self, job):
+        """None if `job` may start now, else the reject reason. A STOP does not
+        prevent it: starting a job is what releases a STOP."""
+        if self.recording is not None or self.route is not None or self.following:
+            return pb.REJECT_REASON_NOT_IN_THIS_STATE
+        for cid, (status, _) in self.checks.items():
+            if status in (pb.CHECK_STATUS_FAIL, pb.CHECK_STATUS_PENDING) and job in self.blocks(cid):
+                return pb.REJECT_REASON_NOT_READY
+        return None
+
+    def route_started(self, route_id, points, total_m):
+        self.stopped = False
+        self.route, self.pause_reason = "running", None
+        self.route_id, self.route_points, self.target, self.route_total_m = route_id, list(points), 0, total_m
+        self.update(pb.STATE_REASON_OPERATOR)
+
+    def route_paused(self, reason=pb.STATE_REASON_OPERATOR):
+        if self.route == "running":
+            self.route, self.pause_reason = "paused", reason
+            self.update(reason)
+
+    def route_resumed(self):
+        if self.route == "paused":
+            self.stopped = False
+            self.route, self.pause_reason = "running", None
+            self.update(pb.STATE_REASON_OPERATOR)
+
+    def route_cancelled(self):
+        self.route, self.pause_reason = None, None
+        self.update(pb.STATE_REASON_OPERATOR)
+
+    def route_reached(self, index):
+        """Point `index` (0-based) passed."""
+        if self.route is None:
+            return
+        self.target = min(index + 1, max(len(self.route_points) - 1, 0))
+        self.emit(pb.Event(waypoint_reached=pb.WaypointReached(route_id=self.route_id, index=index + 1)))
+
+    def route_finished(self):
+        if self.route is not None:
+            self.route, self.pause_reason = None, None
+            self.update(pb.STATE_REASON_ROUTE_FINISHED)
+
+    def route_failed(self):
+        """Nav2 refused or gave up: paused where it is, with "can't find a way"."""
+        if self.route == "running":
+            self.route, self.pause_reason = "paused", pb.STATE_REASON_PATH_BLOCKED
+            self.update(pb.STATE_REASON_PATH_BLOCKED)
+
+    def recording_started(self, recorder):
+        self.stopped = False
+        self.recording = recorder
+        self.update(pb.STATE_REASON_OPERATOR)
+
+    def recording_ended(self):
+        """Saved or discarded."""
+        self.recording = None
+        self.update(pb.STATE_REASON_OPERATOR)
 
     # ---------------- state ----------------
     def derive(self):
@@ -186,6 +271,8 @@ class RoverCore:
             return pb.OPERATING_STATE_FOLLOWING
         if self.route == "running":
             return pb.OPERATING_STATE_RUNNING_ROUTE
+        if self.recording is not None:
+            return pb.OPERATING_STATE_RECORDING
         statuses = [s for s, _ in self.checks.values()]
         if pb.CHECK_STATUS_PENDING in statuses:
             return pb.OPERATING_STATE_STARTING
@@ -201,8 +288,11 @@ class RoverCore:
                                                             reason=reason)))
         self.alerts.set(pb.ALERT_STOPPED_BY_OPERATOR, self.state == pb.OPERATING_STATE_STOPPED,
                         pb.SEVERITY_INFO)
-        self.alerts.set(pb.ALERT_PAUSED_APP_SILENT, self.state == pb.OPERATING_STATE_PAUSED,
+        paused = self.state == pb.OPERATING_STATE_PAUSED
+        self.alerts.set(pb.ALERT_PAUSED_APP_SILENT, paused and self.pause_reason == pb.STATE_REASON_APP_SILENT,
                         pb.SEVERITY_ACTION, {"seconds": round(self.pause_silence_s, 1)})
+        self.alerts.set(pb.ALERT_NO_PATH, paused and self.pause_reason == pb.STATE_REASON_PATH_BLOCKED,
+                        pb.SEVERITY_PROBLEM)
 
     def _readiness_alerts(self):
         st = {cid: s for cid, (s, _) in self.checks.items()}
@@ -219,7 +309,7 @@ class RoverCore:
 
     def readiness_msgs(self):
         out = []
-        for cid, blocks in CHECKS:
+        for cid, blocks in self.table:
             status, values = self.checks.get(cid, (pb.CHECK_STATUS_PENDING, {}))
             out.append(pb.ReadinessCheck(id=cid, status=status, blocks=blocks, values=values))
         return out

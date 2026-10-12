@@ -32,7 +32,9 @@ from rclpy.utilities import remove_ros_args
 
 from . import api_pb2 as pb
 from .ros_io import RosIO
+from .route_executor import RouteExecutor
 from .rover_state import RoverCore, Settings
+from .routes import Recorder, RouteStore, distance_m, path_length, progress
 from .session import ApiSocket
 
 try:
@@ -41,6 +43,7 @@ except ImportError:                        # running from a tree setup.py has no
     VERSION = "gateway (unbuilt)"
 
 CAPABILITIES = (pb.CAPABILITY_STOP, pb.CAPABILITY_READINESS, pb.CAPABILITY_ALERTS)
+ROUTE_CAPABILITIES = (pb.CAPABILITY_RUN_ROUTE, pb.CAPABILITY_RECORD_ROUTE)
 
 
 class Gateway:
@@ -52,17 +55,36 @@ class Gateway:
         g = node.param
         self.rover_id, self.rover_name = g("rover_id"), g("rover_name")
         self.software_version = VERSION
-        self.capabilities = CAPABILITIES
+        self.routes_on = bool(g("routes_enabled"))
+        self.capabilities = CAPABILITIES + (ROUTE_CAPABILITIES if self.routes_on else ())
         self.settings = Settings(heartbeat_ms=int(g("heartbeat_period_ms")),
                                  state_ms=int(g("state_period_ms")),
                                  follow_stop_ms=int(g("follow_stop_after_silence_ms")),
                                  route_pause_ms=int(g("route_pause_after_silence_ms")),
-                                 max_speed_mps=float(g("max_speed_mps")))
+                                 max_speed_mps=float(g("max_speed_mps")),
+                                 record_spacing_m=float(g("record_point_spacing_m")))
         self.sockets = set()
         self.results = collections.OrderedDict()   # command_id -> CommandResult (rule 3)
         self.checks_in = None
-        self.core = RoverCore(self.settings, self.broadcast, node)
+        omit = () if g("battery_monitor") else (pb.CHECK_BATTERY,)
+        self.core = RoverCore(self.settings, self.broadcast, self, omit_checks=omit)
         node.on_estop_edge = lambda on: loop.call_soon_threadsafe(self.on_estop_edge, on)
+        # Phase 3: saved routes and the Nav2 executor (its callbacks come back on this loop)
+        self.store = RouteStore(g("route_dir")) if self.routes_on else None
+        post = lambda fn, *a: loop.call_soon_threadsafe(fn, *a)  # noqa: E731
+        self.route_exec = RouteExecutor(node, float(g("route_window_m")), post,
+                                        on_reached=self.core.route_reached,
+                                        on_done=self.core.route_finished,
+                                        on_failed=self.on_route_failed) if self.routes_on else None
+
+    # ---------------- actions for the core (link-loss policy) ----------------
+    def follow_off(self, why):
+        self.node.follow_off(why)
+
+    def pause_route(self, why):
+        if self.route_exec is not None:
+            self.route_exec.pause()
+        self.log.warn(f"route paused ({why})")
 
     def apps(self):
         return [s for s in self.sockets if s.accepted]
@@ -77,11 +99,106 @@ class Gateway:
         ok = pb.CommandResult(command_id=cmd.command_id, outcome=pb.COMMAND_OUTCOME_ACCEPTED)
         if kind == "stop":
             self.log.warn(f"STOP from app {sock.request.remote_ip} ({cmd.command_id})")
+            if self.route_exec is not None:
+                self.route_exec.cancel()   # our own route ends even in --stop-dry-run
             self.node.stop()
             self.core.stop()
             return ok
+        handler = getattr(self, "on_" + kind, None) if (kind and self.routes_on) else None
+        why = handler(getattr(cmd, kind)) if handler else pb.REJECT_REASON_NOT_SUPPORTED
+        if why is None:
+            self.log.info(f"{kind} from app {sock.request.remote_ip}: accepted")
+            return ok
+        self.log.info(f"{kind} from app {sock.request.remote_ip}: {pb.RejectReason.Name(why)}")
         return pb.CommandResult(command_id=cmd.command_id, outcome=pb.COMMAND_OUTCOME_REJECTED,
-                                reject_reason=pb.REJECT_REASON_NOT_SUPPORTED)
+                                reject_reason=why)
+
+    # Phase 3 (docs/proposals/phase3-routes.md in DaggerGCS): each returns None when
+    # accepted, else the reject reason. The rules are the core's; the ROS side is here.
+    def on_start_route(self, cmd):
+        why = self.core.may_start(pb.JOB_RUN_ROUTE)
+        if why:
+            return why
+        route = self.store.get(cmd.route_id)
+        if route is None:
+            return pb.REJECT_REASON_UNKNOWN_ROUTE
+        if not self.node.armed():
+            return pb.REJECT_REASON_NOT_ARMED
+        here = self.node.good_fix()
+        total = (distance_m(here, route.points[0]) if here else 0.0) + path_length(route.points)
+        self.node.release_estop()
+        self.node.ensure_guided()
+        self.core.route_started(route.id, route.points, total)
+        self.route_exec.start(route.points, 0)
+        return None
+
+    def on_pause_route(self, _):
+        if self.core.route != "running":
+            return pb.REJECT_REASON_NOT_IN_THIS_STATE
+        self.route_exec.pause()
+        self.core.route_paused(pb.STATE_REASON_OPERATOR)
+        return None
+
+    def on_resume_route(self, _):
+        if self.core.route != "paused" or self.core.stopped:
+            return pb.REJECT_REASON_NOT_IN_THIS_STATE
+        if not self.node.armed():
+            return pb.REJECT_REASON_NOT_ARMED
+        self.node.release_estop()
+        self.node.ensure_guided()
+        self.core.route_resumed()
+        self.route_exec.resume()
+        return None
+
+    def on_cancel_route(self, _):
+        if self.core.route is None:
+            return pb.REJECT_REASON_NOT_IN_THIS_STATE
+        self.route_exec.cancel()
+        self.core.route_cancelled()
+        return None
+
+    def on_start_recording(self, _):
+        why = self.core.may_start(pb.JOB_RECORD_ROUTE)
+        if why:
+            return why
+        if self.node.good_fix() is None:
+            return pb.REJECT_REASON_NOT_READY
+        self.node.release_estop()     # the operator drives with the sticks; no mode change
+        self.core.recording_started(Recorder(self.settings.record_spacing_m))
+        return None
+
+    def on_save_recording(self, cmd):
+        rec = self.core.recording
+        if rec is None:
+            return pb.REJECT_REASON_NOT_IN_THIS_STATE
+        if len(rec.points) < 2:
+            return pb.REJECT_REASON_TOO_SHORT
+        name = cmd.name.strip() or self.store.suggested_name()
+        if self.store.name_taken(name):
+            return pb.REJECT_REASON_NAME_TAKEN
+        route = self.store.save(name, rec.points)
+        self.log.info(f"route saved: '{route.name}' ({len(route.points)} points) as {route.id}")
+        self.broadcast_routes()
+        self.core.recording_ended()
+        return None
+
+    def on_discard_recording(self, _):
+        if self.core.recording is None:
+            return pb.REJECT_REASON_NOT_IN_THIS_STATE
+        self.core.recording_ended()
+        return None
+
+    def on_route_failed(self, why):
+        self.log.error(f"route: {why} -- paused, 'can't find a way'")
+        self.core.route_failed()
+
+    def route_list(self):
+        return pb.RouteList(routes=[r.summary() for r in self.store.all()])
+
+    def broadcast_routes(self):
+        rl = self.route_list()
+        for s in self.apps():
+            s.send(routes=rl)
 
     def remember(self, res):
         self.results[res.command_id] = res
@@ -104,6 +221,19 @@ class Gateway:
         self.node.fill_state(st, self.core.checks)
         st.readiness.extend(self.core.readiness_msgs())
         st.active_alerts.extend(self.core.alerts.sorted())
+        core = self.core
+        if core.route is not None and core.route_points:
+            frac, left = progress(core.route_points, core.target, self.node.good_fix(), core.route_total_m)
+            st.route.route_id = core.route_id
+            st.route.target_index = core.target + 1
+            st.route.waypoint_count = len(core.route_points)
+            st.route.fraction_done = frac
+            st.route.distance_remaining_m = round(left, 2)
+        if core.recording is not None:
+            for lat, lon in core.recording.points:
+                st.recording.waypoints.add(latitude_deg=lat, longitude_deg=lon)
+            st.recording.length_m = round(core.recording.length_m(), 2)
+            st.recording.suggested_name = self.store.suggested_name()
         return st
 
     def tick_state(self):
@@ -112,6 +242,10 @@ class Gateway:
             self.checks_in = checks
             self.core.set_checks(checks)
         self.core.set_following(self.node.following())
+        if self.core.state == pb.OPERATING_STATE_RECORDING:
+            here = self.node.good_fix()
+            if here is not None:
+                self.core.recording.add(*here)
         self.core.link_tick([s.silence_ms() for s in self.apps()])
         for s in self.apps():
             s.send_state()

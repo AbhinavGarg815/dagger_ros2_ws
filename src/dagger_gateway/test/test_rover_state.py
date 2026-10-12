@@ -147,6 +147,84 @@ def test_readiness_alerts_and_order():
     assert list(cam.blocks) == [pb.JOB_FOLLOW]
 
 
+# --- Phase 3: routes and recordings -------------------------------------------
+
+def ready():
+    core, ev, act = make()
+    core.set_checks(all_checks(pb.CHECK_STATUS_PASS))
+    return core, ev, act
+
+
+def test_a_route_runs_pauses_carries_on_and_finishes():
+    core, ev, _ = ready()
+    assert core.may_start(pb.JOB_RUN_ROUTE) is None
+    core.route_started("r-1", [(0, 0), (1, 1), (2, 2)], 30.0)
+    assert core.state == pb.OPERATING_STATE_RUNNING_ROUTE
+    assert core.may_start(pb.JOB_RECORD_ROUTE) == pb.REJECT_REASON_NOT_IN_THIS_STATE, "one job at a time"
+    core.route_paused()
+    assert core.state == pb.OPERATING_STATE_PAUSED
+    assert active(core) == [], "an operator's pause is not 'the app was silent'"
+    core.route_resumed()
+    core.route_reached(0)
+    core.route_reached(1)
+    assert core.target == 2
+    reached = [e.waypoint_reached.index for e in ev if e.WhichOneof("kind") == "waypoint_reached"]
+    assert reached == [1, 2], "1-based, as the app shows them"
+    core.route_finished()
+    assert core.state == pb.OPERATING_STATE_READY
+    assert changes(ev)[-1] == (pb.OPERATING_STATE_RUNNING_ROUTE, pb.OPERATING_STATE_READY,
+                               pb.STATE_REASON_ROUTE_FINISHED)
+
+
+def test_nav2_giving_up_pauses_with_cant_find_a_way():
+    core, ev, _ = ready()
+    core.route_started("r-1", [(0, 0), (1, 1)], 10.0)
+    core.route_failed()
+    assert core.state == pb.OPERATING_STATE_PAUSED
+    assert active(core) == [pb.ALERT_NO_PATH]
+    assert changes(ev)[-1][2] == pb.STATE_REASON_PATH_BLOCKED
+    core.route_cancelled()
+    assert core.state == pb.OPERATING_STATE_READY and active(core) == [], "the alert ends with the pause"
+
+
+def test_a_start_is_refused_by_a_failing_check_that_blocks_it_only():
+    core, _, _ = make()
+    core.set_checks(all_checks(pb.CHECK_STATUS_PASS, {pb.CHECK_CAMERA: (pb.CHECK_STATUS_FAIL, {})}))
+    assert core.state == pb.OPERATING_STATE_NOT_READY
+    assert core.may_start(pb.JOB_RUN_ROUTE) is None, "a broken camera must not stop routes"
+    core.set_checks(all_checks(pb.CHECK_STATUS_PASS, {pb.CHECK_POSITION: (pb.CHECK_STATUS_FAIL, {})}))
+    assert core.may_start(pb.JOB_RUN_ROUTE) == pb.REJECT_REASON_NOT_READY
+    assert core.may_start(pb.JOB_RECORD_ROUTE) == pb.REJECT_REASON_NOT_READY, "a recording is lat/lon"
+
+
+def test_a_new_job_releases_a_stop_but_a_stop_keeps_the_recording():
+    core, _, _ = ready()
+    core.stop()
+    assert core.may_start(pb.JOB_RECORD_ROUTE) is None, "starting a job is what releases a STOP"
+    core.recording_started(object())
+    assert core.state == pb.OPERATING_STATE_RECORDING and not core.stopped
+    core.stop()
+    assert core.state == pb.OPERATING_STATE_STOPPED and core.recording is not None
+    assert core.may_start(pb.JOB_RUN_ROUTE) == pb.REJECT_REASON_NOT_IN_THIS_STATE, "save or discard first"
+    core.recording_ended()
+    assert core.state == pb.OPERATING_STATE_STOPPED, "saving after a STOP leaves it stopped"
+
+
+def test_silence_while_recording_changes_nothing():
+    core, _, act = ready()
+    core.recording_started(object())
+    core.link_tick([60_000], now_s=1.0)
+    assert core.state == pb.OPERATING_STATE_RECORDING and act.calls == []
+
+
+def test_a_rover_without_a_battery_monitor_has_no_battery_check():
+    events, actions = [], Actions()
+    core = RoverCore(Settings(), events.append, actions, omit_checks=(pb.CHECK_BATTERY,))
+    core.set_checks(all_checks(pb.CHECK_STATUS_PASS, {pb.CHECK_BATTERY: (pb.CHECK_STATUS_WARN, {})}))
+    assert pb.CHECK_BATTERY not in [m.id for m in core.readiness_msgs()]
+    assert core.state == pb.OPERATING_STATE_READY and active(core) == []
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
