@@ -9,6 +9,7 @@ OPERATING STATE, first match wins:
     PAUSED         a route is paused (by the operator, app silence, or Nav2 giving up)
     FOLLOWING      follow_controller says it is enabled
     RUNNING_ROUTE  the gateway's own route is running
+    COMING_HOME    ... or the way home (Return to Home) is
     RECORDING      the operator drives, the gateway notes the route
     STARTING       a readiness check is still PENDING
     NOT_READY      a check FAILs -- never READY next to a failing check
@@ -142,6 +143,7 @@ class RoverCore:
         self.stopped = False
         self.following = False
         self.route = None                  # None | "running" | "paused"
+        self.going_home = False            # the route is the way home (Return to Home)
         self.pause_reason = None           # why the route is paused (a StateReason)
         self.route_id = None
         self.route_points = []
@@ -169,6 +171,7 @@ class RoverCore:
         2026-10-12) until the operator saves or discards it."""
         self.stopped = True
         self.route = None
+        self.going_home = False
         self.pause_reason = None
         self.update(pb.STATE_REASON_OPERATOR)
 
@@ -212,8 +215,9 @@ class RoverCore:
                 return pb.REJECT_REASON_NOT_READY
         return None
 
-    def route_started(self, route_id, points, total_m):
+    def route_started(self, route_id, points, total_m, home=False):
         self.stopped = False
+        self.going_home = home
         self.route, self.pause_reason = "running", None
         self.route_id, self.route_points, self.target, self.route_total_m = route_id, list(points), 0, total_m
         self.update(pb.STATE_REASON_OPERATOR)
@@ -230,7 +234,7 @@ class RoverCore:
             self.update(pb.STATE_REASON_OPERATOR)
 
     def route_cancelled(self):
-        self.route, self.pause_reason = None, None
+        self.route, self.pause_reason, self.going_home = None, None, False
         self.update(pb.STATE_REASON_OPERATOR)
 
     def route_reached(self, index):
@@ -242,8 +246,9 @@ class RoverCore:
 
     def route_finished(self):
         if self.route is not None:
+            home, self.going_home = self.going_home, False
             self.route, self.pause_reason = None, None
-            self.update(pb.STATE_REASON_ROUTE_FINISHED)
+            self.update(pb.STATE_REASON_HOME_REACHED if home else pb.STATE_REASON_ROUTE_FINISHED)
 
     def route_failed(self):
         """Nav2 refused or gave up: paused where it is, with "can't find a way"."""
@@ -270,7 +275,7 @@ class RoverCore:
         if self.following:
             return pb.OPERATING_STATE_FOLLOWING
         if self.route == "running":
-            return pb.OPERATING_STATE_RUNNING_ROUTE
+            return pb.OPERATING_STATE_COMING_HOME if self.going_home else pb.OPERATING_STATE_RUNNING_ROUTE
         if self.recording is not None:
             return pb.OPERATING_STATE_RECORDING
         statuses = [s for s, _ in self.checks.values()]

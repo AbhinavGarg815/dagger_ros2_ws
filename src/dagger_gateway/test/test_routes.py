@@ -9,8 +9,9 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, ".."))
-from dagger_gateway.routes import (Recorder, RouteStore, distance_m, ll_to_en,  # noqa: E402
-                                   mission_waypoints, path_length, progress, window)
+from dagger_gateway.routes import (BLOCKED_COST, Recorder, RouteStore, Trail, clear_spot,  # noqa: E402
+                                   distance_m, home_path, ll_to_en, mission_waypoints,
+                                   path_length, progress, window)
 
 LAT0, LON0 = 26.7480, 75.8553   # near the yard (Jaipur)
 
@@ -49,6 +50,42 @@ def test_mission_from_the_autopilot_keeps_only_waypoints():
     assert mission_waypoints(items) == [a, b, c]
     assert mission_waypoints([(0, 16, *home)]) == [], "home alone is no mission"
     assert mission_waypoints([]) == []
+
+
+def test_trail_keeps_a_point_every_metre():
+    t = Trail(north(0))
+    for m in (0.3, 0.6, 1.1, 1.5, 2.2):
+        t.add(*north(m))
+    assert len(t.points) == 3          # home, 1.1, 2.2
+    t.reset()
+    assert t.points == [north(0)]
+
+
+def test_the_way_home_goes_back_along_the_trail_skipping_loops():
+    # Out 20 m north, a loop out east and back, then 10 m more north.
+    trail = [north(m) for m in range(0, 21)]
+    trail += [north(20, east=e) for e in range(1, 6)] + [north(20, east=e) for e in range(4, -1, -1)]
+    trail += [north(m) for m in range(21, 31)]
+    path = home_path(trail, north(30.5))
+    assert path[-1] == north(0), "ends exactly at home"
+    assert all(abs(distance_m(p, north(0)) - 0) < 31 for p in path)
+    assert all(ll_to_en(p[0], p[1], LAT0, LON0)[0] < 1.0 for p in path), "the loop east is skipped"
+    gaps = [distance_m(a, b) for a, b in zip(path, path[1:])]
+    assert max(gaps) < 4.5 and min(gaps[:-1]) >= 2.9, gaps
+    assert home_path([north(0)], north(0.2)) == [north(0)], "already home: just home"
+
+
+def test_a_waypoint_on_an_obstacle_moves_to_clear_ground_or_is_blocked():
+    # a 21 x 21 grid, 0.1 m cells: lethal wall in columns 8..12, free elsewhere
+    def cost_at(i, j):
+        if not (0 <= i < 21 and 0 <= j < 21):
+            return -1
+        return 100 if 8 <= i <= 12 else 0
+    assert clear_spot(cost_at, 3, 10, 10) == (3, 10), "clear: stays"
+    assert clear_spot(cost_at, 8, 10, 10) == (7, 10), "on the edge: nearest clear cell"
+    assert clear_spot(lambda i, j: 100, 5, 5, 10) is None, "nothing clear within 1 m: blocked"
+    assert clear_spot(lambda i, j: -1, 5, 5, 10) == (5, 5), "unknown: not checked"
+    assert BLOCKED_COST == 99
 
 
 def test_store_skips_a_damaged_file():

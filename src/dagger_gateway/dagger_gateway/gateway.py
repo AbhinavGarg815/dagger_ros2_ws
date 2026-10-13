@@ -34,7 +34,8 @@ from . import api_pb2 as pb
 from .ros_io import RosIO
 from .route_executor import RouteExecutor
 from .rover_state import RoverCore, Settings
-from .routes import Recorder, RouteStore, distance_m, mission_waypoints, path_length, progress
+from .routes import (Recorder, RouteStore, Trail, distance_m, home_path, mission_waypoints,
+                     path_length, progress)
 from .session import ApiSocket
 
 try:
@@ -44,7 +45,7 @@ except ImportError:                        # running from a tree setup.py has no
 
 CAPABILITIES = (pb.CAPABILITY_STOP, pb.CAPABILITY_READINESS, pb.CAPABILITY_ALERTS)
 ROUTE_CAPABILITIES = (pb.CAPABILITY_RUN_ROUTE, pb.CAPABILITY_RECORD_ROUTE, pb.CAPABILITY_PLAN_ROUTE,
-                      pb.CAPABILITY_IMPORT_MISSION)
+                      pb.CAPABILITY_IMPORT_MISSION, pb.CAPABILITY_COME_HOME)
 IMPORT_WAIT_S = 4.0     # ImportMission is answered within this (the app waits 5 s)
 
 
@@ -68,6 +69,7 @@ class Gateway:
         self.sockets = set()
         self.results = collections.OrderedDict()   # command_id -> CommandResult (rule 3)
         self.importing = set()                     # ImportMission ids being read
+        self.trail = None                          # routes.Trail from home, once the first job starts
         self.checks_in = None
         omit = () if g("battery_monitor") else (pb.CHECK_BATTERY,)
         self.core = RoverCore(self.settings, self.broadcast, self, omit_checks=omit)
@@ -77,7 +79,7 @@ class Gateway:
         post = lambda fn, *a: loop.call_soon_threadsafe(fn, *a)  # noqa: E731
         self.route_exec = RouteExecutor(node, float(g("route_window_m")), post,
                                         on_reached=self.core.route_reached,
-                                        on_done=self.core.route_finished,
+                                        on_done=self.on_route_done,
                                         on_failed=self.on_route_failed) if self.routes_on else None
 
     # ---------------- actions for the core (link-loss policy) ----------------
@@ -112,12 +114,30 @@ class Gateway:
             return None                    # answered once the autopilot's mission is read
         handler = getattr(self, "on_" + kind, None) if (kind and self.routes_on) else None
         why = handler(getattr(cmd, kind)) if handler else pb.REJECT_REASON_NOT_SUPPORTED
+        blocked = 0
+        if isinstance(why, tuple):                 # (reason, which waypoint)
+            why, blocked = why
         if why is None:
             self.log.info(f"{kind} from app {sock.request.remote_ip}: accepted")
             return ok
-        self.log.info(f"{kind} from app {sock.request.remote_ip}: {pb.RejectReason.Name(why)}")
+        self.log.info(f"{kind} from app {sock.request.remote_ip}: {pb.RejectReason.Name(why)}"
+                      + (f" (waypoint {blocked})" if blocked else ""))
         return pb.CommandResult(command_id=cmd.command_id, outcome=pb.COMMAND_OUTCOME_REJECTED,
-                                reject_reason=why)
+                                reject_reason=why, blocked_waypoint=blocked)
+
+    def set_home(self):
+        """The session's first job fixes home where the rover is (a 3-D fix)."""
+        if self.trail is None:
+            here = self.node.good_fix()
+            if here is not None:
+                self.trail = Trail(here)
+                self.log.info(f"home set at {here[0]:.7f}, {here[1]:.7f}")
+
+    def on_route_done(self):
+        if self.core.going_home and self.trail is not None:
+            self.trail.reset()
+            self.log.info("route: home reached")
+        self.core.route_finished()
 
     # Phase 3 (docs/proposals/phase3-routes.md in DaggerGCS): each returns None when
     # accepted, else the reject reason. The rules are the core's; the ROS side is here.
@@ -130,12 +150,37 @@ class Gateway:
             return pb.REJECT_REASON_UNKNOWN_ROUTE
         if not self.node.armed():
             return pb.REJECT_REASON_NOT_ARMED
+        blocked = self.route_exec.precheck(route.points)
+        if blocked:
+            return pb.REJECT_REASON_WAYPOINT_BLOCKED, blocked
+        self.set_home()
         here = self.node.good_fix()
         total = (distance_m(here, route.points[0]) if here else 0.0) + path_length(route.points)
         self.node.release_estop()
         self.node.ensure_guided()
         self.core.route_started(route.id, route.points, total)
         self.route_exec.start(route.points, 0)
+        return None
+
+    def on_come_home(self, _):
+        """Return to Home: back along the trail to where the session's first job started."""
+        why = self.core.may_start(pb.JOB_COME_HOME)
+        if why:
+            return why
+        if self.trail is None:
+            return pb.REJECT_REASON_NO_HOME
+        if not self.node.armed():
+            return pb.REJECT_REASON_NOT_ARMED
+        here = self.node.good_fix()
+        if here is None:
+            return pb.REJECT_REASON_NOT_READY
+        points = home_path(self.trail.points, here)
+        total = distance_m(here, points[0]) + path_length(points)
+        self.log.info(f"return to home: {len(points)} points, {total:.0f} m")
+        self.node.release_estop()
+        self.node.ensure_guided()
+        self.core.route_started("", points, total, home=True)
+        self.route_exec.start(points, 0)
         return None
 
     def on_pause_route(self, _):
@@ -169,6 +214,7 @@ class Gateway:
             return why
         if self.node.good_fix() is None:
             return pb.REJECT_REASON_NOT_READY
+        self.set_home()
         self.node.release_estop()     # the operator drives with the sticks; no mode change
         self.core.recording_started(Recorder(self.settings.record_spacing_m))
         return None
@@ -302,6 +348,12 @@ class Gateway:
             st.route.waypoint_count = len(core.route_points)
             st.route.fraction_done = frac
             st.route.distance_remaining_m = round(left, 2)
+            if core.going_home:                # the way home is not in the route list
+                for lat, lon in core.route_points[:200]:
+                    st.route.waypoints.add(latitude_deg=lat, longitude_deg=lon)
+        if self.trail is not None:
+            st.home.latitude_deg, st.home.longitude_deg = self.trail.home
+            st.home.quality = pb.QUALITY_GOOD
         if core.recording is not None:
             for lat, lon in core.recording.points:
                 st.recording.waypoints.add(latitude_deg=lat, longitude_deg=lon)
@@ -315,10 +367,17 @@ class Gateway:
             self.checks_in = checks
             self.core.set_checks(checks)
         self.core.set_following(self.node.following())
+        here = None
         if self.core.state == pb.OPERATING_STATE_RECORDING:
             here = self.node.good_fix()
             if here is not None:
                 self.core.recording.add(*here)
+        # The trail for Return to Home: wherever the rover goes (jobs or sticks), not
+        # while it is on its way home.
+        if self.trail is not None and not self.core.going_home:
+            here = here or self.node.good_fix()
+            if here is not None:
+                self.trail.add(*here)
         self.core.link_tick([s.silence_ms() for s in self.apps()])
         for s in self.apps():
             s.send_state()

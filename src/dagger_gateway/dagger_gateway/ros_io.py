@@ -20,8 +20,9 @@ import time
 from action_msgs.srv import CancelGoal
 from mavros_msgs.msg import GPSRAW, RCIn, RCOut, State, WaypointList
 from mavros_msgs.srv import SetMode, WaypointPull
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import OccupancyGrid, Odometry
 from rclpy.node import Node
+from rclpy.time import Time
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.qos_event import PublisherEventCallbacks, SubscriptionEventCallbacks
 from sensor_msgs.msg import BatteryState, CameraInfo, Imu, LaserScan, NavSatFix
@@ -190,6 +191,12 @@ class RosIO(Node):
         self.create_subscription(WaypointList, "/mavros/mission/waypoints", self.on_mission, latched,
                                  event_callbacks=QUIET_SUB)
         self.pull_cli = self.create_client(WaypointPull, "/mavros/mission/pull")
+
+        # The waypoint check: Nav2's global costmap (odom frame, sent whole at 1 Hz:
+        # always_send_full_costmap). Kept as the latest message, replaced whole.
+        self.costmap = None
+        self.create_subscription(OccupancyGrid, "/global_costmap/costmap", self.on_costmap, latched,
+                                 event_callbacks=QUIET_SUB)
         self.readiness = Readiness(self)
         self.create_timer(1.0, self.evaluate)
 
@@ -316,6 +323,42 @@ class RosIO(Node):
                     done(self.mission)
             timer = self.create_timer(0.05, settle)
         fut.add_done_callback(pulled)
+
+    def on_costmap(self, m):
+        self.costmap = m
+
+    def costmap_fix(self, x, y):
+        """A goal (x, y) in the map frame against the global costmap: ('ok', x, y) when
+        clear or not covered (outside, unknown, no costmap or transform yet),
+        ('moved', x2, y2) to the nearest clear spot within NUDGE_M, or ('blocked', x, y)."""
+        from .routes import NUDGE_M, clear_spot
+        cm = self.costmap
+        if cm is None:
+            return "ok", x, y
+        try:
+            tr = self.readiness.tf.lookup_transform(cm.header.frame_id, "map", Time())
+        except Exception:  # noqa: BLE001 -- no transform yet: nothing to check against
+            return "ok", x, y
+        t, q = tr.transform.translation, tr.transform.rotation
+        yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+        c, s = math.cos(yaw), math.sin(yaw)
+        ox, oy = t.x + c * x - s * y, t.y + s * x + c * y          # map -> costmap frame
+        info = cm.info
+        res, w, h = info.resolution, info.width, info.height
+        x0, y0 = info.origin.position.x, info.origin.position.y
+        data = cm.data
+
+        def cost_at(i, j):
+            return data[j * w + i] if 0 <= i < w and 0 <= j < h else -1
+        ci, cj = int((ox - x0) / res), int((oy - y0) / res)
+        spot = clear_spot(cost_at, ci, cj, int(round(NUDGE_M / res)))
+        if spot is None:
+            return "blocked", x, y
+        if spot == (ci, cj):
+            return "ok", x, y
+        nx, ny = x0 + (spot[0] + 0.5) * res, y0 + (spot[1] + 0.5) * res
+        dx, dy = nx - t.x, ny - t.y                                   # costmap -> map
+        return "moved", c * dx + s * dy, -s * dx + c * dy
 
     def on_follow_state(self, m):
         self.follow_state = (m.data, time.monotonic())

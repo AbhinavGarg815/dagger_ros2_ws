@@ -61,6 +61,69 @@ def mission_waypoints(items):
             and math.isfinite(lat) and math.isfinite(lon) and (lat, lon) != (0.0, 0.0)]
 
 
+# Return to Home (DaggerGCS docs/proposals/operating-modes.md, owner 2026-10-13):
+# back along the rover's own trail.
+TRAIL_STEP_M = 1.0          # the trail keeps a point every metre driven
+HOME_POINT_SPACING_M = 3.0  # the way home: a point every 3 m of trail
+LOOP_CUT_M = 2.0            # where the trail comes back this close, the loop is skipped
+
+
+class Trail:
+    """Where the rover has been since home, a point every TRAIL_STEP_M."""
+
+    def __init__(self, home):
+        self.home = tuple(home)
+        self.points = [self.home]
+
+    def add(self, lat, lon):
+        if distance_m(self.points[-1], (lat, lon)) >= TRAIL_STEP_M:
+            self.points.append((lat, lon))
+
+    def reset(self):
+        """Home again: the trail starts over."""
+        self.points = [self.home]
+
+
+def home_path(trail, here):
+    """The way home: from `here` back along `trail` (oldest first, trail[0] = home),
+    loops skipped, a point every HOME_POINT_SPACING_M, ending exactly at home."""
+    back = [tuple(here)] + list(reversed(trail))
+    out, i = [back[0]], 0
+    while i < len(back) - 1:
+        # jump to the last trail point that comes back near this one (a loop), else the next
+        near = [k for k in range(i + 2, len(back)) if distance_m(back[k], back[i]) < LOOP_CUT_M]
+        i = near[-1] if near else i + 1
+        if i == len(back) - 1 or distance_m(back[i], out[-1]) >= HOME_POINT_SPACING_M:
+            out.append(back[i])
+    return out[1:] or [tuple(trail[0])]
+
+
+# The waypoint check: OccupancyGrid values from a Nav2 costmap. 100 lethal, 99
+# inscribed (the rover's footprint would touch something): Theta* refuses a goal
+# there ("Either of the start or goal pose are an obstacle!", 2026-10-13).
+BLOCKED_COST = 99
+NUDGE_M = 1.0
+
+
+def clear_spot(cost_at, cx, cy, radius_cells):
+    """The nearest cell to (cx, cy), within radius_cells, whose cost is known and
+    under BLOCKED_COST -- or None. cost_at(x, y) gives -1 outside the grid / unknown.
+    (cx, cy) itself counts when clear."""
+    c = cost_at(cx, cy)
+    if 0 <= c < BLOCKED_COST or c < 0:
+        return cx, cy
+    best = None
+    for dy in range(-radius_cells, radius_cells + 1):
+        for dx in range(-radius_cells, radius_cells + 1):
+            d2 = dx * dx + dy * dy
+            if d2 > radius_cells * radius_cells or (best is not None and d2 >= best[0]):
+                continue
+            v = cost_at(cx + dx, cy + dy)
+            if 0 <= v < BLOCKED_COST:
+                best = (d2, cx + dx, cy + dy)
+    return None if best is None else (best[1], best[2])
+
+
 def wall_ms():
     return int(time.time() * 1000)
 

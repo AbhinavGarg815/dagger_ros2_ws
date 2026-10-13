@@ -176,6 +176,21 @@ def test_a_route_runs_pauses_carries_on_and_finishes():
                                pb.STATE_REASON_ROUTE_FINISHED)
 
 
+def test_return_to_home_is_its_own_state_and_arrives_home():
+    core, ev, _ = ready()
+    assert core.may_start(pb.JOB_COME_HOME) is None
+    core.route_started("", [(0, 0), (0, 1)], 10.0, home=True)
+    assert core.state == pb.OPERATING_STATE_COMING_HOME
+    core.route_paused()
+    assert core.state == pb.OPERATING_STATE_PAUSED
+    core.route_resumed()
+    assert core.state == pb.OPERATING_STATE_COMING_HOME
+    core.route_finished()
+    assert core.state == pb.OPERATING_STATE_READY and not core.going_home
+    assert changes(ev)[-1] == (pb.OPERATING_STATE_COMING_HOME, pb.OPERATING_STATE_READY,
+                               pb.STATE_REASON_HOME_REACHED)
+
+
 def test_nav2_giving_up_pauses_with_cant_find_a_way():
     core, ev, _ = ready()
     core.route_started("r-1", [(0, 0), (1, 1)], 10.0)

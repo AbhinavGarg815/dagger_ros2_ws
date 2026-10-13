@@ -62,7 +62,35 @@ class RouteExecutor:
         with self.lock:
             self.points, self.index = [], 0
 
+    def precheck(self, points):
+        """Before a route starts: the first waypoint (1-based) in the first window that
+        sits on an obstacle with no clear spot within 1 m, or 0. Points beyond the
+        window are checked as their window goes out (and skipped if blocked)."""
+        w = self._window_poses(points, 0)
+        if w is None:
+            return 0
+        s, _, xy, _ = w
+        for k, (x, y) in enumerate(xy):
+            if self.node.costmap_fix(x, y)[0] == "blocked":
+                return s + k + 1
+        return 0
+
     # ---------------- Nav2 ----------------
+    def _window_poses(self, points, index):
+        """(s, e, [(x, y) in map], here) for the next window, or None with no position."""
+        fix = self.node.fresh("/mavros/global_position/global", 2.0)
+        local = self.node.fresh("/mavros/local_position/odom", 1.0)
+        if fix is None or local is None or not (math.isfinite(fix.latitude) and math.isfinite(fix.longitude)):
+            return None
+        here = (fix.latitude, fix.longitude)
+        lx, ly = local.pose.pose.position.x, local.pose.pose.position.y
+        s, e = window(points, index, here, self.window_m)
+        xy = []
+        for lat, lon in points[s:e]:
+            de, dn = ll_to_en(lat, lon, here[0], here[1])
+            xy.append((lx + de, ly + dn))
+        return s, e, xy, (lx, ly)
+
     def _map_mode_gps(self):
         return "gps_map_odom" in set(self.node.get_node_names())
 
@@ -72,28 +100,35 @@ class RouteExecutor:
                                          "routes need GPS map mode for now")
             self.post(self.on_failed, "map_mode")
             return
-        fix = self.node.fresh("/mavros/global_position/global", 2.0)
-        local = self.node.fresh("/mavros/local_position/odom", 1.0)
-        if fix is None or local is None or not (math.isfinite(fix.latitude) and math.isfinite(fix.longitude)):
-            self.post(self.on_failed, "no_position")
-            return
         if not self.client.server_is_ready():
             self.post(self.on_failed, "no_nav2")
             return
-        here = (fix.latitude, fix.longitude)
-        lx, ly = local.pose.pose.position.x, local.pose.pose.position.y
         with self.lock:
-            s, e = window(self.points, self.index, here, self.window_m)
-            self.batch = (s, e)
-            self.gen += 1
-            gen = self.gen
-            pts = self.points[s:e]
-        poses, prev = [], (lx, ly)
-        for lat, lon in pts:
-            de, dn = ll_to_en(lat, lon, here[0], here[1])
-            x, y = lx + de, ly + dn
-            poses.append(self._pose(x, y, math.atan2(y - prev[1], x - prev[0])))
-            prev = (x, y)
+            w = self._window_poses(self.points, self.index)
+            if w is not None:
+                s, e, xy, prev = w
+                self.batch = (s, e)
+                self.gen += 1
+                gen = self.gen
+        if w is None:
+            self.post(self.on_failed, "no_position")
+            return
+        # The waypoint check: a goal just inside an obstacle's margin moves to the
+        # nearest clear spot (<= 1 m); one deeper in is skipped -- Nav2's planner
+        # would refuse it and give up on the whole route.
+        poses = []
+        for k, (x, y) in enumerate(xy):
+            verdict, x2, y2 = self.node.costmap_fix(x, y)
+            if verdict == "blocked":
+                self.node.get_logger().warn(f"route: point {s + k + 1} is on an obstacle -- skipped")
+                continue
+            if verdict == "moved":
+                self.node.get_logger().info(f"route: point {s + k + 1} moved {math.hypot(x2 - x, y2 - y):.2f} m clear")
+            poses.append(self._pose(x2, y2, math.atan2(y2 - prev[1], x2 - prev[0])))
+            prev = (x2, y2)
+        if not poses:
+            self.post(self.on_failed, "aborted")
+            return
         self.node.get_logger().info(f"route: points {s + 1}-{e} of {len(self.points)} to Nav2")
         fut = self.client.send_goal_async(NavigateThroughPoses.Goal(poses=poses),
                                           feedback_callback=lambda fb, g=gen: self._feedback(fb, g))
