@@ -10,7 +10,7 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, ".."))
 from dagger_gateway.routes import (Recorder, RouteStore, distance_m, ll_to_en,  # noqa: E402
-                                   path_length, progress, window)
+                                   mission_waypoints, path_length, progress, window)
 
 LAT0, LON0 = 26.7480, 75.8553   # near the yard (Jaipur)
 
@@ -38,6 +38,17 @@ def test_store_saves_reloads_and_names():
         s = again.get(r.id).summary()
         assert len(s.waypoints) == 3 and abs(s.length_m - 10.0) < 0.1
         assert not [f for f in os.listdir(d) if f.endswith(".tmp")], "written atomically"
+
+
+def test_mission_from_the_autopilot_keeps_only_waypoints():
+    # As QGC leaves it on ArduPilot: home (item 0), a speed, 3 waypoints (one a
+    # spline), a loiter, a waypoint in a local frame, return home.
+    home, a, b, c = north(0), north(5), north(10), north(10, east=5.0)
+    items = [(0, 16, *home), (3, 178, 0.0, 0.0), (3, 16, *a), (6, 82, *b), (3, 17, *b),
+             (1, 16, 3.0, 4.0), (3, 16, *c), (3, 20, 0.0, 0.0)]
+    assert mission_waypoints(items) == [a, b, c]
+    assert mission_waypoints([(0, 16, *home)]) == [], "home alone is no mission"
+    assert mission_waypoints([]) == []
 
 
 def test_store_skips_a_damaged_file():

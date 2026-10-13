@@ -4,6 +4,8 @@ Routes are made in the app by driving (Phase 3, docs/proposals/phase3-routes.md
 in DaggerGCS): while the operator drives with the sticks, the Recorder keeps a
 point every `record_point_spacing_m` (and at sharp turns); Save puts them in the
 RouteStore, one JSON file per route, so a route survives a gateway restart.
+Missions also come planned on the app's map (SaveRoute) or from the autopilot,
+as QGroundControl left it (ImportMission: mission_waypoints below).
 
 Points are WGS-84 (lat, lon). Turning them into Nav2 goals is route_executor's
 job (ROS); everything here is tested offline by test/test_routes.py.
@@ -35,6 +37,28 @@ def distance_m(a, b):
 
 def path_length(points):
     return sum(distance_m(a, b) for a, b in zip(points, points[1:]))
+
+
+# MAVLink mission items (MAV_CMD / MAV_FRAME) that ImportMission keeps: a
+# waypoint with a position. Speed changes, loiters, return-to-launch and the
+# rest are left out; Nav2 drives between the positions as for any route.
+MAV_CMD_NAV_WAYPOINT = 16
+MAV_CMD_NAV_SPLINE_WAYPOINT = 82
+POSITION_COMMANDS = (MAV_CMD_NAV_WAYPOINT, MAV_CMD_NAV_SPLINE_WAYPOINT)
+GLOBAL_FRAMES = (0, 3, 5, 6, 10, 11)   # GLOBAL, GLOBAL_RELATIVE_ALT, their _INT and _TERRAIN forms
+
+
+def mission_waypoints(items):
+    """The positions to drive, in order, from the autopilot's mission.
+
+    `items` are (frame, command, lat, lon) in the order of MAVROS'
+    /mavros/mission/waypoints. ArduPilot keeps its home point as item 0: left
+    out. So is everything that is not a waypoint with a position. The fake
+    rover in DaggerGCS uses the same rule.
+    """
+    return [(lat, lon) for frame, command, lat, lon in list(items)[1:]
+            if command in POSITION_COMMANDS and frame in GLOBAL_FRAMES
+            and math.isfinite(lat) and math.isfinite(lon) and (lat, lon) != (0.0, 0.0)]
 
 
 def wall_ms():

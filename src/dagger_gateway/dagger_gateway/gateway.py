@@ -34,7 +34,7 @@ from . import api_pb2 as pb
 from .ros_io import RosIO
 from .route_executor import RouteExecutor
 from .rover_state import RoverCore, Settings
-from .routes import Recorder, RouteStore, distance_m, path_length, progress
+from .routes import Recorder, RouteStore, distance_m, mission_waypoints, path_length, progress
 from .session import ApiSocket
 
 try:
@@ -43,7 +43,9 @@ except ImportError:                        # running from a tree setup.py has no
     VERSION = "gateway (unbuilt)"
 
 CAPABILITIES = (pb.CAPABILITY_STOP, pb.CAPABILITY_READINESS, pb.CAPABILITY_ALERTS)
-ROUTE_CAPABILITIES = (pb.CAPABILITY_RUN_ROUTE, pb.CAPABILITY_RECORD_ROUTE)
+ROUTE_CAPABILITIES = (pb.CAPABILITY_RUN_ROUTE, pb.CAPABILITY_RECORD_ROUTE, pb.CAPABILITY_PLAN_ROUTE,
+                      pb.CAPABILITY_IMPORT_MISSION)
+IMPORT_WAIT_S = 4.0     # ImportMission is answered within this (the app waits 5 s)
 
 
 class Gateway:
@@ -65,6 +67,7 @@ class Gateway:
                                  record_spacing_m=float(g("record_point_spacing_m")))
         self.sockets = set()
         self.results = collections.OrderedDict()   # command_id -> CommandResult (rule 3)
+        self.importing = set()                     # ImportMission ids being read
         self.checks_in = None
         omit = () if g("battery_monitor") else (pb.CHECK_BATTERY,)
         self.core = RoverCore(self.settings, self.broadcast, self, omit_checks=omit)
@@ -104,6 +107,9 @@ class Gateway:
             self.node.stop()
             self.core.stop()
             return ok
+        if kind == "import_mission" and self.routes_on:
+            self.import_mission(cmd, sock)
+            return None                    # answered once the autopilot's mission is read
         handler = getattr(self, "on_" + kind, None) if (kind and self.routes_on) else None
         why = handler(getattr(cmd, kind)) if handler else pb.REJECT_REASON_NOT_SUPPORTED
         if why is None:
@@ -181,6 +187,73 @@ class Gateway:
         self.broadcast_routes()
         self.core.recording_ended()
         return None
+
+    def on_save_route(self, cmd):
+        """A mission planned on the map in the app (owner, 2026-10-12: missions are
+        planned, not recorded). Moves nothing, so it is accepted in any state."""
+        if len(cmd.waypoints) < 2:
+            return pb.REJECT_REASON_TOO_SHORT
+        name = cmd.name.strip() or self.store.suggested_name()
+        if self.store.name_taken(name):
+            return pb.REJECT_REASON_NAME_TAKEN
+        route = self.store.save(name, [(w.latitude_deg, w.longitude_deg) for w in cmd.waypoints])
+        self.log.info(f"mission saved: '{route.name}' ({len(route.points)} waypoints) as {route.id}")
+        self.broadcast_routes()
+        return None
+
+    def import_mission(self, cmd, sock):
+        """ImportMission: the mission last sent to the autopilot (planned in QGC on
+        another device), kept as a route. MAVROS reads it again first (the autopilot
+        is only read, never written); the answer goes to `sock` when it has been
+        read, or NO_MISSION after IMPORT_WAIT_S. Moves nothing: any state."""
+        cid = cmd.command_id
+        if cid and cid in self.importing:
+            return                         # a resend while reading: one answer comes
+        self.importing.add(cid)
+        wanted = cmd.name.strip()
+        answered = []
+
+        def answer(why):
+            if answered:
+                return
+            answered.append(True)
+            self.importing.discard(cid)
+            if why is None:
+                res = pb.CommandResult(command_id=cid, outcome=pb.COMMAND_OUTCOME_ACCEPTED)
+            else:
+                res = pb.CommandResult(command_id=cid, outcome=pb.COMMAND_OUTCOME_REJECTED,
+                                       reject_reason=why)
+            self.log.info(f"import_mission from app {sock.request.remote_ip}: "
+                          + ("accepted" if why is None else pb.RejectReason.Name(why)))
+            if cid:
+                self.remember(res)
+            sock.send(command_result=res)
+
+        def got(items):
+            if answered:
+                return
+            if items is None:
+                answer(pb.REJECT_REASON_NO_MISSION)
+                return
+            points = mission_waypoints(items)
+            if not points:
+                answer(pb.REJECT_REASON_NO_MISSION)
+                return
+            if len(points) < 2:
+                answer(pb.REJECT_REASON_TOO_SHORT)
+                return
+            name = wanted or self.store.suggested_name()
+            if self.store.name_taken(name):
+                answer(pb.REJECT_REASON_NAME_TAKEN)
+                return
+            route = self.store.save(name, points)
+            self.log.info(f"mission imported from the autopilot: '{route.name}' "
+                          f"({len(points)} of {max(0, len(items) - 1)} items) as {route.id}")
+            self.broadcast_routes()
+            answer(None)
+
+        self.node.read_mission(lambda items: self.loop.call_soon_threadsafe(got, items))
+        self.loop.call_later(IMPORT_WAIT_S, answer, pb.REJECT_REASON_NO_MISSION)
 
     def on_discard_recording(self, _):
         if self.core.recording is None:

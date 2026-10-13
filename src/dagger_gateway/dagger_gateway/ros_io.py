@@ -18,11 +18,11 @@ import math
 import time
 
 from action_msgs.srv import CancelGoal
-from mavros_msgs.msg import GPSRAW, RCIn, RCOut, State
-from mavros_msgs.srv import SetMode
+from mavros_msgs.msg import GPSRAW, RCIn, RCOut, State, WaypointList
+from mavros_msgs.srv import SetMode, WaypointPull
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
-from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.qos_event import PublisherEventCallbacks, SubscriptionEventCallbacks
 from sensor_msgs.msg import BatteryState, CameraInfo, Imu, LaserScan, NavSatFix
 from std_msgs.msg import Bool, String
@@ -109,6 +109,9 @@ FOLLOW_OFF_GRACE_S = 0.7   # ignore "following" from /follow/state this long aft
 # A real tools/estop.sh streams at 10 Hz, so it still latches on its next message.
 RELEASE_GRACE_S = 0.5
 FOLLOW_STATE_TIMEOUT_S = 2.0   # follow_controller publishes /follow/state at 2 Hz
+# After a mission pull, MAVROS' new /mavros/mission/waypoints can reach us just
+# after the service reply: wait this long at most for it.
+MISSION_SETTLE_S = 1.0
 
 
 class RosIO(Node):
@@ -176,6 +179,17 @@ class RosIO(Node):
             self.create_subscription(typ, topic, self._seen_cb(topic), be, raw=raw,
                                      event_callbacks=QUIET_SUB)
         self.checks = pending_checks()     # replaced whole once a second; read by the loop
+
+        # ImportMission: the autopilot's mission as MAVROS last read it. Latched
+        # (RELIABLE + TRANSIENT_LOCAL, as MAVROS publishes it), so it arrives at start.
+        self.mission = None                # tuple of (frame, command, lat, lon); item 0 = home
+        self.mission_gen = 0
+        latched = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
+                             durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                             history=HistoryPolicy.KEEP_LAST, depth=1)
+        self.create_subscription(WaypointList, "/mavros/mission/waypoints", self.on_mission, latched,
+                                 event_callbacks=QUIET_SUB)
+        self.pull_cli = self.create_client(WaypointPull, "/mavros/mission/pull")
         self.readiness = Readiness(self)
         self.create_timer(1.0, self.evaluate)
 
@@ -266,6 +280,42 @@ class RosIO(Node):
         if b is None or not (b.voltage > 1.0) or not (0.0 <= b.percentage <= 1.0):
             return None
         return round(b.percentage * 100.0, 1)
+
+    def on_mission(self, m):
+        self.mission = tuple((w.frame, w.command, w.x_lat, w.y_long) for w in m.waypoints)
+        self.mission_gen += 1
+
+    def read_mission(self, done):
+        """Ask MAVROS to read the autopilot's mission again, then done(items), or
+        done(None) when it could not be read. READ ONLY: MAVLink MISSION_REQUEST_LIST
+        and MISSION_REQUEST_INT; nothing is written to the autopilot. Asked because
+        MAVROS' own pull_after_gcs can miss an upload made over another radio.
+        `done` is called in the rclpy thread."""
+        if not self.pull_cli.service_is_ready():
+            self.get_logger().error("import: /mavros/mission/pull not available")
+            done(None)
+            return
+        gen = self.mission_gen
+        fut = self.pull_cli.call_async(WaypointPull.Request())
+
+        def pulled(f):
+            try:
+                r = f.result()
+            except Exception as e:  # noqa: BLE001
+                self.get_logger().error(f"import: mission pull failed: {e!r}")
+                r = None
+            if r is None or not r.success:
+                done(None)
+                return
+            start = time.monotonic()
+
+            def settle():
+                if self.mission_gen != gen or time.monotonic() - start > MISSION_SETTLE_S:
+                    timer.cancel()
+                    self.destroy_timer(timer)
+                    done(self.mission)
+            timer = self.create_timer(0.05, settle)
+        fut.add_done_callback(pulled)
 
     def on_follow_state(self, m):
         self.follow_state = (m.data, time.monotonic())

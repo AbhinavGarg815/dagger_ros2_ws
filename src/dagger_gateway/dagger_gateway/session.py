@@ -117,6 +117,8 @@ class ApiSocket(tornado.websocket.WebSocketHandler):
             self.send(command_result=cached)
             return
         res = self.gw.command(cmd, self)
+        if res is None:                    # answered later (ImportMission reads the autopilot first)
+            return
         if cmd.command_id:
             self.gw.remember(res)
         self.send(command_result=res)
