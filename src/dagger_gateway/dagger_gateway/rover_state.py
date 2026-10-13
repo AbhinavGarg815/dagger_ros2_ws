@@ -303,7 +303,9 @@ class RoverCore:
         st = {cid: s for cid, (s, _) in self.checks.items()}
         fail = lambda cid: st.get(cid) == pb.CHECK_STATUS_FAIL  # noqa: E731
         self.alerts.set(pb.ALERT_POSITION_NOT_ACCURATE, fail(pb.CHECK_POSITION))
-        self.alerts.set(pb.ALERT_HEADING_UNKNOWN, fail(pb.CHECK_HEADING))
+        # WARN too: a heading gap or a patchy one is "not reliable yet" to the operator
+        self.alerts.set(pb.ALERT_HEADING_UNKNOWN, st.get(pb.CHECK_HEADING) in (pb.CHECK_STATUS_FAIL,
+                                                                             pb.CHECK_STATUS_WARN))
         self.alerts.set(pb.ALERT_RC_LINK_LOST, fail(pb.CHECK_REMOTE_CONTROL), pb.SEVERITY_PROBLEM)
         bstat, bval = self.checks.get(pb.CHECK_BATTERY, (pb.CHECK_STATUS_PENDING, {}))
         pct = {"percent": bval["percent"]} if "percent" in bval else {}

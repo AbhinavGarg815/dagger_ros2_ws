@@ -293,7 +293,7 @@ async def scene_readiness(rover):
     want["BATTERY"] = "WARN"
     check({k: s for k, (s, _) in c.items()} == want,
           f"a healthy parked rover: all PASS but BATTERY WARN (cannot measure) {c}")
-    check(c["HEADING"][1] == {"valid_percent": 100.0}, "heading check carries valid_percent")
+    check(c["HEADING"][1].get("valid_percent") == 100.0, "heading check carries valid_percent")
     check(st.operating_state == pb.OPERATING_STATE_READY, "READY")
     check(st.position.quality == pb.QUALITY_POOR and st.heading.quality == pb.QUALITY_GOOD,
           "position POOR (3.2 m), heading GOOD (check passes)")
@@ -301,8 +301,18 @@ async def scene_readiness(rover):
     rover.gps_yaw = 65535
     st = await app.latest_state(2.0)
     c = checks_of(st)
-    check(c["HEADING"][0] == "FAIL" and c["HEADING"][1]["valid_percent"] < 90,
-          f"heading invalid -> HEADING FAIL ({c['HEADING'][1]['valid_percent']:.0f} % valid)")
+    check(c["HEADING"][0] == "PASS" and st.heading.quality == pb.QUALITY_POOR
+          and abs(st.heading.heading_deg - 90.5) < 1.0,
+          f"heading gone 2 s: still PASS, the arrow carried on odometry, POOR ({c['HEADING']})")
+    st = await app.latest_state(2.5)
+    c = checks_of(st)
+    check(c["HEADING"][0] == "WARN" and st.operating_state == pb.OPERATING_STATE_READY
+          and "HEADING_UNKNOWN" in alerts_of(st),
+          f"gone > 3 s: WARN, alert 'not reliable', jobs still allowed ({c['HEADING']})")
+    st = await app.latest_state(7.5)               # past 10 s, with readiness at 1 Hz
+    c = checks_of(st)
+    check(c["HEADING"][0] == "FAIL" and not st.HasField("heading"),
+          f"gone > 10 s: HEADING FAIL, no heading shown ({c['HEADING']})")
     check(st.operating_state == pb.OPERATING_STATE_NOT_READY, "a failing check: NOT_READY, never READY")
     check("HEADING_UNKNOWN" in alerts_of(st), "alert HEADING_UNKNOWN")
     rover.gps_yaw = 9050

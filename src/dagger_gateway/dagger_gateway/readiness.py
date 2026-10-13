@@ -30,6 +30,11 @@ from . import api_pb2 as pb
 PASS, WARN, FAIL, PENDING = (pb.CHECK_STATUS_PASS, pb.CHECK_STATUS_WARN, pb.CHECK_STATUS_FAIL,
                              pb.CHECK_STATUS_PENDING)
 NAV2_NODES = ("controller_server", "planner_server", "bt_navigator", "behavior_server")
+# The heading rule (see Readiness.heading).
+HEADING_WINDOW_S = 10.0
+HEADING_MIN_VALID = 0.6
+HEADING_GAP_OK_S = 3.0
+HEADING_GAP_FAIL_S = 10.0
 
 # CheckId -> (topic, min Hz) -- preflight.TOPICS
 RATES = {
@@ -153,10 +158,31 @@ class Readiness:
         return (PASS if fix_ok and self.estimator_ok else FAIL), {}
 
     def heading(self, now):
-        v = self.io.gps_yaw_valid.values(now)
+        """The dual-antenna GNSS heading, tolerant of short dropouts (owner, 2026-10-13:
+        on the yard it was invalid ~18 % of the time, mostly in short patches, while
+        the FCU's EKF -- what Mission Planner shows -- carried it on the gyros):
+          PASS  a valid heading in the last HEADING_GAP_OK_S and >= HEADING_MIN_VALID
+                of the last HEADING_WINDOW_S valid;
+          WARN  a longer gap or a patchy window: "not reliable yet", jobs still allowed
+                (the gyros hold the heading well over seconds);
+          FAIL  nothing valid for HEADING_GAP_FAIL_S, no GNSS status at all, or the
+                gps_heading_imu helper silent while GNSS has a heading (seen at a bad
+                boot, 2026-10-13: the EKF then gets no heading).
+        The FCU estimator check (Q67: EK3 diverged with the heading valid 8 %) stays
+        in the position check."""
+        io = self.io
+        v = io.gps_yaw_valid.values(now)
         frac = sum(v) / len(v) if v else 0.0
-        good = len(v) >= 5 and frac >= 0.9 and self.rates_ok(pb.CHECK_HEADING, now)
-        return (PASS if good else FAIL), {"valid_percent": round(100.0 * frac)}
+        gap = io.gps_yaw_valid.since_true(now)
+        values = {"valid_percent": round(100.0 * frac), "gap_s": round(min(gap, 999.0), 1)}
+        raw = io.seen["/mavros/gpsstatus/gps1/raw"]
+        if raw.rate(now) < 4.0 or raw.age(now) >= 2.0 or gap > HEADING_GAP_FAIL_S:
+            return FAIL, values
+        if gap <= 1.0 and io.seen["/gps/heading_imu"].age(now) > HEADING_GAP_OK_S:
+            return FAIL, values
+        if gap > HEADING_GAP_OK_S or frac < HEADING_MIN_VALID:
+            return WARN, values
+        return PASS, values
 
     def obstacle_sensor(self, now):
         return (PASS if self.rates_ok(pb.CHECK_OBSTACLE_SENSOR, now) else FAIL), {}

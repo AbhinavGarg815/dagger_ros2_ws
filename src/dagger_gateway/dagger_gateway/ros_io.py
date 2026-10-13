@@ -91,18 +91,26 @@ class Seen:
 
 
 class Series:
-    """Values with their times over the last WINDOW_S (e.g. heading valid or not)."""
+    """Values with their times over the last `window_s` (e.g. heading valid or not)."""
 
-    def __init__(self):
+    def __init__(self, window_s=WINDOW_S):
+        self.window_s = window_s
         self.items = collections.deque()
+        self.last_true = None              # monotonic s of the last truthy value
 
     def add(self, v, now):
         self.items.append((now, v))
-        while self.items[0][0] < now - WINDOW_S:
+        if v:
+            self.last_true = now
+        while self.items[0][0] < now - self.window_s:
             self.items.popleft()
 
     def values(self, now):
-        return [v for t, v in self.items if t >= now - WINDOW_S]
+        return [v for t, v in self.items if t >= now - self.window_s]
+
+    def since_true(self, now):
+        """Seconds since the last truthy value (inf if never)."""
+        return float("inf") if self.last_true is None else now - self.last_true
 
 FOLLOW_OFF_GRACE_S = 0.7   # ignore "following" from /follow/state this long after we turned it off
 # After a release, ignore /estop true this long: our own 10 Hz stream, sent just
@@ -110,6 +118,7 @@ FOLLOW_OFF_GRACE_S = 0.7   # ignore "following" from /follow/state this long aft
 # A real tools/estop.sh streams at 10 Hz, so it still latches on its next message.
 RELEASE_GRACE_S = 0.5
 FOLLOW_STATE_TIMEOUT_S = 2.0   # follow_controller publishes /follow/state at 2 Hz
+HEADING_HOLD_S = 10.0          # a GNSS heading dropout is bridged on odometry this long
 # After a mission pull, MAVROS' new /mavros/mission/waypoints can reach us just
 # after the service reply: wait this long at most for it.
 MISSION_SETTLE_S = 1.0
@@ -171,7 +180,11 @@ class RosIO(Node):
 
         # telemetry and readiness: one subscription per topic, shared by both
         self.seen = {t: Seen() for t, _, _ in TOPICS}
-        self.gps_yaw_valid = Series()      # per gps1/raw: dual-antenna heading valid
+        self.gps_yaw_valid = Series(10.0)  # per gps1/raw: dual-antenna heading valid (Readiness.heading)
+        # The last valid GNSS heading and the odometry yaw at that moment: across a
+        # short dropout the heading is carried on by how much the rover has turned since
+        # (as the FCU's EKF does on its gyros) -- (deg, monotonic s, odom yaw rad).
+        self.heading_hold = None
         self.fcu = Series()                # per local_position/odom: (x, y, speed)
         self.rc_neutral = Series()         # per rc/out: both tracks at neutral
         be = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -222,7 +235,12 @@ class RosIO(Node):
             now = time.monotonic()
             seen.add(msg, now)
             if topic == "/mavros/gpsstatus/gps1/raw":
-                self.gps_yaw_valid.add(msg.yaw not in (0, 65535), now)
+                valid = msg.yaw not in (0, 65535)
+                self.gps_yaw_valid.add(valid, now)
+                if valid:
+                    yaw = self.odom_yaw()
+                    if yaw is not None:
+                        self.heading_hold = ((msg.yaw / 100.0) % 360.0, now, yaw)
             elif topic == "/mavros/local_position/odom":
                 p, v = msg.pose.pose.position, msg.twist.twist.linear
                 self.fcu.add((p.x, p.y, math.hypot(v.x, v.y)), now)
@@ -268,6 +286,18 @@ class RosIO(Node):
             st.heading.CopyFrom(pb.Heading(
                 heading_deg=(raw.yaw / 100.0) % 360.0, accuracy_deg=raw.hdg_acc / 1e5,
                 quality=pb.QUALITY_GOOD if ok(pb.CHECK_HEADING) else pb.QUALITY_POOR))
+        elif self.heading_hold is not None:
+            # A dropout: the last GNSS heading turned by the odometry's yaw change
+            # since (ENU yaw counter-clockwise, heading clockwise), up to
+            # HEADING_HOLD_S, marked POOR so the app says "not reliable yet".
+            deg, t, yaw0 = self.heading_hold
+            yaw = self.odom_yaw()
+            age = time.monotonic() - t
+            if yaw is not None and age <= HEADING_HOLD_S:
+                turned = math.degrees(math.atan2(math.sin(yaw - yaw0), math.cos(yaw - yaw0)))
+                st.heading.CopyFrom(pb.Heading(
+                    heading_deg=(deg - turned) % 360.0, accuracy_deg=0.5 + 0.5 * age,
+                    quality=pb.QUALITY_POOR))
 
         odom = self.fresh("/odometry/filtered", 1.0)
         if odom is not None:
@@ -279,6 +309,14 @@ class RosIO(Node):
         if pct is not None:
             st.battery.CopyFrom(pb.Battery(percent=pct,
                                            voltage_v=self.seen["/mavros/battery"].last.voltage))
+
+    def odom_yaw(self):
+        """Yaw (rad, ENU) of /odometry/filtered if fresh, else None."""
+        o = self.fresh("/odometry/filtered", 1.0)
+        if o is None:
+            return None
+        q = o.pose.pose.orientation
+        return math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
 
     def battery_percent(self):
         """0-100 from /mavros/battery, or None when the Cube has no real reading
