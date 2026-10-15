@@ -3,7 +3,7 @@
 <package format="3">
   <name>dagger_msgs</name>
   <version>0.1.0</version>
-  <description>Dagger rover interfaces: multi-person tracks for click-to-select following.</description>
+  <description>Dagger rover interfaces: multi-person tracks for click-to-select following; the operator's saved maps.</description>
   <maintainer email="abhinavgrg815@gmail.com">Abhinav</maintainer>
   <license>Proprietary</license>
 

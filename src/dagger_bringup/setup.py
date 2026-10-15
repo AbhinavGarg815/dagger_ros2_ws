@@ -50,6 +50,7 @@ setup(
             "marker_tracker = dagger_bringup.marker_tracker:main",
             "ui_server = dagger_bringup.ui_server:main",
             "fcu_config = dagger_bringup.fcu_config:main",
+            "map_manager = dagger_bringup.map_manager:main",
         ],
     },
 )

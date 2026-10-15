@@ -1,0 +1,20 @@
+[Unit]
+Description=Dagger: the operator's saved maps for the app (map manager, ~/dagger_maps)
+PartOf=dagger.target
+After=dagger-clock.service
+Wants=dagger-clock.service
+
+[Service]
+Type=simple
+User=nvidia
+Group=dagger
+# Reads map files only: no SLAM is started, nothing moves.
+ExecStart=/home/jetson/ros2_ws/tools/systemd/dagger-ros-env.sh ros2 run dagger_bringup map_manager
+Restart=on-failure
+RestartSec=3
+KillSignal=SIGINT
+KillMode=mixed
+TimeoutStopSec=10
+
+[Install]
+WantedBy=dagger.target

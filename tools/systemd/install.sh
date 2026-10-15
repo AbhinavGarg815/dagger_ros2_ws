@@ -6,7 +6,7 @@
 set -e
 [ "$(id -u)" = 0 ] || { echo "run with sudo"; exit 1; }
 HERE="$(cd "$(dirname "$0")" && pwd)"
-UNITS="dagger.target dagger-clock.service dagger-drive.service dagger-nav.service dagger-follow.service dagger-gateway.service"
+UNITS="dagger.target dagger-clock.service dagger-drive.service dagger-nav.service dagger-follow.service dagger-gateway.service dagger-maps.service"
 if [ "${1:-}" = "--remove" ]; then
     systemctl disable --now $UNITS || true
     for u in $UNITS; do rm -f "/etc/systemd/system/$u"; done

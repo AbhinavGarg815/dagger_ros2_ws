@@ -37,6 +37,7 @@
   <exec_depend>dagger_msgs</exec_depend>
   <exec_depend>python3-tornado</exec_depend>
   <exec_depend>python3-scipy</exec_depend>
+  <exec_depend>python3-pil</exec_depend>       <!-- map_store: map pictures for the app -->
   <exec_depend>tf2_geometry_msgs</exec_depend>
   <exec_depend>nav2_msgs</exec_depend>
   <exec_depend>cv_bridge</exec_depend>

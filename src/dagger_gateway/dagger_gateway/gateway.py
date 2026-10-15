@@ -36,6 +36,7 @@ from .route_executor import RouteExecutor
 from .rover_state import RoverCore, Settings
 from .routes import (Recorder, RouteStore, Trail, distance_m, home_path, mission_waypoints,
                      path_length, progress)
+from .maps import MapPicture, map_list_pb
 from .session import ApiSocket
 from .video import VideoSocket
 from .follow import follow_status, is_selectable, stamp_s, targets_msg, geometry
@@ -51,6 +52,7 @@ CAPABILITIES = (pb.CAPABILITY_STOP, pb.CAPABILITY_READINESS, pb.CAPABILITY_ALERT
 ROUTE_CAPABILITIES = (pb.CAPABILITY_RUN_ROUTE, pb.CAPABILITY_RECORD_ROUTE, pb.CAPABILITY_PLAN_ROUTE,
                       pb.CAPABILITY_IMPORT_MISSION, pb.CAPABILITY_COME_HOME, pb.CAPABILITY_FOLLOW)
 IMPORT_WAIT_S = 4.0     # ImportMission is answered within this (the app waits 5 s)
+MAP_WAIT_S = 3.0        # ShowMap / DeleteMap: the map manager answers within this, or no answer
 
 
 class Gateway:
@@ -63,7 +65,11 @@ class Gateway:
         self.rover_id, self.rover_name = g("rover_id"), g("rover_name")
         self.software_version = VERSION
         self.routes_on = bool(g("routes_enabled"))
-        self.capabilities = CAPABILITIES + (ROUTE_CAPABILITIES if self.routes_on else ())
+        self.maps_on = bool(g("maps_enabled"))
+        self.capabilities = (CAPABILITIES + (ROUTE_CAPABILITIES if self.routes_on else ())
+                             + ((pb.CAPABILITY_MAPS,) if self.maps_on else ()))
+        self.map_calls = set()                     # ShowMap / DeleteMap ids being answered
+        node.on_maps = lambda: loop.call_soon_threadsafe(self.broadcast_maps)
         self.settings = Settings(heartbeat_ms=int(g("heartbeat_period_ms")),
                                  state_ms=int(g("state_period_ms")),
                                  follow_stop_ms=int(g("follow_stop_after_silence_ms")),
@@ -119,6 +125,9 @@ class Gateway:
         if kind == "import_mission" and self.routes_on:
             self.import_mission(cmd, sock)
             return None                    # answered once the autopilot's mission is read
+        if kind in ("show_map", "delete_map") and self.maps_on:
+            self.map_command(kind, cmd, sock)
+            return None                    # answered once the map manager has done it
         handler = getattr(self, "on_" + kind, None) if (kind and self.routes_on) else None
         why = handler(getattr(cmd, kind)) if handler else pb.REJECT_REASON_NOT_SUPPORTED
         blocked = 0
@@ -379,6 +388,49 @@ class Gateway:
         self.log.error(f"route: {why} -- paused, 'can't find a way'")
         self.core.route_failed()
 
+    # ---------------- saved maps (Step C1) ----------------
+    def map_list(self):
+        return map_list_pb(self.node.maps)
+
+    def broadcast_maps(self):
+        ml = self.map_list()
+        for s in self.apps():
+            s.send(maps=ml)
+
+    def map_command(self, kind, cmd, sock):
+        """ShowMap / DeleteMap, done by the map manager (it owns the files). Moves
+        nothing: any state. UNKNOWN_MAP for a name not in the list; no answer when
+        the map manager is not running (the app says so)."""
+        cid = cmd.command_id
+        if cid and cid in self.map_calls:
+            return                         # a resend while waiting: one answer comes
+        name = getattr(cmd, kind).name
+        known = self.node.maps is not None and any(m.name == name for m in self.node.maps.maps)
+        answered = []
+
+        def answer(ok):
+            if answered:
+                return
+            answered.append(True)
+            self.map_calls.discard(cid)
+            if ok is None:
+                self.log.error(f"{kind} '{name}' from app {sock.request.remote_ip}: no answer from the map manager")
+                return
+            res = pb.CommandResult(command_id=cid, outcome=pb.COMMAND_OUTCOME_ACCEPTED) if ok else                 pb.CommandResult(command_id=cid, outcome=pb.COMMAND_OUTCOME_REJECTED,
+                                 reject_reason=pb.REJECT_REASON_UNKNOWN_MAP)
+            self.log.info(f"{kind} '{name}' from app {sock.request.remote_ip}: "
+                          + ("accepted" if ok else "UNKNOWN_MAP"))
+            if cid:
+                self.remember(res)
+            sock.send(command_result=res)
+
+        if not known and not (kind == "show_map" and name == ""):
+            answer(False)
+            return
+        self.map_calls.add(cid)
+        self.node.map_call(kind, name, lambda ok: self.loop.call_soon_threadsafe(answer, ok))
+        self.loop.call_later(MAP_WAIT_S, answer, None)
+
     def route_list(self):
         return pb.RouteList(routes=[r.summary() for r in self.store.all()])
 
@@ -495,7 +547,8 @@ def main():
     code = 0
     try:
         app = tornado.web.Application(
-            [(r"/api", ApiSocket, {"gw": gw}), (r"/video", VideoSocket, {"gw": gw})],
+            [(r"/api", ApiSocket, {"gw": gw}), (r"/video", VideoSocket, {"gw": gw}),
+             (r"/maps/(.+)\.png", MapPicture, {"gw": gw})],
             # keepalive only; safety rests on the heartbeat silence, not on this.
             # The timeout must exceed the interval (ui_server.py, 2026-09-29).
             websocket_ping_interval=2, websocket_ping_timeout=6,

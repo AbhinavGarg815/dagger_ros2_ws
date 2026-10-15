@@ -27,7 +27,8 @@ from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPo
 from rclpy.qos_event import PublisherEventCallbacks, SubscriptionEventCallbacks
 from sensor_msgs.msg import BatteryState, CameraInfo, Imu, LaserScan, NavSatFix
 from std_msgs.msg import Bool, Int32, String
-from dagger_msgs.msg import MarkerTracks, PersonTracks
+from dagger_msgs.msg import MapList, MarkerTracks, PersonTracks
+from dagger_msgs.srv import MapName
 from sensor_msgs.msg import CompressedImage as _CompressedImage   # noqa: F401 -- the raw video's type
 
 from .readiness import Readiness
@@ -160,6 +161,8 @@ class RosIO(Node):
         # the operator's slide to start / carry on also releases the STOP latch and sets
         # GUIDED (owner, 2026-10-12). Arming stays on the RC switch.
         p("set_guided_on_start", True)
+        # Step C1: the operator's saved maps, from the map manager (dagger_bringup/map_manager)
+        p("maps_enabled", True)
         g = lambda n: self.get_parameter(n).value  # noqa: E731
         self.param = g
         self.dry_run = bool(g("stop_dry_run"))
@@ -177,6 +180,15 @@ class RosIO(Node):
         self.select_pub = self.create_publisher(Int32, "/follow/select", 10, event_callbacks=QUIET_PUB)
         self.on_video = None               # set by the gateway: called (rclpy thread) with a raw frame
         self.on_targets = None             # set by the gateway: called (rclpy thread) on new tracks
+        # Saved maps (Step C1): the map manager's latched list; show / delete go to it.
+        self.maps = None                   # dagger_msgs/MapList, replaced whole
+        self.on_maps = None                # set by the gateway: called (rclpy thread) on a new list
+        maps_qos = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
+                              durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                              history=HistoryPolicy.KEEP_LAST, depth=1)
+        self.create_subscription(MapList, "/maps/list", self.on_map_list, maps_qos, event_callbacks=QUIET_SUB)
+        self.map_clis = {"show_map": self.create_client(MapName, "/maps/show"),
+                         "delete_map": self.create_client(MapName, "/maps/delete")}
         self.person_tracks = None          # (PersonTracks, monotonic s)
         self.marker_tracks = None          # (MarkerTracks, monotonic s)
         rel10 = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST, depth=10)
@@ -382,6 +394,29 @@ class RosIO(Node):
 
     def on_costmap(self, m):
         self.costmap = m
+
+    def on_map_list(self, m):
+        self.maps = m
+        if self.on_maps:
+            self.on_maps()
+
+    def map_call(self, kind, name, done):
+        """show_map / delete_map through the map manager; then done(ok), or done(None)
+        when it is not running or did not answer. Files only: nothing moves.
+        `done` is called in the rclpy thread."""
+        cli = self.map_clis[kind]
+        if not cli.service_is_ready():
+            self.get_logger().error(f"{kind}: the map manager is not running")
+            done(None)
+            return
+
+        def answered(f):
+            try:
+                done(bool(f.result().ok))
+            except Exception as e:  # noqa: BLE001
+                self.get_logger().error(f"{kind}: {e!r}")
+                done(None)
+        cli.call_async(MapName.Request(name=name)).add_done_callback(answered)
 
     def costmap_fix(self, x, y):
         """A goal (x, y) in the map frame against the global costmap: ('ok', x, y) when

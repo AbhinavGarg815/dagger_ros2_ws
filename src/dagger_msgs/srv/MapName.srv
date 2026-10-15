@@ -1,0 +1,6 @@
+# /maps/show ("" = none) and /maps/delete: one map, by name.
+string name
+---
+bool ok
+# Why not, when not ok: "unknown map".
+string error

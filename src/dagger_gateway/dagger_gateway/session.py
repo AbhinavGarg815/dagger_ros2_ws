@@ -93,6 +93,8 @@ class ApiSocket(tornado.websocket.WebSocketHandler):
         self.send(settings=self.gw.settings.msg())
         if self.gw.routes_on:
             self.send(routes=self.gw.route_list())   # Phase 3: the saved routes
+        if self.gw.maps_on:
+            self.send(maps=self.gw.map_list())       # Step C1: the saved maps
         if first:
             self.send_state()              # the picture at once, not 200 ms later
 
