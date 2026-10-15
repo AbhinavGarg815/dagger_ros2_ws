@@ -302,6 +302,19 @@ class Gateway:
         self.broadcast_routes()
         return None
 
+    def on_delete_route(self, cmd):
+        """Remove a saved mission (owner, 2026-10-15). Moves nothing, so it is accepted
+        in any state -- except the mission being run or paused, which stays."""
+        if self.store.get(cmd.route_id) is None:
+            return pb.REJECT_REASON_UNKNOWN_ROUTE
+        if self.core.route is not None and self.core.route_id == cmd.route_id:
+            return pb.REJECT_REASON_NOT_IN_THIS_STATE
+        name = self.store.get(cmd.route_id).name
+        self.store.delete(cmd.route_id)
+        self.log.info(f"mission deleted: '{name}' ({cmd.route_id})")
+        self.broadcast_routes()
+        return None
+
     def import_mission(self, cmd, sock):
         """ImportMission: the mission last sent to the autopilot (planned in QGC on
         another device), kept as a route. MAVROS reads it again first (the autopilot

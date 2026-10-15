@@ -88,6 +88,17 @@ def test_a_waypoint_on_an_obstacle_moves_to_clear_ground_or_is_blocked():
     assert BLOCKED_COST == 99
 
 
+def test_store_deletes_for_good():
+    with tempfile.TemporaryDirectory() as d:
+        store = RouteStore(d)
+        a = store.save("Yard loop", [north(0), north(5)])
+        b = store.save("To the gate", [north(0), north(9)])
+        assert store.delete(a.id) and not store.delete(a.id)
+        assert [r.name for r in store.all()] == ["To the gate"]
+        assert [r.id for r in RouteStore(d).all()] == [b.id], "gone after a restart too"
+        assert not store.name_taken("Yard loop")
+
+
 def test_store_skips_a_damaged_file():
     with tempfile.TemporaryDirectory() as d:
         open(os.path.join(d, "bad.json"), "w").write("{not json")

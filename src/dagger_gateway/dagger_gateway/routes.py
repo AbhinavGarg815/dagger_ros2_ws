@@ -192,6 +192,16 @@ class RouteStore:
         self.routes[r.id] = r
         return r
 
+    def delete(self, rid):
+        """Remove a route and its file for good. False when there is no such route."""
+        if self.routes.pop(rid, None) is None:
+            return False
+        try:
+            os.remove(os.path.join(self.folder, rid + ".json"))
+        except FileNotFoundError:
+            pass
+        return True
+
 
 class Recorder:
     """Keeps a point every `spacing_m` of driving, and at sharp turns (a turn of
