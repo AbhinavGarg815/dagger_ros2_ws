@@ -26,7 +26,9 @@ from rclpy.time import Time
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.qos_event import PublisherEventCallbacks, SubscriptionEventCallbacks
 from sensor_msgs.msg import BatteryState, CameraInfo, Imu, LaserScan, NavSatFix
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, Int32, String
+from dagger_msgs.msg import MarkerTracks, PersonTracks
+from sensor_msgs.msg import CompressedImage as _CompressedImage   # noqa: F401 -- the raw video's type
 
 from .readiness import Readiness
 from .rover_state import pending_checks
@@ -170,6 +172,22 @@ class RosIO(Node):
 
         self.estop_pub = self.create_publisher(Bool, "/estop", 10, event_callbacks=QUIET_PUB)
         self.follow_pub = self.create_publisher(Bool, "/follow/enable", 10, event_callbacks=QUIET_PUB)
+        # Following from the app (Phase 4), as the follow web page does it (ui_server.py):
+        # the picture and the trackers' output in, the pick out on /follow/select.
+        self.select_pub = self.create_publisher(Int32, "/follow/select", 10, event_callbacks=QUIET_PUB)
+        self.on_video = None               # set by the gateway: called (rclpy thread) with a raw frame
+        self.on_targets = None             # set by the gateway: called (rclpy thread) on new tracks
+        self.person_tracks = None          # (PersonTracks, monotonic s)
+        self.marker_tracks = None          # (MarkerTracks, monotonic s)
+        rel10 = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST, depth=10)
+        img_qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryPolicy.KEEP_LAST, depth=1)
+        # raw=True: the frame stays serialized unless an app is watching (see Gateway.on_video_frame)
+        self.create_subscription(_CompressedImage, "/follow/ui/image/compressed", self._video_cb, img_qos,
+                                 raw=True, event_callbacks=QUIET_SUB)
+        self.create_subscription(PersonTracks, "/follow/tracks", self._tracks_cb(True), rel10,
+                                 event_callbacks=QUIET_SUB)
+        self.create_subscription(MarkerTracks, "/follow/marker_tracks", self._tracks_cb(False), rel10,
+                                 event_callbacks=QUIET_SUB)
         self.create_subscription(Bool, "/estop", self.on_estop, 10, event_callbacks=QUIET_SUB)
         self.create_subscription(String, "/follow/state", self.on_follow_state, 10,
                                  event_callbacks=QUIET_SUB)
@@ -397,6 +415,39 @@ class RosIO(Node):
         nx, ny = x0 + (spot[0] + 0.5) * res, y0 + (spot[1] + 0.5) * res
         dx, dy = nx - t.x, ny - t.y                                   # costmap -> map
         return "moved", c * dx + s * dy, -s * dx + c * dy
+
+    def _video_cb(self, raw):
+        if self.on_video:
+            self.on_video(raw)
+
+    def _tracks_cb(self, people):
+        def cb(m):
+            if people:
+                self.person_tracks = (m, time.monotonic())
+            else:
+                self.marker_tracks = (m, time.monotonic())
+            if self.on_targets:
+                self.on_targets()
+        return cb
+
+    def latest_tracks(self, max_age_s=1.0):
+        """(PersonTracks or None, MarkerTracks or None), each only if fresh."""
+        now = time.monotonic()
+        fresh = lambda v: v[0] if v is not None and now - v[1] <= max_age_s else None  # noqa: E731
+        return fresh(self.person_tracks), fresh(self.marker_tracks)
+
+    def select_target(self, target_id):
+        for _ in range(3):                 # a single message can be dropped
+            self.select_pub.publish(Int32(data=int(target_id)))
+        self.get_logger().info(f"follow: select #{target_id} (app)")
+
+    def follow_on(self):
+        if self.dry_run:
+            self.get_logger().warn("follow ON refused in --stop-dry-run")
+            return
+        for _ in range(3):
+            self.follow_pub.publish(Bool(data=True))
+        self.get_logger().warn("follow ON (app)")
 
     def on_follow_state(self, m):
         self.follow_state = (m.data, time.monotonic())

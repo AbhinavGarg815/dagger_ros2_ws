@@ -37,6 +37,10 @@ from .rover_state import RoverCore, Settings
 from .routes import (Recorder, RouteStore, Trail, distance_m, home_path, mission_waypoints,
                      path_length, progress)
 from .session import ApiSocket
+from .video import VideoSocket
+from .follow import follow_status, is_selectable, stamp_s, targets_msg, geometry
+from rclpy.serialization import deserialize_message
+from sensor_msgs.msg import CompressedImage
 
 try:
     from .build_info import VERSION
@@ -45,7 +49,7 @@ except ImportError:                        # running from a tree setup.py has no
 
 CAPABILITIES = (pb.CAPABILITY_STOP, pb.CAPABILITY_READINESS, pb.CAPABILITY_ALERTS)
 ROUTE_CAPABILITIES = (pb.CAPABILITY_RUN_ROUTE, pb.CAPABILITY_RECORD_ROUTE, pb.CAPABILITY_PLAN_ROUTE,
-                      pb.CAPABILITY_IMPORT_MISSION, pb.CAPABILITY_COME_HOME)
+                      pb.CAPABILITY_IMPORT_MISSION, pb.CAPABILITY_COME_HOME, pb.CAPABILITY_FOLLOW)
 IMPORT_WAIT_S = 4.0     # ImportMission is answered within this (the app waits 5 s)
 
 
@@ -70,6 +74,9 @@ class Gateway:
         self.results = collections.OrderedDict()   # command_id -> CommandResult (rule 3)
         self.importing = set()                     # ImportMission ids being read
         self.trail = None                          # routes.Trail from home, once the first job starts
+        self.video_sockets = set()                 # apps watching the picture (video.VideoSocket)
+        node.on_video = lambda raw: loop.call_soon_threadsafe(self.on_video_frame, raw)
+        node.on_targets = lambda: loop.call_soon_threadsafe(self.on_targets)
         self.checks_in = None
         omit = () if g("battery_monitor") else (pb.CHECK_BATTERY,)
         self.core = RoverCore(self.settings, self.broadcast, self, omit_checks=omit)
@@ -160,6 +167,54 @@ class Gateway:
         self.node.ensure_guided()
         self.core.route_started(route.id, route.points, total)
         self.route_exec.start(route.points, 0)
+        return None
+
+    # ---------------- following (Phase 4) ----------------
+    def on_video_frame(self, raw):
+        """A camera frame (still serialized): decoded only when someone watches."""
+        if not self.video_sockets:
+            return
+        img = deserialize_message(raw, CompressedImage)
+        w, h, rot = geometry(*self.node.latest_tracks(5.0))
+        frame = pb.VideoFrame(stamp_s=stamp_s(img.header), width=w, height=h, rotation_deg=rot,
+                              jpeg=bytes(img.data))
+        for s in list(self.video_sockets):
+            s.send_frame(frame)
+
+    def on_targets(self):
+        if not self.video_sockets:
+            return
+        t = targets_msg(*self.node.latest_tracks())
+        for s in list(self.video_sockets):
+            s.send_targets(t)
+
+    def on_select_target(self, cmd):
+        """Pick who to follow (or -1: let go). Moves nothing, so any state."""
+        if cmd.target_id >= 0 and not is_selectable(*self.node.latest_tracks(), cmd.target_id):
+            return pb.REJECT_REASON_NO_TARGET
+        self.node.select_target(cmd.target_id)
+        return None
+
+    def on_start_follow(self, _):
+        why = self.core.may_start(pb.JOB_FOLLOW)
+        if why:
+            return why
+        if not self.node.armed():
+            return pb.REJECT_REASON_NOT_ARMED
+        st = follow_status(*self.node.latest_tracks())
+        if st is None or st.state == pb.TARGET_STATE_LOST:
+            return pb.REJECT_REASON_NO_TARGET
+        self.set_home()
+        self.node.release_estop()
+        self.node.ensure_guided()
+        self.node.follow_on()          # FOLLOWING comes from /follow/state, as for the web page
+        return None
+
+    def on_stop_follow(self, _):
+        if not self.core.following:
+            return pb.REJECT_REASON_NOT_IN_THIS_STATE
+        self.node.follow_off("app: Stop following")
+        self.core.set_following(False)
         return None
 
     def on_come_home(self, _):
@@ -351,6 +406,9 @@ class Gateway:
             if core.going_home:                # the way home is not in the route list
                 for lat, lon in core.route_points[:200]:
                     st.route.waypoints.add(latitude_deg=lat, longitude_deg=lon)
+        fs = follow_status(*self.node.latest_tracks())
+        if fs is not None:
+            st.follow.CopyFrom(fs)
         if self.trail is not None:
             st.home.latitude_deg, st.home.longitude_deg = self.trail.home
             st.home.quality = pb.QUALITY_GOOD
@@ -424,7 +482,7 @@ def main():
     code = 0
     try:
         app = tornado.web.Application(
-            [(r"/api", ApiSocket, {"gw": gw})],
+            [(r"/api", ApiSocket, {"gw": gw}), (r"/video", VideoSocket, {"gw": gw})],
             # keepalive only; safety rests on the heartbeat silence, not on this.
             # The timeout must exceed the interval (ui_server.py, 2026-09-29).
             websocket_ping_interval=2, websocket_ping_timeout=6,
