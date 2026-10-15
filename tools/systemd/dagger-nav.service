@@ -1,8 +1,8 @@
 [Unit]
 Description=Dagger T2: odometry, GPS map frame, Nav2, collision monitor, command path
 PartOf=dagger.target
-After=network-online.target dagger-drive.service
-Wants=network-online.target
+After=network-online.target dagger-clock.service dagger-drive.service
+Wants=network-online.target dagger-clock.service
 
 [Service]
 Type=simple

@@ -1,0 +1,14 @@
+# Holds the Dagger stack until the clock is right -- see dagger-wait-clock.sh.
+[Unit]
+Description=Dagger: wait for the clock before starting the rover stack
+After=network-online.target systemd-timesyncd.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/home/jetson/ros2_ws/tools/systemd/dagger-wait-clock.sh
+TimeoutStartSec=180
+
+[Install]
+WantedBy=dagger.target

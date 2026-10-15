@@ -1,8 +1,8 @@
 [Unit]
 Description=Dagger T1: FCU link (mavros), LiDAR, camera, robot model, FCU config
 PartOf=dagger.target
-After=network-online.target 
-Wants=network-online.target
+After=network-online.target dagger-clock.service 
+Wants=network-online.target dagger-clock.service
 
 [Service]
 Type=simple
