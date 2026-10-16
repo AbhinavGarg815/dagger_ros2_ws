@@ -31,14 +31,17 @@ localization launch reads -- <name>.posegraph/.data (serialize_map), .pgm/.yaml
 (as map_saver_cli), _geo.yaml when tied -- then stops SLAM. It is answered at
 once and done on a worker thread (the pose graph is tens of MB).
 
+STARTING AND STOPPING SLAM is never done in a service call: a ros2 launch takes
+seconds to stop, longer than the gateway waits (Stop showing went unanswered,
+2026-10-16). The services answer at once with what was asked; the Launches
+worker starts and stops the launches one at a time, in the order asked.
+
 The maps in src/dagger_bringup/maps (the engineer's, in git) are never touched.
 The work is in map_store.py and map_tie.py (tested offline: tools/test_map_*.py).
 """
 import math
 import os
 import queue
-import signal
-import subprocess
 import threading
 import time
 
@@ -55,12 +58,12 @@ from std_srvs.srv import Trigger
 from dagger_msgs.msg import MapInfo, MapList, MappingStatus
 from dagger_msgs.srv import MapName
 
+from .launches import Launches
 from .map_store import PICTURES, MapStore, grid_to_pgm, picture_from_array, save_grid
 from .map_tie import Tie, geo_yaml, to_latlon
 
 LIVE = "~live"                 # the map being made, as the gateway names its picture
 SERIALIZE_WAIT_S = 120.0       # a big pose graph takes a while to write
-SLAM_STOP_WAIT_S = 15.0
 
 
 def stamp_s(header):
@@ -90,8 +93,8 @@ class MapManager(Node):
         self.create_service(Trigger, "/maps/discard_mapping", self.on_discard_mapping)
         self.serialize_cli = self.create_client(SerializePoseGraph, "/slam_toolbox/serialize_map")
 
-        # The map being made: None, or the SLAM process and what has come in so far.
-        self.slam = None               # subprocess.Popen of slam.launch.py
+        # The map being made: whether one is, and what has come in so far.
+        self.mapping_on = False
         self.subs = []
         self.tie = None
         self.grid = None               # the latest /slam/map
@@ -99,8 +102,8 @@ class MapManager(Node):
         self.version = 0
         self.saving = False
         self.done = queue.Queue()      # the save worker's result, picked up on this thread
-        self.loc = None                # subprocess.Popen of the shadow localization, or None
-        self.loc_name = ""             # ... on this map
+        self.loc_name = ""             # the map asked to localize on ("" = none)
+        self.launches = Launches(self.store.folder, self.get_logger())
 
         self.store.scan()
         self.update_localization()
@@ -134,24 +137,10 @@ class MapManager(Node):
         """Localize on the shown map when it is placed and no map is being made; else not."""
         shown = self.store.shown()
         m = self.store.maps.get(shown)
-        wanted = shown if (m is not None and m.placed and self.slam is None) else ""
-        if wanted == self.loc_name:
-            return
-        self.stop_localization()
-        if wanted:
-            log = open(os.path.join(self.store.folder, ".localizing.log"), "w")
-            self.loc = subprocess.Popen(
-                ["ros2", "launch", "dagger_bringup", "slam.launch.py", "mode:=localization", "shadow:=true",
-                 f"map:={self.store.path(wanted, '')}"],
-                stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        wanted = shown if (m is not None and m.placed and not self.mapping_on) else ""
+        if wanted != self.loc_name:
             self.loc_name = wanted
-            self.get_logger().info(f"finding the rover on '{wanted}' (shadow localization, pid {self.loc.pid})")
-
-    def stop_localization(self):
-        if self.loc is not None:
-            stop_group(self.loc)
-            self.get_logger().info(f"localization on '{self.loc_name}' stopped")
-        self.loc, self.loc_name = None, ""
+            self.launches.localize(wanted)     # done on the worker; answered already
 
     def on_show(self, req, res):
         res.ok = self.store.show(req.name)
@@ -163,8 +152,6 @@ class MapManager(Node):
         return res
 
     def on_delete(self, req, res):
-        if req.name and req.name == self.loc_name:
-            self.stop_localization()           # its files are about to go
         res.ok = self.store.delete(req.name)
         res.error = "" if res.ok else "unknown map"
         if res.ok:
@@ -175,22 +162,20 @@ class MapManager(Node):
 
     # ---------------- making a map (C2) ----------------
     def publish_status(self):
-        st = MappingStatus(active=self.slam is not None, saving=self.saving,
+        st = MappingStatus(active=self.mapping_on, saving=self.saving,
                            suggested_name=self.store.suggested_name())
         if self.live is not None:
             st.live = self.live
         self.status_pub.publish(st)
 
     def on_start_mapping(self, _req, res):
-        if self.slam is not None:
+        if self.mapping_on:
             res.success, res.message = False, "already mapping"
             return res
-        self.stop_localization()               # one slam_toolbox at a time
+        self.mapping_on = True
+        self.update_localization()             # one slam_toolbox at a time: localization off first
+        self.launches.map(True)
         self.publish()
-        log = open(os.path.join(self.store.folder, ".mapping.log"), "w")
-        # Its own process group, so stopping it stops every node the launch started.
-        self.slam = subprocess.Popen(["ros2", "launch", "dagger_bringup", "slam.launch.py"],
-                                     stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         self.tie, self.grid, self.live, self.version, self.saving = Tie(), None, None, 0, False
         self.subs = [
             self.create_subscription(OccupancyGrid, "/slam/map", self.on_grid, self.latched),
@@ -199,7 +184,6 @@ class MapManager(Node):
                                      qos_profile_sensor_data),
             self.create_subscription(Imu, "/gps/heading_imu", self.on_heading, qos_profile_sensor_data),
         ]
-        self.get_logger().info(f"mapping started (slam.launch.py, shadow; pid {self.slam.pid})")
         self.publish_status()
         res.success, res.message = True, ""
         return res
@@ -220,7 +204,7 @@ class MapManager(Node):
 
     def on_grid(self, g):
         """A new /slam/map: redraw the picture of the map so far and tie it again."""
-        if self.slam is None or self.saving:
+        if not self.mapping_on or self.saving:
             return
         self.grid = g
         self.version += 1
@@ -246,7 +230,7 @@ class MapManager(Node):
         self.publish_status()
 
     def on_save_map(self, req, res):
-        if self.slam is None or self.saving:
+        if not self.mapping_on or self.saving:
             res.ok, res.error = False, "not mapping"
             return res
         if self.grid is None:
@@ -306,7 +290,7 @@ class MapManager(Node):
             self.publish_status()          # still mapping: the operator may try again
 
     def on_discard_mapping(self, _req, res):
-        if self.slam is None or self.saving:
+        if not self.mapping_on or self.saving:
             res.success, res.message = False, "not mapping"
             return res
         self.stop_mapping()
@@ -318,9 +302,9 @@ class MapManager(Node):
         for s in self.subs:
             self.destroy_subscription(s)
         self.subs = []
-        if self.slam is not None:
-            stop_group(self.slam)
-        self.slam, self.tie, self.grid, self.live = None, None, None, None
+        self.launches.map(False)               # stopped on the worker; nothing waits here
+        self.mapping_on = False
+        self.tie, self.grid, self.live = None, None, None
         pics = os.path.join(self.store.folder, PICTURES)
         for old in os.listdir(pics):
             if old.startswith(LIVE + "-"):
@@ -330,17 +314,6 @@ class MapManager(Node):
         self.publish()
 
 
-def stop_group(proc):
-    """SIGINT a launch's whole process group; SIGKILL if it does not stop in time."""
-    try:
-        os.killpg(proc.pid, signal.SIGINT)
-        proc.wait(timeout=SLAM_STOP_WAIT_S)
-    except subprocess.TimeoutExpired:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-
-
 def main():
     rclpy.init()
     node = MapManager()
@@ -348,12 +321,7 @@ def main():
         rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
-    for proc in (node.slam, node.loc):     # never leave SLAM running behind us
-        if proc is not None:
-            try:
-                os.killpg(proc.pid, signal.SIGINT)
-            except ProcessLookupError:
-                pass
+    node.launches.kill_all()           # never leave SLAM running behind us
     node.destroy_node()
     rclpy.try_shutdown()
 
