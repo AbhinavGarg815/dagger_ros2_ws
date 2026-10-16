@@ -35,7 +35,8 @@ WALL_GROW = 2                     # picture only: walls drawn 2 pixels (10 cm) t
 class SavedMap:
     """One map: what the app is told about it (`summary`) and its PNG on disk."""
 
-    def __init__(self, name, width_px, height_px, resolution, corners, placed_error_m, created_ms, picture):
+    def __init__(self, name, width_px, height_px, resolution, corners, placed_error_m, created_ms, picture,
+                 geo=()):
         self.name = name
         self.width_px, self.height_px = width_px, height_px
         self.width_m, self.height_m = width_px * resolution, height_px * resolution
@@ -44,6 +45,7 @@ class SavedMap:
         self.created_ms = created_ms
         self.picture = picture                  # absolute path of the PNG
         self.version = int(os.path.getmtime(picture))
+        self.geo = tuple(geo)                   # (lat0, lon0, yaw_rad, tx, ty) when placed
 
     @property
     def placed(self):
@@ -145,17 +147,18 @@ class MapStore:
             picture_png(pgm, png)
         with Image.open(png) as img:
             w, h = img.size
-        corners, err = [], 0.0
+        corners, err, tie = [], 0.0, ()
         geo = self.path(name, "_geo.yaml")
         if os.path.exists(geo):
             g = GeoMap(geo)
+            tie = (g.lat0, g.lon0, g.rot, g.tx, g.ty)
             # The picture's corners in the map frame: origin is its bottom-left.
             top, right = oy + h * res, ox + w * res
             corners = [g.to_latlon(x, y) for x, y in ((ox, top), (right, top), (right, oy), (ox, oy))]
             with open(geo) as f:
                 err = float(yaml.safe_load(f).get("residual_rms_m", 0.0))
         created = int(os.path.getmtime(self.path(name, ".yaml")) * 1000)
-        return SavedMap(name, w, h, res, corners, err, created, png)
+        return SavedMap(name, w, h, res, corners, err, created, png, tie)
 
     # -- naming a new map ----------------------------------------------------
     @staticmethod

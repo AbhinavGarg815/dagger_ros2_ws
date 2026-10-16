@@ -3,13 +3,14 @@
 
     python3 src/dagger_gateway/test/test_maps.py     (or pytest)
 """
+import math
 import os
 import sys
 from types import SimpleNamespace as NS
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, ".."))
-from dagger_gateway.maps import map_list_pb, mapping_pb  # noqa: E402
+from dagger_gateway.maps import map_list_pb, mapping_pb, placed_map, to_latlon, to_map  # noqa: E402
 
 
 def info(name, placed=True, version=1792047715):
@@ -50,6 +51,42 @@ def test_the_map_being_made():
     assert st.map.picture_path == "/maps/~live.png?v=17" and not st.map.placed
     placed = mapping_pb(NS(active=True, saving=True, suggested_name="Map 3", live=info("", version=18)))
     assert placed.saving and placed.map.placed and len(placed.map.corners) == 4
+
+
+def test_lat_lon_to_a_map_and_back():
+    geo = (26.7479, 75.8553, math.radians(30.0), 4.0, -2.0)
+    for x, y in ((0.0, 0.0), (12.5, -7.0), (-3.0, 20.0)):
+        lat, lon = to_latlon(geo, x, y)
+        x2, y2 = to_map(geo, lat, lon)
+        assert abs(x2 - x) < 1e-6 and abs(y2 - y) < 1e-6
+
+
+def test_the_same_tie_as_the_map_manager():
+    # dagger_bringup.geo_map.GeoMap reads the same five numbers from <name>_geo.yaml.
+    bringup = os.path.join(HERE, "..", "..", "dagger_bringup")
+    if not os.path.isdir(bringup):
+        return
+    sys.path.insert(0, bringup)
+    import tempfile
+    from dagger_bringup.geo_map import GeoMap
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "x_geo.yaml")
+        open(p, "w").write("datum_lat: 26.7479\ndatum_lon: 75.8553\nyaw_deg: 30.0\ntx: 4.0\nty: -2.0\n")
+        g = GeoMap(p)
+        geo = (g.lat0, g.lon0, g.rot, g.tx, g.ty)
+        for lat, lon in ((26.74795, 75.85535), (26.7481, 75.8550)):
+            a, b = g.to_map(lat, lon)[:2], to_map(geo, lat, lon)
+            assert abs(a[0] - b[0]) < 1e-9 and abs(a[1] - b[1]) < 1e-9
+
+
+def test_only_a_placed_map_with_its_tie_takes_missions():
+    yard = info("Yard")
+    yard.geo = [26.7479, 75.8553, 0.5, 1.0, 2.0]
+    work = info("Workshop", placed=False)
+    work.geo = []
+    ml = NS(maps=[yard, work], shown="", localizing="")
+    assert placed_map(ml, "Yard") is yard
+    assert placed_map(ml, "Workshop") is None and placed_map(ml, "Nowhere") is None and placed_map(None, "Yard") is None
 
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):

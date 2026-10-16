@@ -13,6 +13,13 @@ In:   /maps/show            dagger_msgs/srv/MapName  draw this map under mission
       /maps/save_map        dagger_msgs/srv/MapName  keep it ("" = the suggested name)
       /maps/discard_mapping std_srvs/srv/Trigger     throw it away
 
+USING A MAP (Step D1, map missions): while a placed map is shown under missions
+(and no map is being made), slam.launch.py runs in SHADOW localization on it:
+slam_toolbox in its own slam_map frame, no TF, nothing Nav2 uses;
+slam_geo_init finds the start pose from GPS + a scan match and says
+/slam/localized. MapList.localizing names that map. The gateway drives a map
+mission's waypoints relative to /slam/pose.
+
 MAKING A MAP starts slam.launch.py in its SHADOW mapping mode as a child process:
 slam_toolbox builds the map from /scan in its own slam_map frame and publishes
 nothing Nav2, the GPS map layer or Follow use. Nothing moves: the operator
@@ -92,8 +99,11 @@ class MapManager(Node):
         self.version = 0
         self.saving = False
         self.done = queue.Queue()      # the save worker's result, picked up on this thread
+        self.loc = None                # subprocess.Popen of the shadow localization, or None
+        self.loc_name = ""             # ... on this map
 
         self.store.scan()
+        self.update_localization()
         self.publish()
         self.publish_status()
         self.create_timer(float(self.get_parameter("rescan_s").value), self.rescan)
@@ -105,33 +115,62 @@ class MapManager(Node):
     def rescan(self):
         if self.store.scan():
             self.get_logger().info(f"maps changed: {sorted(self.store.maps)}")
+            self.update_localization()
             self.publish()
 
     def publish(self):
-        out = MapList(shown=self.store.shown())
+        out = MapList(shown=self.store.shown(), localizing=self.loc_name)
         for m in self.store.maps.values():
             out.maps.append(MapInfo(
                 name=m.name, width_m=float(m.width_m), height_m=float(m.height_m), placed=m.placed,
                 corner_lat=[c[0] for c in m.corners], corner_lon=[c[1] for c in m.corners],
                 placed_error_m=float(m.placed_error_m), picture=m.picture,
                 picture_width_px=m.width_px, picture_height_px=m.height_px,
-                picture_version=m.version, created_ms=m.created_ms))
+                picture_version=m.version, created_ms=m.created_ms, geo=list(m.geo)))
         self.pub.publish(out)
+
+    # ---------------- using a map: shadow localization (D1) ----------------
+    def update_localization(self):
+        """Localize on the shown map when it is placed and no map is being made; else not."""
+        shown = self.store.shown()
+        m = self.store.maps.get(shown)
+        wanted = shown if (m is not None and m.placed and self.slam is None) else ""
+        if wanted == self.loc_name:
+            return
+        self.stop_localization()
+        if wanted:
+            log = open(os.path.join(self.store.folder, ".localizing.log"), "w")
+            self.loc = subprocess.Popen(
+                ["ros2", "launch", "dagger_bringup", "slam.launch.py", "mode:=localization", "shadow:=true",
+                 f"map:={self.store.path(wanted, '')}"],
+                stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+            self.loc_name = wanted
+            self.get_logger().info(f"finding the rover on '{wanted}' (shadow localization, pid {self.loc.pid})")
+
+    def stop_localization(self):
+        if self.loc is not None:
+            stop_group(self.loc)
+            self.get_logger().info(f"localization on '{self.loc_name}' stopped")
+        self.loc, self.loc_name = None, ""
 
     def on_show(self, req, res):
         res.ok = self.store.show(req.name)
         res.error = "" if res.ok else "unknown map"
         if res.ok:
             self.get_logger().info(f"shown under missions: '{req.name}'")
+            self.update_localization()
             self.publish()
         return res
 
     def on_delete(self, req, res):
+        if req.name and req.name == self.loc_name:
+            self.stop_localization()           # its files are about to go
         res.ok = self.store.delete(req.name)
         res.error = "" if res.ok else "unknown map"
         if res.ok:
             self.get_logger().info(f"map deleted: '{req.name}'")
-            self.publish()
+        self.update_localization()
+        self.publish()
         return res
 
     # ---------------- making a map (C2) ----------------
@@ -146,6 +185,8 @@ class MapManager(Node):
         if self.slam is not None:
             res.success, res.message = False, "already mapping"
             return res
+        self.stop_localization()               # one slam_toolbox at a time
+        self.publish()
         log = open(os.path.join(self.store.folder, ".mapping.log"), "w")
         # Its own process group, so stopping it stops every node the launch started.
         self.slam = subprocess.Popen(["ros2", "launch", "dagger_bringup", "slam.launch.py"],
@@ -278,19 +319,26 @@ class MapManager(Node):
             self.destroy_subscription(s)
         self.subs = []
         if self.slam is not None:
-            try:
-                os.killpg(self.slam.pid, signal.SIGINT)
-                self.slam.wait(timeout=SLAM_STOP_WAIT_S)
-            except subprocess.TimeoutExpired:
-                os.killpg(self.slam.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            stop_group(self.slam)
         self.slam, self.tie, self.grid, self.live = None, None, None, None
         pics = os.path.join(self.store.folder, PICTURES)
         for old in os.listdir(pics):
             if old.startswith(LIVE + "-"):
                 os.remove(os.path.join(pics, old))
         self.publish_status()
+        self.update_localization()             # back on the shown map, if any
+        self.publish()
+
+
+def stop_group(proc):
+    """SIGINT a launch's whole process group; SIGKILL if it does not stop in time."""
+    try:
+        os.killpg(proc.pid, signal.SIGINT)
+        proc.wait(timeout=SLAM_STOP_WAIT_S)
+    except subprocess.TimeoutExpired:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
 
 
 def main():
@@ -300,11 +348,12 @@ def main():
         rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
-    if node.slam is not None:          # never leave SLAM running behind us
-        try:
-            os.killpg(node.slam.pid, signal.SIGINT)
-        except ProcessLookupError:
-            pass
+    for proc in (node.slam, node.loc):     # never leave SLAM running behind us
+        if proc is not None:
+            try:
+                os.killpg(proc.pid, signal.SIGINT)
+            except ProcessLookupError:
+                pass
     node.destroy_node()
     rclpy.try_shutdown()
 

@@ -3,8 +3,12 @@
 GPS map mode (nav2_gps.launch.py: map = ArduPilot EK3 local ENU, map->odom from
 gps_map_odom), exactly as tools/gps_goal.py does it:
     goal_map = local_now + ENU(goal_latlon - global_now)
-SLAM map mode (map_source:=slam) is refused for now, with a log line: its
-lat/lon -> map goes through the map's _geo.yaml (Phase 6).
+A MAP MISSION (Step D1) is driven on its map instead: its points are (x, y) on a
+saved map the rover finds itself on (shadow localization, /slam/pose). For each
+window, where the map lies in odom comes from the SLAM pose and the odom pose at
+the same moment (routes.map_to_odom), and the goals go to Nav2 in `odom` -- where
+it plans anyway -- so the GPS error and the GPS map frame play no part. Nav2 in
+SLAM map mode (map_source:=slam) is still refused for GPS routes.
 
 The global costmap is a 40 m rolling window, so the route goes to Nav2 a window
 at a time (routes.window: the next points within `window_m` of the rover) as one
@@ -24,7 +28,7 @@ from geometry_msgs.msg import PoseStamped
 from nav2_msgs.action import NavigateThroughPoses
 from rclpy.action import ActionClient
 
-from .routes import ll_to_en, window
+from .routes import apply, ll_to_en, map_to_odom, window
 
 
 class RouteExecutor:
@@ -38,12 +42,14 @@ class RouteExecutor:
         self.client = ActionClient(node, NavigateThroughPoses, "/navigate_through_poses")
         self.lock = threading.Lock()
         self.points, self.index, self.batch = [], 0, (0, 0)
+        self.xy = None                     # a map mission's points on its map, else None
         self.handle, self.gen = None, 0
 
     # ---------------- from the loop ----------------
-    def start(self, points, index=0):
+    def start(self, points, index=0, xy=None):
         with self.lock:
             self.points, self.index = list(points), index
+            self.xy = list(xy) if xy else None
         self._send_window()
 
     def resume(self):
@@ -60,24 +66,33 @@ class RouteExecutor:
     def cancel(self):
         self.pause()
         with self.lock:
-            self.points, self.index = [], 0
+            self.points, self.index, self.xy = [], 0, None
 
-    def precheck(self, points):
+    def precheck(self, points, xy=None):
         """Before a route starts: the first waypoint (1-based) in the first window that
         sits on an obstacle with no clear spot within 1 m, or 0. Points beyond the
         window are checked as their window goes out (and skipped if blocked)."""
-        w = self._window_poses(points, 0)
+        w = self._window_poses(points, 0, xy)
         if w is None:
             return 0
-        s, _, xy, _ = w
-        for k, (x, y) in enumerate(xy):
-            if self.node.costmap_fix(x, y)[0] == "blocked":
+        s, _, goals, _, frame = w
+        for k, (x, y) in enumerate(goals):
+            if self.node.costmap_fix(x, y, frame)[0] == "blocked":
                 return s + k + 1
         return 0
 
     # ---------------- Nav2 ----------------
-    def _window_poses(self, points, index):
-        """(s, e, [(x, y) in map], here) for the next window, or None with no position."""
+    def _window_poses(self, points, index, xy=None):
+        """(s, e, [(x, y) goals], here, frame) for the next window, or None with no position.
+        GPS routes: goals in `map` (the GPS map frame). Map missions (xy): in `odom`."""
+        if xy:
+            pair = self.node.map_pose_and_odom()
+            now = self.node.odom_now()
+            if pair is None or now is None:
+                return None
+            t = map_to_odom(*pair)
+            s, e = window(xy, index, pair[0][:2], self.window_m, dist=math.dist)
+            return s, e, [apply(t, x, y) for x, y in xy[s:e]], (now[0], now[1]), "odom"
         fix = self.node.fresh("/mavros/global_position/global", 2.0)
         local = self.node.fresh("/mavros/local_position/odom", 1.0)
         if fix is None or local is None or not (math.isfinite(fix.latitude) and math.isfinite(fix.longitude)):
@@ -89,13 +104,13 @@ class RouteExecutor:
         for lat, lon in points[s:e]:
             de, dn = ll_to_en(lat, lon, here[0], here[1])
             xy.append((lx + de, ly + dn))
-        return s, e, xy, (lx, ly)
+        return s, e, xy, (lx, ly), "map"
 
     def _map_mode_gps(self):
         return "gps_map_odom" in set(self.node.get_node_names())
 
     def _send_window(self):
-        if not self._map_mode_gps():
+        if self.xy is None and not self._map_mode_gps():
             self.node.get_logger().error("route: map->odom is not gps_map_odom (SLAM mode?): "
                                          "routes need GPS map mode for now")
             self.post(self.on_failed, "map_mode")
@@ -104,9 +119,9 @@ class RouteExecutor:
             self.post(self.on_failed, "no_nav2")
             return
         with self.lock:
-            w = self._window_poses(self.points, self.index)
+            w = self._window_poses(self.points, self.index, self.xy)
             if w is not None:
-                s, e, xy, prev = w
+                s, e, xy, prev, frame = w
                 self.batch = (s, e)
                 self.gen += 1
                 gen = self.gen
@@ -118,13 +133,13 @@ class RouteExecutor:
         # would refuse it and give up on the whole route.
         poses = []
         for k, (x, y) in enumerate(xy):
-            verdict, x2, y2 = self.node.costmap_fix(x, y)
+            verdict, x2, y2 = self.node.costmap_fix(x, y, frame)
             if verdict == "blocked":
                 self.node.get_logger().warn(f"route: point {s + k + 1} is on an obstacle -- skipped")
                 continue
             if verdict == "moved":
                 self.node.get_logger().info(f"route: point {s + k + 1} moved {math.hypot(x2 - x, y2 - y):.2f} m clear")
-            poses.append(self._pose(x2, y2, math.atan2(y2 - prev[1], x2 - prev[0])))
+            poses.append(self._pose(x2, y2, math.atan2(y2 - prev[1], x2 - prev[0]), frame))
             prev = (x2, y2)
         if not poses:
             self.post(self.on_failed, "aborted")
@@ -183,9 +198,9 @@ class RouteExecutor:
         # CANCELED: ours (pause, cancel, STOP) — nothing to report
 
     @staticmethod
-    def _pose(x, y, yaw):
+    def _pose(x, y, yaw, frame="map"):
         p = PoseStamped()
-        p.header.frame_id = "map"
+        p.header.frame_id = frame
         # Stamp 0 = latest transform (tools/gps_goal.py, send_goal.py)
         p.pose.position.x, p.pose.position.y = x, y
         p.pose.orientation.z, p.pose.orientation.w = math.sin(yaw / 2), math.cos(yaw / 2)

@@ -5,6 +5,7 @@ translates /maps/list into the contract's MapList and serves each map's PNG at
 GET /maps/<name>.png -- plain HTTP beside /api, so a 50 kB picture never sits in
 front of a STOP on the command socket.
 """
+import math
 import urllib.parse
 
 import tornado.web
@@ -13,6 +14,44 @@ from . import api_pb2 as pb
 
 
 LIVE = "~live"          # the map being made, as its picture is named
+
+
+A_WGS84, E2_WGS84 = 6378137.0, 6.69437999014e-3
+
+
+def _enu_scale(lat0_deg):
+    """Metres per degree (east, north) at lat0: as dagger_bringup/geo_map.enu_scale."""
+    lat = math.radians(lat0_deg)
+    s = 1 - E2_WGS84 * math.sin(lat) ** 2
+    n = A_WGS84 / math.sqrt(s)
+    m = A_WGS84 * (1 - E2_WGS84) / s ** 1.5
+    return math.radians(1) * n * math.cos(lat), math.radians(1) * m
+
+
+def to_map(geo, lat, lon):
+    """lat/lon -> (x, y) on a placed map, exactly as geo_map.GeoMap.to_map (and so as
+    the map's picture was placed): geo = MapInfo.geo (lat0, lon0, yaw_rad, tx, ty)."""
+    lat0, lon0, rot, tx, ty = geo
+    kx, ky = _enu_scale(lat0)
+    e, n = (lon - lon0) * kx - tx, (lat - lat0) * ky - ty
+    c, s = math.cos(rot), math.sin(rot)
+    return c * e + s * n, -s * e + c * n
+
+
+def to_latlon(geo, x, y):
+    """(x, y) on a placed map -> lat/lon; the inverse of to_map."""
+    lat0, lon0, rot, tx, ty = geo
+    kx, ky = _enu_scale(lat0)
+    c, s = math.cos(rot), math.sin(rot)
+    e, n = c * x - s * y + tx, s * x + c * y + ty
+    return lat0 + n / ky, lon0 + e / kx
+
+
+def placed_map(msg, name):
+    """The MapInfo of a placed map in the list (with its tie), or None."""
+    if msg is None:
+        return None
+    return next((m for m in msg.maps if m.name == name and m.placed and len(m.geo) == 5), None)
 
 
 def picture_path(m):

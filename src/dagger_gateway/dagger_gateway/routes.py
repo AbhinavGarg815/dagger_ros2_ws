@@ -128,26 +128,49 @@ def wall_ms():
     return int(time.time() * 1000)
 
 
-class Route:
-    """A saved route: points (lat, lon) in driving order."""
+def map_to_odom(slam, odom):
+    """Where the map lies in odom, from the rover's pose in both at the same moment:
+    slam = (x, y, yaw) on the map, odom = (x, y, yaw) in odom. Returns (tx, ty, th)
+    with p_odom = R(th) * p_map + (tx, ty) -- a map mission's goals go to Nav2 in odom
+    this way (Step D1), so neither the GPS error nor the GPS map frame moves them."""
+    th = odom[2] - slam[2]
+    c, s = math.cos(th), math.sin(th)
+    return odom[0] - (c * slam[0] - s * slam[1]), odom[1] - (s * slam[0] + c * slam[1]), th
 
-    def __init__(self, rid, name, points, created_ms):
+
+def apply(t, x, y):
+    """p_odom for a map point, given map_to_odom's (tx, ty, th)."""
+    c, s = math.cos(t[2]), math.sin(t[2])
+    return t[0] + c * x - s * y, t[1] + s * x + c * y
+
+
+class Route:
+    """A saved route: points (lat, lon) in driving order. A map mission (Step D1)
+    also has the map it belongs to and its points ON that map (x, y), which are
+    what is driven; its lat/lon are for drawing and progress."""
+
+    def __init__(self, rid, name, points, created_ms, map_name="", xy=None):
         self.id, self.name, self.points, self.created_ms = rid, name, list(points), created_ms
+        self.map_name, self.xy = map_name, [tuple(p) for p in xy] if xy else None
 
     def summary(self):
         r = pb.RouteSummary(id=self.id, name=self.name, length_m=round(path_length(self.points), 2),
-                            created_at_ms=self.created_ms)
+                            created_at_ms=self.created_ms, map_name=self.map_name)
         for lat, lon in self.points:
             r.waypoints.add(latitude_deg=lat, longitude_deg=lon)
         return r
 
     def to_json(self):
-        return {"id": self.id, "name": self.name, "created_ms": self.created_ms,
-                "points": [[lat, lon] for lat, lon in self.points]}
+        d = {"id": self.id, "name": self.name, "created_ms": self.created_ms,
+             "points": [[lat, lon] for lat, lon in self.points]}
+        if self.map_name:
+            d["map"], d["xy"] = self.map_name, [[x, y] for x, y in self.xy]
+        return d
 
     @staticmethod
     def from_json(d):
-        return Route(d["id"], d["name"], [tuple(p) for p in d["points"]], int(d["created_ms"]))
+        return Route(d["id"], d["name"], [tuple(p) for p in d["points"]], int(d["created_ms"]),
+                     d.get("map", ""), d.get("xy"))
 
 
 class RouteStore:
@@ -182,8 +205,8 @@ class RouteStore:
             n += 1
         return f"Route {n}"
 
-    def save(self, name, points):
-        r = Route(f"r-{uuid.uuid4().hex[:8]}", name, points, wall_ms())
+    def save(self, name, points, map_name="", xy=None):
+        r = Route(f"r-{uuid.uuid4().hex[:8]}", name, points, wall_ms(), map_name, xy)
         path = os.path.join(self.folder, r.id + ".json")
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
@@ -249,12 +272,13 @@ def progress(points, target, here, start_total_m):
     return max(0.0, min(1.0, frac)), left
 
 
-def window(points, start, here, max_m):
+def window(points, start, here, max_m, dist=None):
     """Indices points[start:end] to send to Nav2 now: consecutive points from
     `start` while each is within `max_m` of the rover — the global costmap is a
     rolling window (40 m: ~18 m to a goal, tools/gps_goal.py). Always at least
     one point, so a far first point is still tried (Nav2 says if it cannot)."""
     end = start + 1
-    while end < len(points) and distance_m(here, points[end]) <= max_m:
+    dist = dist or distance_m             # lat/lon; map missions pass math.dist (metres)
+    while end < len(points) and dist(here, points[end]) <= max_m:
         end += 1
     return start, end

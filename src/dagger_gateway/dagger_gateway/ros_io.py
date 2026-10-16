@@ -29,6 +29,7 @@ from sensor_msgs.msg import BatteryState, CameraInfo, Imu, LaserScan, NavSatFix
 from std_msgs.msg import Bool, Int32, String
 from dagger_msgs.msg import MapList, MappingStatus, MarkerTracks, PersonTracks
 from std_srvs.srv import Trigger
+from geometry_msgs.msg import PoseWithCovarianceStamped
 from dagger_msgs.srv import MapName
 from sensor_msgs.msg import CompressedImage as _CompressedImage   # noqa: F401 -- the raw video's type
 
@@ -195,6 +196,15 @@ class RosIO(Node):
         self.on_mapping = None             # set by the gateway: called (rclpy thread) on a new status
         self.create_subscription(MappingStatus, "/maps/mapping", self.on_mapping_status, maps_qos,
                                  event_callbacks=QUIET_SUB)
+        # Map missions (Step D1): the shadow localization's pose and verdict on the shown
+        # map, and odom's pose history to pair with it (map -> odom at the same moment).
+        self.slam_pose = None              # (stamp s, x, y, yaw) on the map, from /slam/pose
+        self.slam_localized = False        # /slam/localized (latched), reset when the map changes
+        self.odom_hist = collections.deque(maxlen=1500)   # (stamp s, x, y, yaw), ~60 s at 25 Hz
+        self.create_subscription(PoseWithCovarianceStamped, "/slam/pose", self.on_slam_pose, 10,
+                                 event_callbacks=QUIET_SUB)
+        self.create_subscription(Bool, "/slam/localized", self.on_slam_localized, maps_qos,
+                                 event_callbacks=QUIET_SUB)
         self.map_clis = {kind: self.create_client(typ, srv) for kind, typ, srv in (
             ("show_map", MapName, "/maps/show"), ("delete_map", MapName, "/maps/delete"),
             ("save_map", MapName, "/maps/save_map"), ("start_mapping", Trigger, "/maps/start_mapping"),
@@ -284,6 +294,11 @@ class RosIO(Node):
             elif topic == "/mavros/local_position/odom":
                 p, v = msg.pose.pose.position, msg.twist.twist.linear
                 self.fcu.add((p.x, p.y, math.hypot(v.x, v.y)), now)
+            elif topic == "/odometry/filtered":
+                p, q = msg.pose.pose.position, msg.pose.pose.orientation
+                yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+                st = msg.header.stamp
+                self.odom_hist.append((st.sec + st.nanosec * 1e-9, p.x, p.y, yaw))
             elif topic == "/mavros/rc/out":
                 ch = msg.channels
                 self.rc_neutral.add(len(ch) > 2 and abs(ch[0] - 1500) <= 25
@@ -406,9 +421,35 @@ class RosIO(Node):
         self.costmap = m
 
     def on_map_list(self, m):
+        if self.maps is None or m.localizing != self.maps.localizing:
+            self.slam_localized = False    # a new localization says for itself
+            self.slam_pose = None
         self.maps = m
         if self.on_maps:
             self.on_maps()
+
+    def on_slam_pose(self, m):
+        p, q = m.pose.pose.position, m.pose.pose.orientation
+        yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+        st = m.header.stamp
+        self.slam_pose = (st.sec + st.nanosec * 1e-9, p.x, p.y, yaw)
+
+    def on_slam_localized(self, m):
+        self.slam_localized = bool(m.data) and bool(self.maps is not None and self.maps.localizing)
+
+    def map_pose_and_odom(self, max_gap_s=0.2):
+        """((x, y, yaw) on the map, (x, y, yaw) in odom) at the same moment -- the
+        latest SLAM pose and the odom pose nearest its stamp -- or None."""
+        sp, hist = self.slam_pose, list(self.odom_hist)
+        if sp is None or not hist:
+            return None
+        o = min(hist, key=lambda h: abs(h[0] - sp[0]))
+        if abs(o[0] - sp[0]) > max_gap_s:
+            return None
+        return (sp[1], sp[2], sp[3]), (o[1], o[2], o[3])
+
+    def odom_now(self):
+        return self.odom_hist[-1][1:] if self.odom_hist else None
 
     def on_mapping_status(self, m):
         self.mapping = m
@@ -437,8 +478,8 @@ class RosIO(Node):
         req = Trigger.Request() if trigger else MapName.Request(name=name)
         cli.call_async(req).add_done_callback(answered)
 
-    def costmap_fix(self, x, y):
-        """A goal (x, y) in the map frame against the global costmap: ('ok', x, y) when
+    def costmap_fix(self, x, y, frame="map"):
+        """A goal (x, y) in `frame` (map, or odom for map missions) against the global costmap: ('ok', x, y) when
         clear or not covered (outside, unknown, no costmap or transform yet),
         ('moved', x2, y2) to the nearest clear spot within NUDGE_M, or ('blocked', x, y)."""
         from .routes import NUDGE_M, clear_spot
@@ -446,7 +487,7 @@ class RosIO(Node):
         if cm is None:
             return "ok", x, y
         try:
-            tr = self.readiness.tf.lookup_transform(cm.header.frame_id, "map", Time())
+            tr = self.readiness.tf.lookup_transform(cm.header.frame_id, frame, Time())
         except Exception:  # noqa: BLE001 -- no transform yet: nothing to check against
             return "ok", x, y
         t, q = tr.transform.translation, tr.transform.rotation

@@ -3,12 +3,14 @@
 
     python3 src/dagger_gateway/test/test_routes.py     (or pytest)
 """
+import math
 import os
 import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, ".."))
+from dagger_gateway.routes import apply, map_to_odom, window as route_window  # noqa: E402
 from dagger_gateway.routes import (BLOCKED_COST, Recorder, RouteStore, Trail, clear_spot,  # noqa: E402
                                    distance_m, home_path, ll_to_en, mission_waypoints,
                                    path_length, progress, window)
@@ -97,6 +99,32 @@ def test_store_deletes_for_good():
         assert [r.name for r in store.all()] == ["To the gate"]
         assert [r.id for r in RouteStore(d).all()] == [b.id], "gone after a restart too"
         assert not store.name_taken("Yard loop")
+
+
+def test_a_map_point_lands_in_odom_where_the_two_poses_say():
+    # The rover at (3, 4) facing 90 deg on the map is at (10, -2) facing 30 deg in odom.
+    t = map_to_odom((3.0, 4.0, math.radians(90)), (10.0, -2.0, math.radians(30)))
+    x, y = apply(t, 3.0, 4.0)
+    assert abs(x - 10.0) < 1e-9 and abs(y + 2.0) < 1e-9, "the rover itself"
+    # 1 m ahead of the rover on the map (map +y, it faces 90 deg) is 1 m ahead in odom (30 deg).
+    x, y = apply(t, 3.0, 5.0)
+    assert abs(x - (10.0 + math.cos(math.radians(30)))) < 1e-9 and abs(y - (-2.0 + math.sin(math.radians(30)))) < 1e-9
+
+
+def test_a_map_mission_keeps_its_map_and_points():
+    with tempfile.TemporaryDirectory() as d:
+        store = RouteStore(d)
+        r = store.save("Shed run", [north(0), north(5)], "Yard", [(1.0, 2.0), (1.5, 7.0)])
+        again = RouteStore(d).get(r.id)
+        assert again.map_name == "Yard" and again.xy == [(1.0, 2.0), (1.5, 7.0)]
+        assert again.summary().map_name == "Yard"
+        g = store.save("Gate", [north(0), north(5)])
+        assert RouteStore(d).get(g.id).map_name == "" and RouteStore(d).get(g.id).xy is None
+
+
+def test_the_window_on_a_map_is_in_metres():
+    xy = [(0.0, 0.0), (10.0, 0.0), (20.0, 0.0), (40.0, 0.0)]
+    assert route_window(xy, 0, (0.0, 0.0), 15.0, dist=math.dist) == (0, 2)
 
 
 def test_store_skips_a_damaged_file():

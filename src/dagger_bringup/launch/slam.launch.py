@@ -2,6 +2,13 @@
 
     ros2 launch dagger_bringup slam.launch.py                              # SHADOW mapping (default)
     ros2 launch dagger_bringup slam.launch.py mode:=localization map:=lane3fix
+    ros2 launch dagger_bringup slam.launch.py mode:=localization shadow:=true map:=/abs/Yard
+
+SHADOW localization (shadow:=true, the app's map missions, map_manager): localizes
+on the saved map in its own slam_map frame and publishes NOTHING into the TF tree,
+like shadow mapping -- gps_map_odom keeps map->odom, Nav2 is untouched. The
+gateway reads /slam/pose and /slam/localized and sends a map mission's goals
+relative to the rover's SLAM pose, in odom.
 
 SHADOW mapping (default): builds a map from /scan + our fused odom but publishes
 NOTHING into the real TF tree -- map frame renamed slam_map, outputs under
@@ -48,6 +55,8 @@ def setup(context):
 
     if mode != "localization":
         raise RuntimeError(f"mode must be mapping or localization, not '{mode}'")
+    shadow = context.launch_configurations["shadow"] == "true"
+    frame = "slam_map" if shadow else "map"
     name = context.launch_configurations["map"]
     maps = os.path.join(bringup, "maps")
     base = name if os.path.isabs(name) else os.path.join(maps, name)
@@ -58,8 +67,8 @@ def setup(context):
     return [
         Node(package="slam_toolbox", executable="localization_slam_toolbox_node",
              name="slam_toolbox", output="screen", remappings=remaps,
-             parameters=[params, {"mode": "localization", "map_frame": "map",
-                                  "transform_publish_period": 0.05,
+             parameters=[params, {"mode": "localization", "map_frame": frame,
+                                  "transform_publish_period": 0.0 if shadow else 0.05,
                                   "map_file_name": base,
                                   # REQUIRED: without a start pose the localization node
                                   # silently does NOT load the map ("Map starting pose not
@@ -69,7 +78,8 @@ def setup(context):
                                   "map_start_pose": [0.0, 0.0, 0.0]}]),
         Node(package="dagger_bringup", executable="slam_geo_init",
              name="slam_geo_init", output="screen",
-             parameters=[{"geo_file": base + "_geo.yaml", "map_yaml": base + ".yaml"}]),
+             parameters=[{"geo_file": base + "_geo.yaml", "map_yaml": base + ".yaml",
+                          "map_frame": frame}]),
     ]
 
 
@@ -77,6 +87,8 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument("mode", default_value="mapping",
                               description="mapping (shadow) | localization"),
+        DeclareLaunchArgument("shadow", default_value="false", choices=["true", "false"],
+                              description="localization: true = own slam_map frame, no TF (map missions)"),
         DeclareLaunchArgument("map", default_value="lane3fix",
                               description="localization: map name in maps/ or absolute path, no extension"),
         OpaqueFunction(function=setup),

@@ -17,3 +17,7 @@ uint32 picture_height_px
 uint64 picture_version
 # When the map was saved (wall clock, ms since the Unix epoch).
 uint64 created_ms
+# When placed: the tie itself (<name>_geo.yaml), so lat/lon <-> map points can be
+# converted exactly as the picture was placed: [datum_lat, datum_lon, yaw_rad, tx, ty]
+# with p_enu = R(yaw) * p_map + t. Empty when not placed.
+float64[] geo

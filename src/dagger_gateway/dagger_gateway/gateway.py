@@ -36,7 +36,7 @@ from .route_executor import RouteExecutor
 from .rover_state import RoverCore, Settings
 from .routes import (Recorder, RouteStore, Trail, distance_m, home_path, mission_waypoints,
                      path_length, progress)
-from .maps import MapPicture, map_list_pb, mapping_pb
+from .maps import MapPicture, map_list_pb, mapping_pb, placed_map, to_map
 from .session import ApiSocket
 from .video import VideoSocket
 from .follow import follow_status, is_selectable, stamp_s, targets_msg, geometry
@@ -171,9 +171,14 @@ class Gateway:
         route = self.store.get(cmd.route_id)
         if route is None:
             return pb.REJECT_REASON_UNKNOWN_ROUTE
+        if route.map_name:
+            # A map mission: its map must be the one the rover is finding itself on, and found.
+            ml = self.node.maps
+            if not (ml is not None and ml.localizing == route.map_name and self.node.slam_localized):
+                return pb.REJECT_REASON_NOT_ON_MAP
         if not self.node.armed():
             return pb.REJECT_REASON_NOT_ARMED
-        blocked = self.route_exec.precheck(route.points)
+        blocked = self.route_exec.precheck(route.points, route.xy)
         if blocked:
             return pb.REJECT_REASON_WAYPOINT_BLOCKED, blocked
         self.set_home()
@@ -182,7 +187,7 @@ class Gateway:
         self.node.release_estop()
         self.node.ensure_guided()
         self.core.route_started(route.id, route.points, total)
-        self.route_exec.start(route.points, 0)
+        self.route_exec.start(route.points, 0, route.xy)
         return None
 
     # ---------------- following (Phase 4) ----------------
@@ -310,11 +315,22 @@ class Gateway:
         planned, not recorded). Moves nothing, so it is accepted in any state."""
         if len(cmd.waypoints) < 2:
             return pb.REJECT_REASON_TOO_SHORT
+        points = [(w.latitude_deg, w.longitude_deg) for w in cmd.waypoints]
+        xy = None
+        if cmd.map_name:
+            # Planned on a placed map (Step D1): kept as points ON it, converted with the
+            # map's own tie -- the same as placed its picture, so a waypoint sits exactly
+            # where it was put relative to the walls.
+            m = placed_map(self.node.maps, cmd.map_name)
+            if m is None:
+                return pb.REJECT_REASON_UNKNOWN_MAP
+            xy = [to_map(tuple(m.geo), lat, lon) for lat, lon in points]
         name = cmd.name.strip() or self.store.suggested_name()
         if self.store.name_taken(name):
             return pb.REJECT_REASON_NAME_TAKEN
-        route = self.store.save(name, [(w.latitude_deg, w.longitude_deg) for w in cmd.waypoints])
-        self.log.info(f"mission saved: '{route.name}' ({len(route.points)} waypoints) as {route.id}")
+        route = self.store.save(name, points, cmd.map_name, xy)
+        self.log.info(f"mission saved: '{route.name}' ({len(route.points)} waypoints) as {route.id}"
+                      + (f" on map '{cmd.map_name}'" if cmd.map_name else ""))
         self.broadcast_routes()
         return None
 
@@ -514,6 +530,10 @@ class Gateway:
                 st.recording.waypoints.add(latitude_deg=lat, longitude_deg=lon)
             st.recording.length_m = round(core.recording.length_m(), 2)
             st.recording.suggested_name = self.store.suggested_name()
+        ml = self.node.maps
+        if self.maps_on and ml is not None and ml.localizing:
+            st.map_position.map_name = ml.localizing
+            st.map_position.located = self.node.slam_localized
         mp = mapping_pb(self.node.mapping) if self.maps_on else None
         if mp is not None:
             st.mapping.CopyFrom(mp)
