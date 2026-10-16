@@ -27,7 +27,8 @@ from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPo
 from rclpy.qos_event import PublisherEventCallbacks, SubscriptionEventCallbacks
 from sensor_msgs.msg import BatteryState, CameraInfo, Imu, LaserScan, NavSatFix
 from std_msgs.msg import Bool, Int32, String
-from dagger_msgs.msg import MapList, MarkerTracks, PersonTracks
+from dagger_msgs.msg import MapList, MappingStatus, MarkerTracks, PersonTracks
+from std_srvs.srv import Trigger
 from dagger_msgs.srv import MapName
 from sensor_msgs.msg import CompressedImage as _CompressedImage   # noqa: F401 -- the raw video's type
 
@@ -163,6 +164,8 @@ class RosIO(Node):
         p("set_guided_on_start", True)
         # Step C1: the operator's saved maps, from the map manager (dagger_bringup/map_manager)
         p("maps_enabled", True)
+        # Step C2: making maps from the app (the map manager runs SLAM in shadow mode)
+        p("make_maps_enabled", True)
         g = lambda n: self.get_parameter(n).value  # noqa: E731
         self.param = g
         self.dry_run = bool(g("stop_dry_run"))
@@ -187,8 +190,15 @@ class RosIO(Node):
                               durability=DurabilityPolicy.TRANSIENT_LOCAL,
                               history=HistoryPolicy.KEEP_LAST, depth=1)
         self.create_subscription(MapList, "/maps/list", self.on_map_list, maps_qos, event_callbacks=QUIET_SUB)
-        self.map_clis = {"show_map": self.create_client(MapName, "/maps/show"),
-                         "delete_map": self.create_client(MapName, "/maps/delete")}
+        # Making a map (Step C2): the map manager's latched status; its services below.
+        self.mapping = None                # dagger_msgs/MappingStatus, replaced whole
+        self.on_mapping = None             # set by the gateway: called (rclpy thread) on a new status
+        self.create_subscription(MappingStatus, "/maps/mapping", self.on_mapping_status, maps_qos,
+                                 event_callbacks=QUIET_SUB)
+        self.map_clis = {kind: self.create_client(typ, srv) for kind, typ, srv in (
+            ("show_map", MapName, "/maps/show"), ("delete_map", MapName, "/maps/delete"),
+            ("save_map", MapName, "/maps/save_map"), ("start_mapping", Trigger, "/maps/start_mapping"),
+            ("discard_mapping", Trigger, "/maps/discard_mapping"))}
         self.person_tracks = None          # (PersonTracks, monotonic s)
         self.marker_tracks = None          # (MarkerTracks, monotonic s)
         rel10 = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST, depth=10)
@@ -400,23 +410,32 @@ class RosIO(Node):
         if self.on_maps:
             self.on_maps()
 
+    def on_mapping_status(self, m):
+        self.mapping = m
+        if self.on_mapping:
+            self.on_mapping()
+
     def map_call(self, kind, name, done):
-        """show_map / delete_map through the map manager; then done(ok), or done(None)
-        when it is not running or did not answer. Files only: nothing moves.
-        `done` is called in the rclpy thread."""
+        """A map manager service (show_map, delete_map, start_mapping, save_map,
+        discard_mapping); then done((ok, error)), or done(None) when it is not
+        running or did not answer. Nothing moves: maps are files, and while mapping
+        the operator drives. `done` is called in the rclpy thread."""
         cli = self.map_clis[kind]
         if not cli.service_is_ready():
             self.get_logger().error(f"{kind}: the map manager is not running")
             done(None)
             return
+        trigger = cli.srv_type is Trigger
 
         def answered(f):
             try:
-                done(bool(f.result().ok))
+                r = f.result()
+                done((bool(r.success), r.message) if trigger else (bool(r.ok), r.error))
             except Exception as e:  # noqa: BLE001
                 self.get_logger().error(f"{kind}: {e!r}")
                 done(None)
-        cli.call_async(MapName.Request(name=name)).add_done_callback(answered)
+        req = Trigger.Request() if trigger else MapName.Request(name=name)
+        cli.call_async(req).add_done_callback(answered)
 
     def costmap_fix(self, x, y):
         """A goal (x, y) in the map frame against the global costmap: ('ok', x, y) when

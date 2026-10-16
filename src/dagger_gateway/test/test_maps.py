@@ -9,7 +9,7 @@ from types import SimpleNamespace as NS
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, ".."))
-from dagger_gateway.maps import map_list_pb  # noqa: E402
+from dagger_gateway.maps import map_list_pb, mapping_pb  # noqa: E402
 
 
 def info(name, placed=True, version=1792047715):
@@ -40,6 +40,16 @@ def test_a_shown_map_no_longer_listed_is_not_shown():
     out = map_list_pb(NS(maps=[info("lane3fix")], shown="gone"))
     assert out.shown == ""
 
+
+
+def test_the_map_being_made():
+    assert mapping_pb(None) is None and mapping_pb(NS(active=False)) is None
+    live = info("", placed=False, version=17)
+    st = mapping_pb(NS(active=True, saving=False, suggested_name="Map 3", live=live))
+    assert st.suggested_name == "Map 3" and not st.saving
+    assert st.map.picture_path == "/maps/~live.png?v=17" and not st.map.placed
+    placed = mapping_pb(NS(active=True, saving=True, suggested_name="Map 3", live=info("", version=18)))
+    assert placed.saving and placed.map.placed and len(placed.map.corners) == 4
 
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):

@@ -18,6 +18,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/LidarOdomStatus.msg"
   "msg/MapInfo.msg"
   "msg/MapList.msg"
+  "msg/MappingStatus.msg"
   "srv/MapName.srv"
   DEPENDENCIES std_msgs geometry_msgs
 )

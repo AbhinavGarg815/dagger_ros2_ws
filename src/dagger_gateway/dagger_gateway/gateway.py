@@ -36,7 +36,7 @@ from .route_executor import RouteExecutor
 from .rover_state import RoverCore, Settings
 from .routes import (Recorder, RouteStore, Trail, distance_m, home_path, mission_waypoints,
                      path_length, progress)
-from .maps import MapPicture, map_list_pb
+from .maps import MapPicture, map_list_pb, mapping_pb
 from .session import ApiSocket
 from .video import VideoSocket
 from .follow import follow_status, is_selectable, stamp_s, targets_msg, geometry
@@ -52,7 +52,12 @@ CAPABILITIES = (pb.CAPABILITY_STOP, pb.CAPABILITY_READINESS, pb.CAPABILITY_ALERT
 ROUTE_CAPABILITIES = (pb.CAPABILITY_RUN_ROUTE, pb.CAPABILITY_RECORD_ROUTE, pb.CAPABILITY_PLAN_ROUTE,
                       pb.CAPABILITY_IMPORT_MISSION, pb.CAPABILITY_COME_HOME, pb.CAPABILITY_FOLLOW)
 IMPORT_WAIT_S = 4.0     # ImportMission is answered within this (the app waits 5 s)
-MAP_WAIT_S = 3.0        # ShowMap / DeleteMap: the map manager answers within this, or no answer
+MAP_WAIT_S = 3.0        # map commands: the map manager answers within this, or no answer
+# The map manager's words for "no" -> the contract's reasons.
+MAP_ERRORS = {"unknown map": pb.REJECT_REASON_UNKNOWN_MAP, "not mapping": pb.REJECT_REASON_NOT_IN_THIS_STATE,
+              "already mapping": pb.REJECT_REASON_NOT_IN_THIS_STATE, "name taken": pb.REJECT_REASON_NAME_TAKEN,
+              "nothing mapped": pb.REJECT_REASON_TOO_SHORT}
+MAP_COMMANDS = ("show_map", "delete_map", "start_mapping", "save_map", "discard_mapping")
 
 
 class Gateway:
@@ -67,9 +72,11 @@ class Gateway:
         self.routes_on = bool(g("routes_enabled"))
         self.maps_on = bool(g("maps_enabled"))
         self.capabilities = (CAPABILITIES + (ROUTE_CAPABILITIES if self.routes_on else ())
-                             + ((pb.CAPABILITY_MAPS,) if self.maps_on else ()))
+                             + ((pb.CAPABILITY_MAPS,) if self.maps_on else ())
+                             + ((pb.CAPABILITY_MAKE_MAP,) if self.maps_on and g("make_maps_enabled") else ()))
         self.map_calls = set()                     # ShowMap / DeleteMap ids being answered
         node.on_maps = lambda: loop.call_soon_threadsafe(self.broadcast_maps)
+        node.on_mapping = lambda: loop.call_soon_threadsafe(self.on_mapping_status)
         self.settings = Settings(heartbeat_ms=int(g("heartbeat_period_ms")),
                                  state_ms=int(g("state_period_ms")),
                                  follow_stop_ms=int(g("follow_stop_after_silence_ms")),
@@ -125,7 +132,7 @@ class Gateway:
         if kind == "import_mission" and self.routes_on:
             self.import_mission(cmd, sock)
             return None                    # answered once the autopilot's mission is read
-        if kind in ("show_map", "delete_map") and self.maps_on:
+        if kind in MAP_COMMANDS and self.maps_on:
             self.map_command(kind, cmd, sock)
             return None                    # answered once the map manager has done it
         handler = getattr(self, "on_" + kind, None) if (kind and self.routes_on) else None
@@ -398,38 +405,63 @@ class Gateway:
             s.send(maps=ml)
 
     def map_command(self, kind, cmd, sock):
-        """ShowMap / DeleteMap, done by the map manager (it owns the files). Moves
-        nothing: any state. UNKNOWN_MAP for a name not in the list; no answer when
-        the map manager is not running (the app says so)."""
+        """ShowMap / DeleteMap / StartMapping / SaveMap / DiscardMapping, done by the
+        map manager (it owns the files and SLAM). Nothing moves: maps are files, and
+        while mapping the operator drives with the sticks. No answer when the map
+        manager is not running (the app says so)."""
         cid = cmd.command_id
         if cid and cid in self.map_calls:
             return                         # a resend while waiting: one answer comes
-        name = getattr(cmd, kind).name
-        known = self.node.maps is not None and any(m.name == name for m in self.node.maps.maps)
+        name = getattr(getattr(cmd, kind), "name", "")
         answered = []
 
-        def answer(ok):
+        def answer(result):
             if answered:
                 return
             answered.append(True)
             self.map_calls.discard(cid)
-            if ok is None:
+            if result is None:
                 self.log.error(f"{kind} '{name}' from app {sock.request.remote_ip}: no answer from the map manager")
                 return
-            res = pb.CommandResult(command_id=cid, outcome=pb.COMMAND_OUTCOME_ACCEPTED) if ok else                 pb.CommandResult(command_id=cid, outcome=pb.COMMAND_OUTCOME_REJECTED,
-                                 reject_reason=pb.REJECT_REASON_UNKNOWN_MAP)
+            ok, error = result
+            if ok:
+                res = pb.CommandResult(command_id=cid, outcome=pb.COMMAND_OUTCOME_ACCEPTED)
+                if kind == "start_mapping":
+                    # As for recording: the operator drives with the sticks, so a STOP
+                    # latch is released; no mode change, nothing else moves.
+                    self.node.release_estop()
+                    self.core.mapping_started()
+            else:
+                why = MAP_ERRORS.get(error, pb.REJECT_REASON_NOT_SUPPORTED)
+                res = pb.CommandResult(command_id=cid, outcome=pb.COMMAND_OUTCOME_REJECTED, reject_reason=why)
             self.log.info(f"{kind} '{name}' from app {sock.request.remote_ip}: "
-                          + ("accepted" if ok else "UNKNOWN_MAP"))
+                          + ("accepted" if ok else pb.RejectReason.Name(res.reject_reason)))
             if cid:
                 self.remember(res)
             sock.send(command_result=res)
 
-        if not known and not (kind == "show_map" and name == ""):
-            answer(False)
-            return
+        if kind in ("show_map", "delete_map"):
+            known = self.node.maps is not None and any(m.name == name for m in self.node.maps.maps)
+            if not known and not (kind == "show_map" and name == ""):
+                answer((False, "unknown map"))
+                return
+        if kind == "start_mapping":
+            why = self.core.may_start(pb.JOB_MAKE_MAP)   # another job, or the LiDAR not ready
+            if why:
+                res = pb.CommandResult(command_id=cid, outcome=pb.COMMAND_OUTCOME_REJECTED, reject_reason=why)
+                self.log.info(f"start_mapping from app {sock.request.remote_ip}: {pb.RejectReason.Name(why)}")
+                if cid:
+                    self.remember(res)
+                sock.send(command_result=res)
+                return
         self.map_calls.add(cid)
-        self.node.map_call(kind, name, lambda ok: self.loop.call_soon_threadsafe(answer, ok))
+        self.node.map_call(kind, name, lambda r: self.loop.call_soon_threadsafe(answer, r))
         self.loop.call_later(MAP_WAIT_S, answer, None)
+
+    def on_mapping_status(self):
+        """The map manager says whether a map is being made (saved, discarded, restarted)."""
+        st = self.node.mapping
+        self.core.set_mapping(bool(st is not None and st.active))
 
     def route_list(self):
         return pb.RouteList(routes=[r.summary() for r in self.store.all()])
@@ -482,6 +514,9 @@ class Gateway:
                 st.recording.waypoints.add(latitude_deg=lat, longitude_deg=lon)
             st.recording.length_m = round(core.recording.length_m(), 2)
             st.recording.suggested_name = self.store.suggested_name()
+        mp = mapping_pb(self.node.mapping) if self.maps_on else None
+        if mp is not None:
+            st.mapping.CopyFrom(mp)
         return st
 
     def tick_state(self):

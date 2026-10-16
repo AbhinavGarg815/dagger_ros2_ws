@@ -225,6 +225,28 @@ def test_a_new_job_releases_a_stop_but_a_stop_keeps_the_recording():
     assert core.state == pb.OPERATING_STATE_STOPPED, "saving after a STOP leaves it stopped"
 
 
+def test_making_a_map_is_kept_after_a_stop_and_blocks_other_jobs():
+    core, _, act = ready()
+    assert core.may_start(pb.JOB_MAKE_MAP) is None
+    core.mapping_started()
+    assert core.state == pb.OPERATING_STATE_MAPPING
+    assert core.may_start(pb.JOB_RUN_ROUTE) == pb.REJECT_REASON_NOT_IN_THIS_STATE, "save or discard first"
+    core.stop()
+    assert core.state == pb.OPERATING_STATE_STOPPED and core.mapping
+    core.link_tick([60_000], now_s=1.0)
+    assert act.calls == [], "app silence changes nothing while the operator drives"
+    core.set_mapping(False)                          # the map manager: saved or discarded
+    assert not core.mapping and core.may_start(pb.JOB_RUN_ROUTE) is None
+
+
+def test_making_a_map_needs_the_lidar_not_gps():
+    core, _, _ = ready()
+    core.set_checks(all_checks(pb.CHECK_STATUS_PASS, {pb.CHECK_POSITION: (pb.CHECK_STATUS_FAIL, {})}))
+    assert core.may_start(pb.JOB_MAKE_MAP) is None, "indoors: no GPS needed"
+    core.set_checks(all_checks(pb.CHECK_STATUS_PASS, {pb.CHECK_OBSTACLE_SENSOR: (pb.CHECK_STATUS_FAIL, {})}))
+    assert core.may_start(pb.JOB_MAKE_MAP) == pb.REJECT_REASON_NOT_READY
+
+
 def test_silence_while_recording_changes_nothing():
     core, _, act = ready()
     core.recording_started(object())

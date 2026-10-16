@@ -12,9 +12,34 @@ import tornado.web
 from . import api_pb2 as pb
 
 
+LIVE = "~live"          # the map being made, as its picture is named
+
+
 def picture_path(m):
     """Where the app fetches a map's picture; changes whenever the picture does."""
-    return f"/maps/{urllib.parse.quote(m.name)}.png?v={m.picture_version}"
+    return f"/maps/{urllib.parse.quote(m.name or LIVE)}.png?v={m.picture_version}"
+
+
+def summary_pb(m):
+    """dagger_msgs/MapInfo -> the contract's MapSummary."""
+    corners = list(zip(m.corner_lat, m.corner_lon)) if m.placed else []
+    placed = len(corners) == 4
+    return pb.MapSummary(
+        name=m.name, width_m=m.width_m, height_m=m.height_m, placed=placed,
+        corners=[pb.Waypoint(latitude_deg=la, longitude_deg=lo) for la, lo in corners] if placed else [],
+        placed_error_m=m.placed_error_m, picture_path=picture_path(m),
+        picture_width_px=m.picture_width_px, picture_height_px=m.picture_height_px,
+        created_at_ms=m.created_ms)
+
+
+def mapping_pb(status):
+    """dagger_msgs/MappingStatus -> the contract's MappingProgress, or None when not mapping."""
+    if status is None or not status.active:
+        return None
+    out = pb.MappingProgress(suggested_name=status.suggested_name, saving=status.saving)
+    if status.live.picture:
+        out.map.CopyFrom(summary_pb(status.live))
+    return out
 
 
 def map_list_pb(msg):
@@ -23,14 +48,7 @@ def map_list_pb(msg):
     if msg is None:
         return out
     for m in msg.maps:
-        corners = list(zip(m.corner_lat, m.corner_lon)) if m.placed else []
-        out.maps.append(pb.MapSummary(
-            name=m.name, width_m=m.width_m, height_m=m.height_m, placed=len(corners) == 4,
-            corners=[pb.Waypoint(latitude_deg=la, longitude_deg=lo) for la, lo in corners]
-            if len(corners) == 4 else [],
-            placed_error_m=m.placed_error_m, picture_path=picture_path(m),
-            picture_width_px=m.picture_width_px, picture_height_px=m.picture_height_px,
-            created_at_ms=m.created_ms))
+        out.maps.append(summary_pb(m))
     out.shown = msg.shown if any(m.name == msg.shown for m in msg.maps) else ""
     return out
 
@@ -42,8 +60,11 @@ class MapPicture(tornado.web.RequestHandler):
         self.gw = gw
 
     def get(self, name):
-        msg = self.gw.node.maps
-        found = next((m for m in msg.maps if m.name == name), None) if msg is not None else None
+        msg, live = self.gw.node.maps, self.gw.node.mapping
+        if name == LIVE:
+            found = live.live if live is not None and live.active and live.live.picture else None
+        else:
+            found = next((m for m in msg.maps if m.name == name), None) if msg is not None else None
         if found is None:
             raise tornado.web.HTTPError(404)
         try:

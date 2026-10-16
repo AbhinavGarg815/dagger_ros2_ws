@@ -11,6 +11,7 @@ OPERATING STATE, first match wins:
     RUNNING_ROUTE  the gateway's own route is running
     COMING_HOME    ... or the way home (Return to Home) is
     RECORDING      the operator drives, the gateway notes the route
+    MAPPING        the operator drives, the map manager makes a map (Step C2)
     STARTING       a readiness check is still PENDING
     NOT_READY      a check FAILs -- never READY next to a failing check
     READY
@@ -33,7 +34,7 @@ import time
 from . import api_pb2 as pb
 
 ALL_JOBS = (pb.JOB_RUN_ROUTE, pb.JOB_GO_TO_PLACE, pb.JOB_FOLLOW, pb.JOB_COME_HOME,
-            pb.JOB_RECORD_ROUTE)
+            pb.JOB_RECORD_ROUTE, pb.JOB_MAKE_MAP)    # making a map needs the LiDAR, not GPS
 DRIVING_JOBS = (pb.JOB_RUN_ROUTE, pb.JOB_GO_TO_PLACE, pb.JOB_COME_HOME)
 
 # The nine checks, in the order the app shows them, and the jobs each one blocks.
@@ -150,6 +151,7 @@ class RoverCore:
         self.target = 0                    # index of the point being driven to
         self.route_total_m = 0.0
         self.recording = None              # routes.Recorder while recording, kept after a STOP
+        self.mapping = False               # the map manager is making a map, kept after a STOP
         self.pause_silence_s = 0.0
         self.follow_off_sent = -1e9        # monotonic s: link-loss follow-off, resent at most 1/s
 
@@ -208,7 +210,7 @@ class RoverCore:
     def may_start(self, job):
         """None if `job` may start now, else the reject reason. A STOP does not
         prevent it: starting a job is what releases a STOP."""
-        if self.recording is not None or self.route is not None or self.following:
+        if self.recording is not None or self.route is not None or self.following or self.mapping:
             return pb.REJECT_REASON_NOT_IN_THIS_STATE
         for cid, (status, _) in self.checks.items():
             if status in (pb.CHECK_STATUS_FAIL, pb.CHECK_STATUS_PENDING) and job in self.blocks(cid):
@@ -266,6 +268,17 @@ class RoverCore:
         self.recording = None
         self.update(pb.STATE_REASON_OPERATOR)
 
+    def mapping_started(self):
+        self.stopped = False
+        self.mapping = True
+        self.update(pb.STATE_REASON_OPERATOR)
+
+    def set_mapping(self, on):
+        """From the map manager's /maps/mapping: saved, discarded or (re)started."""
+        if on != self.mapping:
+            self.mapping = on
+            self.update(pb.STATE_REASON_OPERATOR)
+
     # ---------------- state ----------------
     def derive(self):
         if self.stopped:
@@ -278,6 +291,8 @@ class RoverCore:
             return pb.OPERATING_STATE_COMING_HOME if self.going_home else pb.OPERATING_STATE_RUNNING_ROUTE
         if self.recording is not None:
             return pb.OPERATING_STATE_RECORDING
+        if self.mapping:
+            return pb.OPERATING_STATE_MAPPING
         statuses = [s for s, _ in self.checks.values()]
         if pb.CHECK_STATUS_PENDING in statuses:
             return pb.OPERATING_STATE_STARTING

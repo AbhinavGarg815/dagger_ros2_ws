@@ -52,7 +52,35 @@ class SavedMap:
 
 def picture_png(pgm_path, png_path):
     """The map picture as the app wants it: grey + alpha, 0 = wall, 255 = free, clear = never seen."""
-    v = np.asarray(Image.open(pgm_path).convert("L"))
+    picture_from_array(np.asarray(Image.open(pgm_path).convert("L")), png_path)
+
+
+def grid_to_pgm(grid):
+    """A nav_msgs/OccupancyGrid (as slam_toolbox publishes /slam/map) -> the picture
+    map_saver_cli would write: rows top first, walls 0, free 254, never seen 205."""
+    w, h = grid.info.width, grid.info.height
+    occ = np.asarray(grid.data, dtype=np.int16).reshape(h, w)[::-1]     # the grid's row 0 is the bottom
+    v = np.full((h, w), 205, np.uint8)
+    v[(occ >= 0) & (occ <= 25)] = 254
+    v[occ >= 65] = 0
+    return v
+
+
+def save_grid(folder, name, grid):
+    """Write <name>.pgm + <name>.yaml as map_saver_cli does (trinary), so the
+    localization launch and MapStore read it like any other map."""
+    v = grid_to_pgm(grid)
+    Image.fromarray(v, "L").save(os.path.join(folder, name + ".pgm"))
+    o = grid.info.origin.position
+    tmp = os.path.join(folder, name + ".yaml.tmp")
+    with open(tmp, "w") as f:
+        f.write(f"image: {name}.pgm\nmode: trinary\nresolution: {grid.info.resolution}\n"
+                f"origin: [{o.x}, {o.y}, 0]\nnegate: 0\noccupied_thresh: 0.65\nfree_thresh: 0.25\n")
+    os.replace(tmp, os.path.join(folder, name + ".yaml"))
+
+
+def picture_from_array(v, png_path):
+    """map_saver values (walls 0, free 254, never seen 205) -> the app's PNG at png_path."""
     wall = v < WALL_BELOW
     # A wall is one 5 cm pixel: shrunk on a handset it vanishes. Drawn WALL_GROW
     # pixels thicker each way (the picture only; the map itself is untouched).
@@ -128,6 +156,22 @@ class MapStore:
                 err = float(yaml.safe_load(f).get("residual_rms_m", 0.0))
         created = int(os.path.getmtime(self.path(name, ".yaml")) * 1000)
         return SavedMap(name, w, h, res, corners, err, created, png)
+
+    # -- naming a new map ----------------------------------------------------
+    @staticmethod
+    def safe_name(name):
+        """A name that is also a file name: letters, digits, space, - and _ (others become -)."""
+        clean = "".join(c if c.isalnum() or c in " -_" else "-" for c in name.strip())
+        return clean.strip(" -")[:40]
+
+    def name_taken(self, name):
+        return name in self.maps or any(os.path.exists(self.path(name, s)) for s in SUFFIXES)
+
+    def suggested_name(self):
+        n = len(self.maps) + 1
+        while self.name_taken(f"Map {n}"):
+            n += 1
+        return f"Map {n}"
 
     # -- what is shown under missions --------------------------------------
     def shown(self):
