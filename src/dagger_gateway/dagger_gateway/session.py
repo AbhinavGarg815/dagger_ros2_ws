@@ -18,6 +18,7 @@ import tornado.websocket
 from google.protobuf.message import DecodeError
 
 from . import api_pb2 as pb
+from .base import sites_pb
 from .rover_state import mono_ms, wall_ms
 
 
@@ -95,6 +96,8 @@ class ApiSocket(tornado.websocket.WebSocketHandler):
             self.send(routes=self.gw.route_list())   # Phase 3: the saved routes
         if self.gw.maps_on:
             self.send(maps=self.gw.map_list())       # Step C1: the saved maps
+        if self.gw.base_on:
+            self.send(base_sites=sites_pb(self.gw.node.base_sites))   # Step R1: the base's sites
         if first:
             self.send_state()              # the picture at once, not 200 ms later
 

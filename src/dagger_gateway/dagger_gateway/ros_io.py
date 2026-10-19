@@ -27,12 +27,13 @@ from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPo
 from rclpy.qos_event import PublisherEventCallbacks, SubscriptionEventCallbacks
 from sensor_msgs.msg import BatteryState, CameraInfo, Imu, LaserScan, NavSatFix
 from std_msgs.msg import Bool, Int32, String
-from dagger_msgs.msg import MapList, MappingStatus, MarkerTracks, PersonTracks
+from dagger_msgs.msg import BaseSiteList, BaseStatus, MapList, MappingStatus, MarkerTracks, PersonTracks
 from std_srvs.srv import Trigger
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from dagger_msgs.srv import MapName
 from sensor_msgs.msg import CompressedImage as _CompressedImage   # noqa: F401 -- the raw video's type
 
+from .base import rtk_of
 from .readiness import Readiness
 from .rover_state import pending_checks
 
@@ -167,6 +168,8 @@ class RosIO(Node):
         p("maps_enabled", True)
         # Step C2: making maps from the app (the map manager runs SLAM in shadow mode)
         p("make_maps_enabled", True)
+        # Step R1: the RTK base station, through dagger_bringup/base_station
+        p("base_enabled", True)
         g = lambda n: self.get_parameter(n).value  # noqa: E731
         self.param = g
         self.dry_run = bool(g("stop_dry_run"))
@@ -208,7 +211,16 @@ class RosIO(Node):
         self.map_clis = {kind: self.create_client(typ, srv) for kind, typ, srv in (
             ("show_map", MapName, "/maps/show"), ("delete_map", MapName, "/maps/delete"),
             ("save_map", MapName, "/maps/save_map"), ("start_mapping", Trigger, "/maps/start_mapping"),
-            ("discard_mapping", Trigger, "/maps/discard_mapping"))}
+            ("discard_mapping", Trigger, "/maps/discard_mapping"),
+            # The RTK base (Step R1), through dagger_bringup/base_station: same calling pattern.
+            ("survey_base", Trigger, "/base/survey"), ("use_base_site", MapName, "/base/use_site"),
+            ("save_base_site", MapName, "/base/save_site"), ("delete_base_site", MapName, "/base/delete_site"))}
+        self.base_status = None            # dagger_msgs/BaseStatus, latched
+        self.base_sites = None             # dagger_msgs/BaseSiteList, latched
+        self.on_base_sites = None          # set by the gateway: called (rclpy thread) on a new list
+        self.create_subscription(BaseStatus, "/base/status", self.on_base_status, maps_qos, event_callbacks=QUIET_SUB)
+        self.create_subscription(BaseSiteList, "/base/sites", self.on_base_site_list, maps_qos,
+                                 event_callbacks=QUIET_SUB)
         self.person_tracks = None          # (PersonTracks, monotonic s)
         self.marker_tracks = None          # (MarkerTracks, monotonic s)
         rel10 = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST, depth=10)
@@ -334,6 +346,8 @@ class RosIO(Node):
             st.position.CopyFrom(pb.Position(
                 latitude_deg=fix.latitude, longitude_deg=fix.longitude, horizontal_accuracy_m=acc,
                 quality=pb.QUALITY_GOOD if good else pb.QUALITY_POOR))
+            if self.param("base_enabled"):
+                st.position.rtk = rtk_of(raw.fix_type)       # RTK from the Cube's own fix type
 
         # dual-antenna heading straight from GPS_RAW_INT: cdeg clockwise from true
         # north, 0 and 65535 = unknown (gps_heading_imu republishes the same for EK3)
@@ -427,6 +441,14 @@ class RosIO(Node):
         self.maps = m
         if self.on_maps:
             self.on_maps()
+
+    def on_base_status(self, m):
+        self.base_status = m
+
+    def on_base_site_list(self, m):
+        self.base_sites = m
+        if self.on_base_sites:
+            self.on_base_sites()
 
     def on_slam_pose(self, m):
         p, q = m.pose.pose.position, m.pose.pose.orientation

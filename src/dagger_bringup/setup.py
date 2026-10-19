@@ -51,6 +51,7 @@ setup(
             "ui_server = dagger_bringup.ui_server:main",
             "fcu_config = dagger_bringup.fcu_config:main",
             "map_manager = dagger_bringup.map_manager:main",
+            "base_station = dagger_bringup.base_station:main",
         ],
     },
 )

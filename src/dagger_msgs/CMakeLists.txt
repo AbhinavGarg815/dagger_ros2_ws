@@ -19,6 +19,9 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/MapInfo.msg"
   "msg/MapList.msg"
   "msg/MappingStatus.msg"
+  "msg/BaseStatus.msg"
+  "msg/BaseSite.msg"
+  "msg/BaseSiteList.msg"
   "srv/MapName.srv"
   DEPENDENCIES std_msgs geometry_msgs
 )

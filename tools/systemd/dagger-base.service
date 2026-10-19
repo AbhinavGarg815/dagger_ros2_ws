@@ -1,0 +1,20 @@
+[Unit]
+Description=Dagger: the RTK base station for the app (base_station: MAVLink to the base through the Cube)
+PartOf=dagger.target
+After=dagger-clock.service dagger-drive.service
+Wants=dagger-clock.service
+
+[Service]
+Type=simple
+User=nvidia
+Group=dagger
+# Talks to the base over MAVROS' raw MAVLink topics; nothing on the rover moves.
+ExecStart=/home/jetson/ros2_ws/tools/systemd/dagger-ros-env.sh ros2 run dagger_bringup base_station
+Restart=on-failure
+RestartSec=3
+KillSignal=SIGINT
+KillMode=mixed
+TimeoutStopSec=10
+
+[Install]
+WantedBy=dagger.target

@@ -36,6 +36,7 @@ from .route_executor import RouteExecutor
 from .rover_state import RoverCore, Settings
 from .routes import (Recorder, RouteStore, Trail, distance_m, home_path, mission_waypoints,
                      path_length, progress)
+from .base import base_pb, sites_pb
 from .maps import MapPicture, map_list_pb, mapping_pb, placed_map, to_map
 from .session import ApiSocket
 from .video import VideoSocket
@@ -56,8 +57,13 @@ MAP_WAIT_S = 3.0        # map commands: the map manager answers within this, or 
 # The map manager's words for "no" -> the contract's reasons.
 MAP_ERRORS = {"unknown map": pb.REJECT_REASON_UNKNOWN_MAP, "not mapping": pb.REJECT_REASON_NOT_IN_THIS_STATE,
               "already mapping": pb.REJECT_REASON_NOT_IN_THIS_STATE, "name taken": pb.REJECT_REASON_NAME_TAKEN,
-              "nothing mapped": pb.REJECT_REASON_TOO_SHORT}
+              "nothing mapped": pb.REJECT_REASON_TOO_SHORT,
+              "unknown site": pb.REJECT_REASON_UNKNOWN_SITE, "not surveyed": pb.REJECT_REASON_NOT_IN_THIS_STATE}
 MAP_COMMANDS = ("show_map", "delete_map", "start_mapping", "save_map", "discard_mapping")
+BASE_COMMANDS = ("survey_base", "use_base_site", "save_base_site", "delete_base_site")
+# While one of these runs the base must not change: the rover's position would jump.
+JOB_STATES = (pb.OPERATING_STATE_RUNNING_ROUTE, pb.OPERATING_STATE_PAUSED, pb.OPERATING_STATE_FOLLOWING,
+              pb.OPERATING_STATE_COMING_HOME, pb.OPERATING_STATE_RECORDING, pb.OPERATING_STATE_MAPPING)
 
 
 class Gateway:
@@ -73,7 +79,10 @@ class Gateway:
         self.maps_on = bool(g("maps_enabled"))
         self.capabilities = (CAPABILITIES + (ROUTE_CAPABILITIES if self.routes_on else ())
                              + ((pb.CAPABILITY_MAPS,) if self.maps_on else ())
-                             + ((pb.CAPABILITY_MAKE_MAP,) if self.maps_on and g("make_maps_enabled") else ()))
+                             + ((pb.CAPABILITY_MAKE_MAP,) if self.maps_on and g("make_maps_enabled") else ())
+                             + ((pb.CAPABILITY_BASE_STATION,) if g("base_enabled") else ()))
+        self.base_on = bool(g("base_enabled"))
+        node.on_base_sites = lambda: loop.call_soon_threadsafe(self.broadcast_base_sites)
         self.map_calls = set()                     # ShowMap / DeleteMap ids being answered
         node.on_maps = lambda: loop.call_soon_threadsafe(self.broadcast_maps)
         node.on_mapping = lambda: loop.call_soon_threadsafe(self.on_mapping_status)
@@ -132,7 +141,7 @@ class Gateway:
         if kind == "import_mission" and self.routes_on:
             self.import_mission(cmd, sock)
             return None                    # answered once the autopilot's mission is read
-        if kind in MAP_COMMANDS and self.maps_on:
+        if (kind in MAP_COMMANDS and self.maps_on) or (kind in BASE_COMMANDS and self.base_on):
             self.map_command(kind, cmd, sock)
             return None                    # answered once the map manager has done it
         handler = getattr(self, "on_" + kind, None) if (kind and self.routes_on) else None
@@ -456,6 +465,21 @@ class Gateway:
                 self.remember(res)
             sock.send(command_result=res)
 
+        def refuse(why):
+            res = pb.CommandResult(command_id=cid, outcome=pb.COMMAND_OUTCOME_REJECTED, reject_reason=why)
+            self.log.info(f"{kind} '{name}' from app {sock.request.remote_ip}: {pb.RejectReason.Name(why)}")
+            if cid:
+                self.remember(res)
+            sock.send(command_result=res)
+
+        if kind in BASE_COMMANDS:
+            st = self.node.base_status
+            if kind != "delete_base_site" and not (st is not None and st.heard):
+                refuse(pb.REJECT_REASON_NO_BASE)
+                return
+            if kind in ("survey_base", "use_base_site") and self.core.state in JOB_STATES:
+                refuse(pb.REJECT_REASON_NOT_IN_THIS_STATE)
+                return
         if kind in ("show_map", "delete_map"):
             known = self.node.maps is not None and any(m.name == name for m in self.node.maps.maps)
             if not known and not (kind == "show_map" and name == ""):
@@ -473,6 +497,11 @@ class Gateway:
         self.map_calls.add(cid)
         self.node.map_call(kind, name, lambda r: self.loop.call_soon_threadsafe(answer, r))
         self.loop.call_later(MAP_WAIT_S, answer, None)
+
+    def broadcast_base_sites(self):
+        bs = sites_pb(self.node.base_sites)
+        for s in self.apps():
+            s.send(base_sites=bs)
 
     def on_mapping_status(self):
         """The map manager says whether a map is being made (saved, discarded, restarted)."""
@@ -530,6 +559,8 @@ class Gateway:
                 st.recording.waypoints.add(latitude_deg=lat, longitude_deg=lon)
             st.recording.length_m = round(core.recording.length_m(), 2)
             st.recording.suggested_name = self.store.suggested_name()
+        if self.base_on:
+            st.base.CopyFrom(base_pb(self.node.base_status))
         ml = self.node.maps
         if self.maps_on and ml is not None and ml.localizing:
             st.map_position.map_name = ml.localizing
