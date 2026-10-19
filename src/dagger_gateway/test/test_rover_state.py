@@ -262,6 +262,19 @@ def test_a_rover_without_a_battery_monitor_has_no_battery_check():
     assert core.state == pb.OPERATING_STATE_READY and active(core) == []
 
 
+def test_the_autopilot_disagreeing_with_gps_replaces_not_accurate():
+    core, _, _ = make()
+    core.set_checks(all_checks(pb.CHECK_STATUS_PASS, {pb.CHECK_POSITION: (pb.CHECK_STATUS_FAIL, {})}))
+    assert pb.ALERT_POSITION_NOT_ACCURATE in core.alerts.active
+    core.set_position_disagrees(True, {"degrees": 129, "metres": 5.7})
+    assert pb.ALERT_POSITION_DISAGREES in core.alerts.active
+    assert pb.ALERT_POSITION_NOT_ACCURATE not in core.alerts.active, "the specific reason, not the general one"
+    core.set_checks(all_checks(pb.CHECK_STATUS_PASS, {pb.CHECK_POSITION: (pb.CHECK_STATUS_FAIL, {})}))
+    assert pb.ALERT_POSITION_NOT_ACCURATE not in core.alerts.active, "still, on the next readiness round"
+    core.set_position_disagrees(False, {})
+    assert pb.ALERT_POSITION_NOT_ACCURATE in core.alerts.active and pb.ALERT_POSITION_DISAGREES not in core.alerts.active
+
+
 def test_gps_lost_pauses_with_a_question_that_ends_with_the_pause():
     core, events, _ = make()
     core.set_checks(all_checks(pb.CHECK_STATUS_PASS))

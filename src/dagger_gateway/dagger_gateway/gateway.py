@@ -754,8 +754,7 @@ class Gateway:
         a.set(pb.ALERT_RTK_LOST, self.rtk_watch.feed(now, sending, fix_type) and not self.gps.lost)
         fcu, gnss, apart = self.node.disagreement()
         off = self.disagree.feed(now, not self.gps.lost and self.cube_source == 1, fcu, gnss, apart)
-        a.set(pb.ALERT_POSITION_DISAGREES, off, pb.SEVERITY_WARNING,
-              {"degrees": round(self.disagree.deg), "metres": round(self.disagree.m, 1)})
+        c.set_position_disagrees(off, {"degrees": round(self.disagree.deg), "metres": round(self.disagree.m, 1)})
 
     def tick_state(self):
         checks = self.node.checks

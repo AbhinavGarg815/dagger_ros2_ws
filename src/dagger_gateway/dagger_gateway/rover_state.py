@@ -154,6 +154,7 @@ class RoverCore:
         self.mapping = False               # the map manager is making a map, kept after a STOP
         self.pause_silence_s = 0.0
         self.gps_ask_lidar_m = None        # GPS lost: metres driven on LiDAR when it asks again (D3)
+        self.position_disagrees = False    # the autopilot vs GPS (D3): says more than "not accurate"
         self.follow_off_sent = -1e9        # monotonic s: link-loss follow-off, resent at most 1/s
 
     # ---------------- inputs ----------------
@@ -319,10 +320,19 @@ class RoverCore:
         self.alerts.set(pb.ALERT_GPS_LOST, paused and self.pause_reason == pb.STATE_REASON_GPS_LOST,
                         pb.SEVERITY_ACTION, asked_again)
 
+    def set_position_disagrees(self, on, values):
+        """The autopilot's heading/position against the receiver's (gps_watch.DisagreeWatch)."""
+        self.alerts.set(pb.ALERT_POSITION_DISAGREES, on, pb.SEVERITY_WARNING, values)
+        if on != self.position_disagrees:
+            self.position_disagrees = on
+            self._readiness_alerts()
+
     def _readiness_alerts(self):
         st = {cid: s for cid, (s, _) in self.checks.items()}
         fail = lambda cid: st.get(cid) == pb.CHECK_STATUS_FAIL  # noqa: E731
-        self.alerts.set(pb.ALERT_POSITION_NOT_ACCURATE, fail(pb.CHECK_POSITION))
+        # When the autopilot disagrees with GPS (its indoor source outdoors), that is the
+        # reason and the fix: "not accurate, wait under open sky" would send the operator wrong.
+        self.alerts.set(pb.ALERT_POSITION_NOT_ACCURATE, fail(pb.CHECK_POSITION) and not self.position_disagrees)
         # WARN too: a heading gap or a patchy one is "not reliable yet" to the operator
         self.alerts.set(pb.ALERT_HEADING_UNKNOWN, st.get(pb.CHECK_HEADING) in (pb.CHECK_STATUS_FAIL,
                                                                              pb.CHECK_STATUS_WARN))
