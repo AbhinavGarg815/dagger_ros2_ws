@@ -20,6 +20,7 @@ Ports in use elsewhere: 8080 follow page, 8081 round-trip test, 8082 fake rover
 """
 import asyncio
 import collections
+import math
 import signal
 import sys
 import threading
@@ -34,8 +35,9 @@ from . import api_pb2 as pb
 from .ros_io import RosIO
 from .route_executor import RouteExecutor
 from .rover_state import RoverCore, Settings
-from .routes import (Recorder, RouteStore, Trail, distance_m, home_path, mission_waypoints,
-                     path_length, progress)
+from .routes import (Recorder, RouteStore, Trail, distance_m, home_path, ll_to_odom, mission_waypoints,
+                     odom_to_ll, path_length, progress)
+from .gps_watch import DisagreeWatch, GpsWatch, RtkWatch
 from .base import base_pb, sites_pb
 from .maps import MapPicture, map_list_pb, mapping_pb, placed_map, to_map
 from .session import ApiSocket
@@ -96,6 +98,18 @@ class Gateway:
         self.results = collections.OrderedDict()   # command_id -> CommandResult (rule 3)
         self.importing = set()                     # ImportMission ids being read
         self.trail = None                          # routes.Trail from home, once the first job starts
+        # Step D3, GPS lost during a job (DaggerGCS docs/proposals/operating-modes.md section 4)
+        self.gps = GpsWatch(float(g("gps_lost_after_s")), float(g("gps_lost_accuracy_m")),
+                            float(g("gps_back_after_s")))
+        self.rtk_watch = RtkWatch(float(g("gps_lost_after_s")))
+        self.disagree = DisagreeWatch(float(g("gps_lost_after_s")), float(g("position_disagree_deg")),
+                                      float(g("position_disagree_m")))
+        self.lidar_limit_m = float(g("lidar_carry_on_m"))
+        self.snaps = collections.deque(maxlen=15)  # (monotonic s, gps_snapshot), 1 a second while GPS is good
+        self.lost_snap = None                      # the last good one before GPS went
+        self.lidar_m, self.lidar_last = 0.0, None  # driven on odometry since the last answer
+        self.cube_source = 1                       # the EKF source set last asked for (GPS at boot)
+        self.switching = False
         self.video_sockets = set()                 # apps watching the picture (video.VideoSocket)
         node.on_video = lambda raw: loop.call_soon_threadsafe(self.on_video_frame, raw)
         node.on_targets = lambda: loop.call_soon_threadsafe(self.on_targets)
@@ -248,14 +262,22 @@ class Gateway:
         return None
 
     def on_come_home(self, _):
-        """Return to Home: back along the trail to where the session's first job started."""
-        why = self.core.may_start(pb.JOB_COME_HOME)
+        """Return to Home: back along the trail to where the session's first job started.
+        Also the answer to "GPS lost" (Step D3): the paused route ends and the rover goes
+        home -- on odometry, along the trail's odom points, while GPS is lost."""
+        gps_question = self.core.route == "paused" and self.core.pause_reason == pb.STATE_REASON_GPS_LOST
+        why = None if gps_question else self.core.may_start(pb.JOB_COME_HOME)
         if why:
             return why
         if self.trail is None:
             return pb.REJECT_REASON_NO_HOME
         if not self.node.armed():
             return pb.REJECT_REASON_NOT_ARMED
+        if self.gps.lost:
+            return self.come_home_on_odometry(gps_question)
+        if gps_question:
+            self.route_exec.cancel()
+            self.core.route_cancelled()
         here = self.node.good_fix()
         if here is None:
             return pb.REJECT_REASON_NOT_READY
@@ -266,6 +288,34 @@ class Gateway:
         self.node.ensure_guided()
         self.core.route_started("", points, total, home=True)
         self.route_exec.start(points, 0)
+        return None
+
+    def come_home_on_odometry(self, gps_question):
+        odom = self.node.odom_now()
+        if odom is None or len(self.trail.odom) < 1 or self.lost_snap is None:
+            return pb.REJECT_REASON_NOT_READY
+        if gps_question:
+            self.route_exec.cancel()
+            self.core.route_cancelled()
+        xy = home_path(self.trail.odom, odom[:2], dist=math.dist)
+        points = [odom_to_ll(x, y, self.lost_snap) for x, y in xy]
+        here = odom_to_ll(odom[0], odom[1], self.lost_snap)
+        total = distance_m(here, points[0]) + path_length(points)
+        self.log.warn(f"return to home with no GPS, on odometry: {len(points)} points, {total:.0f} m")
+        self.lidar_m = 0.0
+        self.core.route_started("", points, total, home=True)
+
+        def go(ok):
+            if self.core.route != "running" or not self.core.going_home:
+                return
+            if not ok:                         # the Cube kept GPS: no position to drive on
+                self.core.gps_ask_lidar_m = None
+                self.core.route_paused(pb.STATE_REASON_GPS_LOST)
+                return
+            self.node.release_estop()
+            self.node.ensure_guided()
+            self.route_exec.start(points, 0, odom=xy)
+        self.switch_source(2, go)
         return None
 
     def on_pause_route(self, _):
@@ -280,11 +330,31 @@ class Gateway:
             return pb.REJECT_REASON_NOT_IN_THIS_STATE
         if not self.node.armed():
             return pb.REJECT_REASON_NOT_ARMED
+        if self.gps.lost:
+            # Carry on with no GPS (Step D3): a GPS route goes on, on odometry, from the
+            # last good moment; a new allowance of lidar_carry_on_m before it asks again.
+            if self.route_exec.mode == "gps":
+                if self.lost_snap is None:
+                    return pb.REJECT_REASON_NOT_READY
+                self.route_exec.to_odom(ll_to_odom(self.core.route_points, self.lost_snap))
+                self.log.warn("GPS lost: carrying on, on odometry")
+            self.lidar_m, self.core.gps_ask_lidar_m = 0.0, None
+            if self.cube_source != 2:
+                def go(ok):
+                    if self.core.route != "paused":
+                        return
+                    if ok:
+                        self.resume_now()
+                self.switch_source(2, go)
+                return None
+        self.resume_now()
+        return None
+
+    def resume_now(self):
         self.node.release_estop()
         self.node.ensure_guided()
         self.core.route_resumed()
         self.route_exec.resume()
-        return None
 
     def on_cancel_route(self, _):
         if self.core.route is None:
@@ -538,8 +608,18 @@ class Gateway:
         st.readiness.extend(self.core.readiness_msgs())
         st.active_alerts.extend(self.core.alerts.sorted())
         core = self.core
+        here = self.node.good_fix()
+        est = self.estimated_position()
+        if est is not None:
+            # GPS lost (Step D3): where odometry says the rover is since the last good fix --
+            # not the autopilot's lat/lon, which is not tied to the Earth on its LiDAR source.
+            st.position.CopyFrom(pb.Position(latitude_deg=est[0], longitude_deg=est[1],
+                                             horizontal_accuracy_m=round(2.0 + 0.01 * self.lidar_m, 1),
+                                             quality=pb.QUALITY_POOR, rtk=pb.RTK_STATUS_NONE,
+                                             from_odometry=True))
+            here = est
         if core.route is not None and core.route_points:
-            frac, left = progress(core.route_points, core.target, self.node.good_fix(), core.route_total_m)
+            frac, left = progress(core.route_points, core.target, here, core.route_total_m)
             st.route.route_id = core.route_id
             st.route.target_index = core.target + 1
             st.route.waypoint_count = len(core.route_points)
@@ -570,6 +650,113 @@ class Gateway:
             st.mapping.CopyFrom(mp)
         return st
 
+    # ---------------- GPS lost (Step D3) ----------------
+    def estimated_position(self):
+        """(lat, lon) from odometry while GPS is lost, else None."""
+        if not self.gps.lost or self.lost_snap is None:
+            return None
+        odom = self.node.odom_now()
+        return odom_to_ll(odom[0], odom[1], self.lost_snap) if odom is not None else None
+
+    def parked(self):
+        c = self.core
+        return c.route != "running" and not c.following and c.recording is None and not c.mapping
+
+    def switch_source(self, source_set, then):
+        """Ask the Cube for EK3 source set 1 (GPS) or 2 (LiDAR); then(ok) on this loop."""
+        if self.cube_source == source_set:
+            then(True)
+            return
+        self.switching = True
+
+        def done(ok):
+            self.switching = False
+            if ok:
+                self.cube_source = source_set
+            then(ok)
+        self.node.set_ekf_source(source_set, lambda ok: self.loop.call_soon_threadsafe(done, ok))
+
+    def on_gps_lost(self):
+        before = self.gps.bad_since
+        good = [snap for t, snap in self.snaps if before is None or t < before]
+        self.lost_snap = good[-1] if good else (self.snaps[-1][1] if self.snaps else None)
+        self.log.warn("GPS lost" + ("" if self.lost_snap else " -- and no good moment kept to go on from"))
+        c, ex = self.core, self.route_exec
+        if c.route != "running" or ex is None:
+            return
+        if ex.mode == "map":
+            # A map mission carries on (owner, 2026-10-19): a moment's stop while the Cube's source switches.
+            ex.pause()
+
+            def go(ok):
+                if c.route != "running":
+                    return
+                if ok:
+                    self.node.ensure_guided()
+                    ex.resume()
+                else:
+                    c.gps_ask_lidar_m = None
+                    c.route_paused(pb.STATE_REASON_GPS_LOST)
+            self.switch_source(2, go)
+        elif ex.mode == "gps":
+            ex.pause()
+            c.gps_ask_lidar_m = None
+            c.route_paused(pb.STATE_REASON_GPS_LOST)
+
+    def on_gps_back(self):
+        self.log.warn("GPS back")
+        self.lost_snap = None
+        c = self.core
+        if c.route == "paused" and c.pause_reason == pb.STATE_REASON_GPS_LOST:
+            # The question is moot: an ordinary pause; carrying on drives on GPS again.
+            c.pause_reason = pb.STATE_REASON_OPERATOR
+            c.update(pb.STATE_REASON_OPERATOR)
+
+    def watch_gps(self):
+        now = time.monotonic()
+        fix_type, acc, heading_ok = self.node.gps_sample()
+        ev = self.gps.feed(now, fix_type, acc, heading_ok)
+        if not self.gps.lost and self.gps.good_sample(fix_type, acc, heading_ok) \
+                and (not self.snaps or now - self.snaps[-1][0] >= 1.0):
+            snap = self.node.gps_snapshot()
+            if snap is not None:
+                self.snaps.append((now, snap))
+        if ev == "lost":
+            self.on_gps_lost()
+        elif ev == "back":
+            self.on_gps_back()
+        odom = self.node.odom_now()
+        c, ex = self.core, self.route_exec
+        if self.trail is not None and not c.going_home and odom is not None:
+            self.trail.add_odom(odom[0], odom[1])
+        # Driven on odometry with no GPS: an allowance, then ask again.
+        on_odometry = c.route == "running" and ex is not None and ex.mode == "odom" and self.gps.lost
+        if on_odometry and odom is not None:
+            if self.lidar_last is not None:
+                self.lidar_m += math.dist(self.lidar_last, odom[:2])
+            self.lidar_last = odom[:2]
+            if self.lidar_m >= self.lidar_limit_m:
+                self.log.warn(f"GPS still lost after {self.lidar_m:.0f} m on odometry: asking again")
+                ex.pause()
+                c.gps_ask_lidar_m = self.lidar_m
+                c.route_paused(pb.STATE_REASON_GPS_LOST)
+        else:
+            self.lidar_last = None
+        # GPS back and the rover parked: the Cube back on GPS.
+        if self.cube_source == 2 and not self.gps.lost and not self.switching and self.parked():
+            self.switch_source(1, lambda ok: self.log.warn("FCU back on GPS" if ok else "FCU: back on GPS refused"))
+        a, driving = c.alerts, c.route == "running"
+        a.set(pb.ALERT_NO_GPS_ON_LIDAR, on_odometry, pb.SEVERITY_WARNING,
+              {"metres_left": max(0, round(self.lidar_limit_m - self.lidar_m))})
+        a.set(pb.ALERT_NO_GPS_ON_MAP, self.gps.lost and driving and ex is not None and ex.mode == "map")
+        base = self.node.base_status if self.base_on else None
+        sending = base is not None and base.heard and base.mode == base.MODE_FIXED
+        a.set(pb.ALERT_RTK_LOST, self.rtk_watch.feed(now, sending, fix_type) and not self.gps.lost)
+        fcu, gnss, apart = self.node.disagreement()
+        off = self.disagree.feed(now, not self.gps.lost and self.cube_source == 1, fcu, gnss, apart)
+        a.set(pb.ALERT_POSITION_DISAGREES, off, pb.SEVERITY_WARNING,
+              {"degrees": round(self.disagree.deg), "metres": round(self.disagree.m, 1)})
+
     def tick_state(self):
         checks = self.node.checks
         if checks is not self.checks_in:   # readiness replaces the dict once a second
@@ -587,6 +774,7 @@ class Gateway:
             here = here or self.node.good_fix()
             if here is not None:
                 self.trail.add(*here)
+        self.watch_gps()
         self.core.link_tick([s.silence_ms() for s in self.apps()])
         for s in self.apps():
             s.send_state()

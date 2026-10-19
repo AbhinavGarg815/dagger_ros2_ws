@@ -19,14 +19,14 @@ import time
 
 from action_msgs.srv import CancelGoal
 from mavros_msgs.msg import GPSRAW, RCIn, RCOut, State, WaypointList
-from mavros_msgs.srv import SetMode, WaypointPull
+from mavros_msgs.srv import CommandLong, SetMode, WaypointPull
 from nav_msgs.msg import OccupancyGrid, Odometry
 from rclpy.node import Node
 from rclpy.time import Time
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.qos_event import PublisherEventCallbacks, SubscriptionEventCallbacks
 from sensor_msgs.msg import BatteryState, CameraInfo, Imu, LaserScan, NavSatFix
-from std_msgs.msg import Bool, Int32, String
+from std_msgs.msg import Bool, Float64, Int32, String
 from dagger_msgs.msg import BaseSiteList, BaseStatus, MapList, MappingStatus, MarkerTracks, PersonTracks
 from std_srvs.srv import Trigger
 from geometry_msgs.msg import PoseWithCovarianceStamped
@@ -59,6 +59,10 @@ TOPICS = (
     ("/mavros/rc/in", RCIn, True),
     ("/mavros/gpsstatus/gps1/raw", GPSRAW, False),
     ("/mavros/global_position/global", NavSatFix, False),
+    # Step D3: the receiver's own fix and the autopilot's own heading, to catch the
+    # two disagreeing (the Cube on its LiDAR source set outdoors, 2026-10-19)
+    ("/mavros/global_position/raw/fix", NavSatFix, False),
+    ("/mavros/global_position/compass_hdg", Float64, False),
     ("/mavros/battery", BatteryState, False),
     ("/gps/heading_imu", Imu, True),
     # Not /rslidar_points: ~1 MB x 10 Hz copied into Python only to be counted.
@@ -170,6 +174,21 @@ class RosIO(Node):
         p("make_maps_enabled", True)
         # Step R1: the RTK base station, through dagger_bringup/base_station
         p("base_enabled", True)
+        # Step D3, GPS lost during a job (owner, 2026-10-19): lost after this long with no
+        # 3-D fix, accuracy worse than the limit, or no GNSS heading; back after good for
+        # gps_back_after_s. Carrying on with no GPS and no map: this far, then ask again.
+        p("gps_lost_after_s", 5.0)
+        p("gps_lost_accuracy_m", 3.0)
+        p("gps_back_after_s", 10.0)
+        p("lidar_carry_on_m", 50.0)
+        # The autopilot vs the receiver, while GPS is good: warn past these, for gps_lost_after_s.
+        p("position_disagree_deg", 20.0)
+        p("position_disagree_m", 3.0)
+        # Switch the Cube's EKF source set (MAV_CMD_SET_EKF_SOURCE_SET): 2 (LiDAR) when GPS is
+        # lost and the rover goes on, 1 (GPS) when it is back and the rover is parked. It
+        # changes the flight controller's behaviour: OFF until the owner has tried it with
+        # the RC in hand; meanwhile the gateway only logs what it would send.
+        p("ekf_source_switching", False)
         g = lambda n: self.get_parameter(n).value  # noqa: E731
         self.param = g
         self.dry_run = bool(g("stop_dry_run"))
@@ -236,6 +255,7 @@ class RosIO(Node):
         self.create_subscription(String, "/follow/state", self.on_follow_state, 10,
                                  event_callbacks=QUIET_SUB)
         self.mode_cli = self.create_client(SetMode, "/mavros/set_mode")
+        self.cmd_cli = self.create_client(CommandLong, "/mavros/cmd/command")
         self.cancel_clis = [self.create_client(CancelGoal, f"/{a}/_action/cancel_goal")
                             for a in ("navigate_to_pose", "navigate_through_poses")]
         self.create_timer(0.1, self.stream_estop)
@@ -633,6 +653,64 @@ class RosIO(Node):
             self.get_logger().warn("route: FCU -> GUIDED")
         else:
             self.get_logger().error("route: /mavros/set_mode not available -- FCU NOT set to GUIDED")
+
+    # ---------------- GPS lost (Step D3) ----------------
+    def gps_sample(self):
+        """(fix_type, accuracy m, GNSS heading valid) from the receiver, or Nones."""
+        raw = self.fresh("/mavros/gpsstatus/gps1/raw", 2.0)
+        if raw is None:
+            return None, None, False
+        acc = raw.h_acc / 1000.0 if raw.h_acc > 0 else None
+        return raw.fix_type, acc, raw.yaw not in (0, 65535)
+
+    def gps_snapshot(self):
+        """What turns lat/lon into odom while GPS is good: ((lat, lon) of the autopilot's
+        fix, (x, y) of its local position, map->odom (tx, ty, th)) -- all now -- or None."""
+        fix = self.fresh("/mavros/global_position/global", 1.0)
+        local = self.fresh("/mavros/local_position/odom", 1.0)
+        if fix is None or local is None or not (math.isfinite(fix.latitude) and math.isfinite(fix.longitude)):
+            return None
+        try:
+            tr = self.readiness.tf.lookup_transform("odom", "map", Time())
+        except Exception:  # noqa: BLE001 -- no gps_map_odom transform (yet)
+            return None
+        t, q = tr.transform.translation, tr.transform.rotation
+        th = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+        p = local.pose.pose.position
+        return (fix.latitude, fix.longitude), (p.x, p.y), (t.x, t.y, th)
+
+    def disagreement(self):
+        """(autopilot heading deg, GNSS heading deg, metres between their positions), Nones if unknown."""
+        hdg, raw = self.fresh("/mavros/global_position/compass_hdg", 2.0), self.fresh("/mavros/gpsstatus/gps1/raw", 2.0)
+        fused, rfix = self.fresh("/mavros/global_position/global", 2.0), self.fresh("/mavros/global_position/raw/fix", 2.0)
+        gnss = raw.yaw / 100.0 if raw is not None and raw.yaw not in (0, 65535) else None
+        apart = None
+        if fused is not None and rfix is not None:
+            from .routes import distance_m
+            apart = distance_m((fused.latitude, fused.longitude), (rfix.latitude, rfix.longitude))
+        return (hdg.data if hdg is not None else None), gnss, apart
+
+    def set_ekf_source(self, source_set, done):
+        """Ask the Cube to use EK3 source set 1 (GPS) or 2 (LiDAR, ExternalNav); done(ok)
+        in the rclpy thread. With ekf_source_switching off, only logged (done(True))."""
+        if not self.param("ekf_source_switching"):
+            self.get_logger().warn(f"EKF source set {source_set}: switching is off (ekf_source_switching) -- not sent")
+            done(True)
+            return
+        if self.dry_run or not self.cmd_cli.service_is_ready():
+            self.get_logger().error(f"EKF source set {source_set}: /mavros/cmd/command not available")
+            done(False)
+            return
+        req = CommandLong.Request(command=42007, param1=float(source_set))   # MAV_CMD_SET_EKF_SOURCE_SET
+        self.get_logger().warn(f"FCU: EKF source set -> {source_set}")
+
+        def answered(fut):
+            r = fut.result()
+            ok = r is not None and r.success
+            if not ok:
+                self.get_logger().error(f"FCU refused EKF source set {source_set}")
+            done(ok)
+        self.cmd_cli.call_async(req).add_done_callback(answered)
 
     def good_fix(self):
         """(lat, lon) of a 3-D fix, or None: what a recording keeps."""

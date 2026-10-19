@@ -262,6 +262,23 @@ def test_a_rover_without_a_battery_monitor_has_no_battery_check():
     assert core.state == pb.OPERATING_STATE_READY and active(core) == []
 
 
+def test_gps_lost_pauses_with_a_question_that_ends_with_the_pause():
+    core, events, _ = make()
+    core.set_checks(all_checks(pb.CHECK_STATUS_PASS))
+    core.route_started("r-1", [(0, 0), (1, 1)], 10.0)
+    core.route_paused(pb.STATE_REASON_GPS_LOST)
+    a = core.alerts.active.get(pb.ALERT_GPS_LOST)
+    assert core.state == pb.OPERATING_STATE_PAUSED and a is not None and a.severity == pb.SEVERITY_ACTION
+    assert dict(a.values) == {}, "the first time: no metres yet"
+    core.route_resumed()
+    assert pb.ALERT_GPS_LOST not in core.alerts.active
+    core.gps_ask_lidar_m = 50.4
+    core.route_paused(pb.STATE_REASON_GPS_LOST)
+    assert dict(core.alerts.active[pb.ALERT_GPS_LOST].values) == {"lidar_m": 50.0}, "asked again, with how far"
+    core.route_cancelled()
+    assert pb.ALERT_GPS_LOST not in core.alerts.active
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

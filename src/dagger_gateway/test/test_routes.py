@@ -12,8 +12,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, ".."))
 from dagger_gateway.routes import apply, map_to_odom, window as route_window  # noqa: E402
 from dagger_gateway.routes import (BLOCKED_COST, Recorder, RouteStore, Trail, clear_spot,  # noqa: E402
-                                   distance_m, home_path, ll_to_en, mission_waypoints,
-                                   path_length, progress, window)
+                                   distance_m, en_to_ll, home_path, ll_to_en, ll_to_odom, mission_waypoints,
+                                   odom_to_ll, path_length, progress, window)
 
 LAT0, LON0 = 26.7480, 75.8553   # near the yard (Jaipur)
 
@@ -151,6 +151,35 @@ def test_progress_and_window():
     assert window(pts, 0, north(0), 15.0) == (0, 2)      # 0 and 10 m: within 15 m
     assert window(pts, 2, north(15), 15.0) == (2, 4)     # 20 and 30 m from the rover at 15 m
     assert window(pts, 3, north(0), 15.0) == (3, 4), "a far point is still tried, alone"
+
+
+def test_gps_points_go_to_odom_from_the_last_good_moment_and_back():
+    """Step D3: the GPS map frame turned 30 deg from odom and shifted; a point 10 m north
+    of the fix lands 10 m north of the local position, then through map->odom."""
+    assert all(abs(a - b) < 1e-9 for a, b in zip(en_to_ll(*ll_to_en(*north(12, 7), LAT0, LON0), LAT0, LON0),
+                                               north(12, 7)))
+    th = math.radians(30)
+    snap = ((LAT0, LON0), (100.0, 50.0), (3.0, -2.0, th))
+    (x, y), = ll_to_odom([north(10)], snap)
+    mx, my = 100.0, 60.0                                   # local + (0 E, 10 N)
+    want = (3.0 + math.cos(th) * mx - math.sin(th) * my, -2.0 + math.sin(th) * mx + math.cos(th) * my)
+    assert math.dist((x, y), want) < 0.02, ((x, y), want)
+    lat, lon = odom_to_ll(x, y, snap)
+    assert distance_m((lat, lon), north(10)) < 0.01, "and back where it was"
+
+
+def test_the_trail_home_is_kept_in_odom_too_and_driven_with_its_own_distance():
+    t = Trail(north(0), (0.0, 0.0))
+    for k in range(1, 6):
+        t.add_odom(float(k), 0.0)
+    assert t.odom[0] == (0.0, 0.0) and len(t.odom) >= 5
+    way = home_path(t.odom, (6.0, 0.0), dist=math.dist)
+    assert way[-1] == (0.0, 0.0), "ends at home in odom"
+    t.reset()
+    assert t.odom == [(0.0, 0.0)]
+    late = Trail(north(0))                                 # home set before odometry came
+    late.add_odom(5.0, 5.0)
+    assert late.home_odom == (5.0, 5.0) and late.odom == [(5.0, 5.0)]
 
 
 if __name__ == "__main__":

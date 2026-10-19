@@ -153,6 +153,7 @@ class RoverCore:
         self.recording = None              # routes.Recorder while recording, kept after a STOP
         self.mapping = False               # the map manager is making a map, kept after a STOP
         self.pause_silence_s = 0.0
+        self.gps_ask_lidar_m = None        # GPS lost: metres driven on LiDAR when it asks again (D3)
         self.follow_off_sent = -1e9        # monotonic s: link-loss follow-off, resent at most 1/s
 
     # ---------------- inputs ----------------
@@ -313,6 +314,10 @@ class RoverCore:
                         pb.SEVERITY_ACTION, {"seconds": round(self.pause_silence_s, 1)})
         self.alerts.set(pb.ALERT_NO_PATH, paused and self.pause_reason == pb.STATE_REASON_PATH_BLOCKED,
                         pb.SEVERITY_PROBLEM)
+        # Step D3: GPS lost, the route paused and the rover asks: Come home / Carry on / Stop here.
+        asked_again = {"lidar_m": round(self.gps_ask_lidar_m)} if self.gps_ask_lidar_m is not None else {}
+        self.alerts.set(pb.ALERT_GPS_LOST, paused and self.pause_reason == pb.STATE_REASON_GPS_LOST,
+                        pb.SEVERITY_ACTION, asked_again)
 
     def _readiness_alerts(self):
         st = {cid: s for cid, (s, _) in self.checks.items()}

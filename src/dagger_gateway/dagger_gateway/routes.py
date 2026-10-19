@@ -30,6 +30,15 @@ def ll_to_en(lat, lon, lat0, lon0):
     return math.radians(lon - lon0) * n * math.cos(p), math.radians(lat - lat0) * m
 
 
+def en_to_ll(east, north, lat0, lon0):
+    """ll_to_en backwards: (lat, lon) east/north metres from (lat0, lon0)."""
+    p = math.radians(lat0)
+    s = 1 - E2 * math.sin(p) ** 2
+    m = A * (1 - E2) / s ** 1.5
+    n = A / math.sqrt(s)
+    return lat0 + math.degrees(north / m), lon0 + math.degrees(east / (n * math.cos(p)))
+
+
 def distance_m(a, b):
     e, n = ll_to_en(b[0], b[1], a[0], a[1])
     return math.hypot(e, n)
@@ -69,31 +78,43 @@ LOOP_CUT_M = 2.0            # where the trail comes back this close, the loop is
 
 
 class Trail:
-    """Where the rover has been since home, a point every TRAIL_STEP_M."""
+    """Where the rover has been since home, a point every TRAIL_STEP_M -- in lat/lon,
+    and in odom too (Step D3): the way home with no GPS is driven on odometry."""
 
-    def __init__(self, home):
+    def __init__(self, home, home_odom=None):
         self.home = tuple(home)
         self.points = [self.home]
+        self.home_odom = tuple(home_odom) if home_odom is not None else None
+        self.odom = [self.home_odom] if self.home_odom is not None else []
 
     def add(self, lat, lon):
         if distance_m(self.points[-1], (lat, lon)) >= TRAIL_STEP_M:
             self.points.append((lat, lon))
 
+    def add_odom(self, x, y):
+        if not self.odom:
+            self.home_odom = (x, y)          # home set with no odometry yet: its first point
+            self.odom = [self.home_odom]
+        elif math.dist(self.odom[-1], (x, y)) >= TRAIL_STEP_M:
+            self.odom.append((x, y))
+
     def reset(self):
         """Home again: the trail starts over."""
         self.points = [self.home]
+        self.odom = [self.home_odom] if self.home_odom is not None else []
 
 
-def home_path(trail, here):
+def home_path(trail, here, dist=distance_m):
     """The way home: from `here` back along `trail` (oldest first, trail[0] = home),
-    loops skipped, a point every HOME_POINT_SPACING_M, ending exactly at home."""
+    loops skipped, a point every HOME_POINT_SPACING_M, ending exactly at home.
+    dist: distance_m for lat/lon, math.dist for odom (x, y)."""
     back = [tuple(here)] + list(reversed(trail))
     out, i = [back[0]], 0
     while i < len(back) - 1:
         # jump to the last trail point that comes back near this one (a loop), else the next
-        near = [k for k in range(i + 2, len(back)) if distance_m(back[k], back[i]) < LOOP_CUT_M]
+        near = [k for k in range(i + 2, len(back)) if dist(back[k], back[i]) < LOOP_CUT_M]
         i = near[-1] if near else i + 1
-        if i == len(back) - 1 or distance_m(back[i], out[-1]) >= HOME_POINT_SPACING_M:
+        if i == len(back) - 1 or dist(back[i], out[-1]) >= HOME_POINT_SPACING_M:
             out.append(back[i])
     return out[1:] or [tuple(trail[0])]
 
@@ -142,6 +163,29 @@ def apply(t, x, y):
     """p_odom for a map point, given map_to_odom's (tx, ty, th)."""
     c, s = math.cos(t[2]), math.sin(t[2])
     return t[0] + c * x - s * y, t[1] + s * x + c * y
+
+
+def ll_to_odom(points, snap):
+    """GPS points as odom (x, y), with GPS lost (Step D3), from the last good moment:
+    snap = ((lat, lon) of the fix, (x, y) of the autopilot's local position -- the GPS
+    map frame, where tools/gps_goal.py puts lat/lon goals -- and map->odom as
+    (tx, ty, th), p_odom = R(th) * p_map + t). Odom does not jump when GPS goes, so
+    the goals stay where they were; they drift with odometry (~1 % of distance)."""
+    (lat0, lon0), (lx, ly), t = snap
+    out = []
+    for lat, lon in points:
+        de, dn = ll_to_en(lat, lon, lat0, lon0)
+        out.append(apply(t, lx + de, ly + dn))
+    return out
+
+
+def odom_to_ll(x, y, snap):
+    """ll_to_odom backwards, for one point: where the rover is, worked out from odom."""
+    (lat0, lon0), (lx, ly), (tx, ty, th) = snap
+    c, s = math.cos(th), math.sin(th)
+    dx, dy = x - tx, y - ty
+    mx, my = c * dx + s * dy, -s * dx + c * dy       # R(th)^T (p_odom - t)
+    return en_to_ll(mx - lx, my - ly, lat0, lon0)
 
 
 class Route:

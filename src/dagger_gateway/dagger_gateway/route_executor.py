@@ -9,6 +9,9 @@ window, where the map lies in odom comes from the SLAM pose and the odom pose at
 the same moment (routes.map_to_odom), and the goals go to Nav2 in `odom` -- where
 it plans anyway -- so the GPS error and the GPS map frame play no part. Nav2 in
 SLAM map mode (map_source:=slam) is still refused for GPS routes.
+With GPS LOST (Step D3) a GPS route, or the way home, is driven on ODOMETRY: its
+points converted once, from the last good GPS moment, to odom (routes.ll_to_odom /
+the trail's own odom points), and sent to Nav2 in `odom` as they are.
 
 The global costmap is a 40 m rolling window, so the route goes to Nav2 a window
 at a time (routes.window: the next points within `window_m` of the rover) as one
@@ -43,14 +46,26 @@ class RouteExecutor:
         self.lock = threading.Lock()
         self.points, self.index, self.batch = [], 0, (0, 0)
         self.xy = None                     # a map mission's points on its map, else None
+        self.odom = None                   # the points in odom (GPS lost, Step D3), else None
         self.handle, self.gen = None, 0
 
     # ---------------- from the loop ----------------
-    def start(self, points, index=0, xy=None):
+    def start(self, points, index=0, xy=None, odom=None):
         with self.lock:
             self.points, self.index = list(points), index
             self.xy = list(xy) if xy else None
+            self.odom = list(odom) if odom else None
         self._send_window()
+
+    @property
+    def mode(self):
+        """'map' (a map mission), 'odom' (driven on odometry, GPS lost) or 'gps'."""
+        return "map" if self.xy else "odom" if self.odom else "gps"
+
+    def to_odom(self, odom):
+        """From now on drive the same points, given in odom (GPS lost); the place is kept."""
+        with self.lock:
+            self.odom = list(odom)
 
     def resume(self):
         self._send_window()
@@ -66,13 +81,13 @@ class RouteExecutor:
     def cancel(self):
         self.pause()
         with self.lock:
-            self.points, self.index, self.xy = [], 0, None
+            self.points, self.index, self.xy, self.odom = [], 0, None, None
 
     def precheck(self, points, xy=None):
         """Before a route starts: the first waypoint (1-based) in the first window that
         sits on an obstacle with no clear spot within 1 m, or 0. Points beyond the
         window are checked as their window goes out (and skipped if blocked)."""
-        w = self._window_poses(points, 0, xy)
+        w = self._window_poses(points, 0, xy, self.odom)
         if w is None:
             return 0
         s, _, goals, _, frame = w
@@ -82,9 +97,16 @@ class RouteExecutor:
         return 0
 
     # ---------------- Nav2 ----------------
-    def _window_poses(self, points, index, xy=None):
+    def _window_poses(self, points, index, xy=None, odom=None):
         """(s, e, [(x, y) goals], here, frame) for the next window, or None with no position.
-        GPS routes: goals in `map` (the GPS map frame). Map missions (xy): in `odom`."""
+        GPS routes: goals in `map` (the GPS map frame). Map missions (xy), and any route
+        driven on odometry (odom): in `odom`."""
+        if odom:
+            now = self.node.odom_now()
+            if now is None:
+                return None
+            s, e = window(odom, index, now[:2], self.window_m, dist=math.dist)
+            return s, e, list(odom[s:e]), (now[0], now[1]), "odom"
         if xy:
             pair = self.node.map_pose_and_odom()
             now = self.node.odom_now()
@@ -110,7 +132,7 @@ class RouteExecutor:
         return "gps_map_odom" in set(self.node.get_node_names())
 
     def _send_window(self):
-        if self.xy is None and not self._map_mode_gps():
+        if self.xy is None and self.odom is None and not self._map_mode_gps():
             self.node.get_logger().error("route: map->odom is not gps_map_odom (SLAM mode?): "
                                          "routes need GPS map mode for now")
             self.post(self.on_failed, "map_mode")
@@ -119,7 +141,7 @@ class RouteExecutor:
             self.post(self.on_failed, "no_nav2")
             return
         with self.lock:
-            w = self._window_poses(self.points, self.index, self.xy)
+            w = self._window_poses(self.points, self.index, self.xy, self.odom)
             if w is not None:
                 s, e, xy, prev, frame = w
                 self.batch = (s, e)
