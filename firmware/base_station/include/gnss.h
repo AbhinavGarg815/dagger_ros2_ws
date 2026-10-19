@@ -56,7 +56,8 @@ struct State {
   bool svinActive = false, svinValid = false;
   uint32_t svinDur = 0;
   float svinAccM = 0;
-  double svinLat = 0, svinLon = 0, svinH = 0;   // the survey's result, when valid
+  double svinLat = 0, svinLon = 0, svinH = 0;   // the survey's mean: so far while active, its result once valid
+  uint32_t svinObs = 0;                          // positions averaged so far
   uint8_t fixType = 0;                           // NAV-PVT: 3 = 3D, 5 = time only (a base)
   uint8_t numSV = 0;                             // NAV-PVT: satellites used in the solution
   uint32_t heardMs = 0;
@@ -147,7 +148,8 @@ class Splitter {
       st.svinAccM = acc / 10000.0f;                                  // 0.1 mm -> m
       st.svinValid = p[36] != 0;
       st.svinActive = p[37] != 0;
-      if (st.svinValid) {
+      memcpy(&st.svinObs, p + 32, 4);
+      if (st.svinObs > 0) {                                          // the mean so far, or the result
         double X = x / 100.0 + (int8_t)p[24] / 10000.0, Y = y / 100.0 + (int8_t)p[25] / 10000.0,
                Z = z / 100.0 + (int8_t)p[26] / 10000.0;               // cm + 0.1 mm parts
         ecefToLlh(X, Y, Z, st.svinLat, st.svinLon, st.svinH);

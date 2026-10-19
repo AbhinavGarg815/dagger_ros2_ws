@@ -131,3 +131,14 @@ def test_each_request_is_numbered_and_its_resends_keep_the_number():
     again = decode(75, link.due(3.0)[1])
     assert again["param4"] != first["param4"], "Survey again: same settings, a new number"
     assert again["param1"] == 1.0 and again["param2"] == 300.0
+
+
+def test_the_survey_mean_so_far_only_while_surveying():
+    link = BaseLink()
+    hear(link, 1.0, MODE_SURVEYING, BS_ACC=7.9, BS_DUR=600)
+    assert link.survey_mean() is None, "not sent yet"
+    hear(link, 2.0, MODE_SURVEYING, BS_MLAT=267478123, BS_MLON=758554012, BS_MHGT=418237)
+    lat, lon, h = link.survey_mean()
+    assert abs(lat - 26.7478123) < 1e-9 and abs(lon - 75.8554012) < 1e-9 and abs(h - 418.237) < 1e-9
+    hear(link, 3.0, MODE_FIXED)
+    assert link.survey_mean() is None and "BS_MLAT" not in link.values, "gone once fixed"

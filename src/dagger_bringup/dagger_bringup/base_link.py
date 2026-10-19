@@ -86,7 +86,7 @@ class BaseLink:
     def __init__(self):
         self.heard_at = None
         self.mode = MODE_NO_FIX
-        self.values = {}                     # BS_ACC, BS_DUR, BS_DONE, BS_LAT, BS_LON, BS_HGT
+        self.values = {}                     # BS_ACC, BS_DUR, BS_DONE, BS_LAT/LON/HGT, BS_MLAT/MLON/MHGT, BS_SATS
         self.pending = None                  # (fields, tries left, last sent)
         self.seq = 0
         # Each request is numbered (param4), its resends keep the number: the base tells a
@@ -112,8 +112,8 @@ class BaseLink:
                 for k in ("BS_LAT", "BS_LON", "BS_HGT"):
                     self.values.pop(k, None)
             if self.mode != MODE_SURVEYING:
-                self.values.pop("BS_ACC", None)
-                self.values.pop("BS_DUR", None)
+                for k in ("BS_ACC", "BS_DUR", "BS_MLAT", "BS_MLON", "BS_MHGT"):
+                    self.values.pop(k, None)
             return changed
         if msgid in (251, 252):
             changed = self.values.get(m["name"]) != m["value"]
@@ -157,6 +157,13 @@ class BaseLink:
         if self.mode != MODE_FIXED or not {"BS_LAT", "BS_LON", "BS_HGT"} <= v.keys():
             return None
         return v["BS_LAT"] / 1e7, v["BS_LON"] / 1e7, v["BS_HGT"] / 1000.0
+
+    def survey_mean(self):
+        """While surveying: (lat, lon, height m) averaged so far, or None (not yet sent)."""
+        v = self.values
+        if self.mode != MODE_SURVEYING or not {"BS_MLAT", "BS_MLON", "BS_MHGT"} <= v.keys():
+            return None
+        return v["BS_MLAT"] / 1e7, v["BS_MLON"] / 1e7, v["BS_MHGT"] / 1000.0
 
 
 def distance_m(a, b):

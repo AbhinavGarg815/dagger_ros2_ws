@@ -477,7 +477,7 @@ class Gateway:
             if kind != "delete_base_site" and not (st is not None and st.heard):
                 refuse(pb.REJECT_REASON_NO_BASE)
                 return
-            if kind in ("survey_base", "use_base_site") and self.core.state in JOB_STATES:
+            if kind in ("survey_base", "use_base_site", "save_base_site") and self.core.state in JOB_STATES:
                 refuse(pb.REJECT_REASON_NOT_IN_THIS_STATE)
                 return
         if kind in ("show_map", "delete_map"):

@@ -129,7 +129,11 @@ class BaseStationNode(Node):
         return res
 
     def on_save(self, req, res):
+        # A finished survey, or -- "save now" -- one still going: its mean so far, and the
+        # base then stops surveying and uses it (fixed on the new site).
         pos = self.link.position() if self.link.values.get("BS_DONE") == 1 else None
+        mean = self.link.survey_mean() if pos is None else None
+        pos = pos or mean
         if pos is None or self.sites.at(pos) is not None:
             res.ok, res.error = False, "not surveyed"
             return res
@@ -138,6 +142,10 @@ class BaseStationNode(Node):
             res.ok, res.error = False, "name taken"
             return res
         self.get_logger().info(f"base: site '{name}' saved at {pos[0]:.7f}, {pos[1]:.7f}, {pos[2]:.3f} m")
+        if mean is not None:
+            acc = self.link.values.get("BS_ACC", 0.0)
+            self.link.fixed(*mean)
+            self.get_logger().info(f"base: survey finished early ({acc:.2f} m), fixed on '{name}'")
         self.publish_sites()
         self.publish_status()
         res.ok, res.error = True, ""

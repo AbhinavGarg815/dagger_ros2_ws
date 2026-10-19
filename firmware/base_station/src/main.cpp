@@ -152,6 +152,11 @@ static void report() {
   if (m == MODE_SURVEYING) {
     sendFloat("BS_ACC", st.svinAccM);
     sendInt("BS_DUR", (int32_t)st.svinDur);
+    if (st.svinObs > 0) {                                     // the mean so far: "save now" fixes on it
+      sendInt("BS_MLAT", (int32_t)lround(st.svinLat * 1e7));
+      sendInt("BS_MLON", (int32_t)lround(st.svinLon * 1e7));
+      sendInt("BS_MHGT", (int32_t)lround(st.svinH * 1000.0));
+    }
   }
   bool done = cfg.action == ACTION_SURVEY && m == MODE_FIXED;
   sendInt("BS_DONE", done ? 1 : 0);
