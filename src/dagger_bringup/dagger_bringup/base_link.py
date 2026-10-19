@@ -14,6 +14,7 @@ Sites (places the base stands, with their coordinates) are kept in a JSON file.
 import json
 import math
 import os
+import random
 import struct
 
 BASE_SYSID, BASE_COMPID = 71, 220            # the Blue Pill
@@ -88,6 +89,10 @@ class BaseLink:
         self.values = {}                     # BS_ACC, BS_DUR, BS_DONE, BS_LAT, BS_LON, BS_HGT
         self.pending = None                  # (fields, tries left, last sent)
         self.seq = 0
+        # Each request is numbered (param4), its resends keep the number: the base tells a
+        # resend (do nothing again) from a new request with the same settings (Survey again:
+        # start over). Random start, so a restart of this node doesn't repeat a recent number.
+        self.request = random.randint(1, 1 << 23)
 
     def heard(self, now):
         return self.heard_at is not None and now - self.heard_at <= HEARD_S
@@ -127,7 +132,9 @@ class BaseLink:
                        "z": float(height_m)})
 
     def _command(self, fields):
-        fields = dict(fields, command=CMD_BASE, target_system=BASE_SYSID, target_component=BASE_COMPID)
+        self.request = self.request % (1 << 24) + 1      # a float32 holds whole numbers to 2^24 exactly
+        fields = dict(fields, param4=float(self.request), command=CMD_BASE, target_system=BASE_SYSID,
+                      target_component=BASE_COMPID)
         self.pending = (fields, RESEND_TRIES, -1e9)
 
     def due(self, now):

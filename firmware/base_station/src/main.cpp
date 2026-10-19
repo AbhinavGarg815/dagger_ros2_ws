@@ -199,15 +199,23 @@ static void onCommand(const mav::Command &c) {
     ack(c, 2);                                                // MAV_RESULT_DENIED
     return;
   }
-  // A resend of what we already do (its first ACK was lost) changes nothing.
+  // A resend (its first ACK was lost) changes nothing; it carries the same request number.
+  // A new request with the same settings does: Survey again starts the survey over (the
+  // base was moved). Without a number (an older rover), the same settings mean a resend.
+  static uint32_t lastRequest = 0;
+  uint32_t request = c.p4 > 0 ? (uint32_t)lroundf(c.p4) : 0;
   bool same = next.action == cfg.action && (next.action == ACTION_SURVEY
       ? (next.minS == cfg.minS && next.accM == cfg.accM)
       : (next.lat == cfg.lat && next.lon == cfg.lon && next.height == cfg.height));
-  if (!same) {
-    cfg = next;
-    EEPROM.put(0, cfg);
+  bool resend = request ? request == lastRequest : same;
+  if (!resend) {
+    if (!same) {
+      cfg = next;
+      EEPROM.put(0, cfg);                                     // flash: only when it changes
+    }
     apply();
   }
+  if (request) lastRequest = request;
   ack(c, 0);                                                  // MAV_RESULT_ACCEPTED
 }
 

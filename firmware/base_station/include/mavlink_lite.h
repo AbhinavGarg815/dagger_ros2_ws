@@ -80,7 +80,7 @@ bool sendRtcm(Out out, uint8_t &seq, uint8_t &rtcmSeq, const uint8_t *msg, int n
 
 // A COMMAND_INT 31010 addressed to the base, as received.
 struct Command {
-  float p1, p2, p3;
+  float p1, p2, p3, p4;                              // p4: the request's number (0: none)
   int32_t x, y;
   float z;
   uint8_t fromSys, fromComp;
@@ -136,6 +136,7 @@ class Parser {
     memcpy(&cmd.p1, q + 0, 4);
     memcpy(&cmd.p2, q + 4, 4);
     memcpy(&cmd.p3, q + 8, 4);
+    memcpy(&cmd.p4, q + 12, 4);
     memcpy(&cmd.x, q + 16, 4);
     memcpy(&cmd.y, q + 20, 4);
     memcpy(&cmd.z, q + 24, 4);

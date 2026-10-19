@@ -120,3 +120,14 @@ if __name__ == "__main__":
             fn()
             print("ok   ", name)
     print("all passed")
+
+
+def test_each_request_is_numbered_and_its_resends_keep_the_number():
+    link = BaseLink()
+    link.survey(300, 2.0)
+    first, resend = decode(75, link.due(0.0)[1]), decode(75, link.due(1.5)[1])
+    assert first["param4"] == resend["param4"] >= 1, "a resend carries the same number"
+    link.survey(300, 2.0)
+    again = decode(75, link.due(3.0)[1])
+    assert again["param4"] != first["param4"], "Survey again: same settings, a new number"
+    assert again["param1"] == 1.0 and again["param2"] == 300.0

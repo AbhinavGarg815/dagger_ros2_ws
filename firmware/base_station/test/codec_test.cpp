@@ -126,6 +126,10 @@ int main() {
   for (uint8_t b : unhex("fd2000000a01bf4b00000000803f000096430000004000000000000000000000000000000000227947dc6b69"))
     got |= parser.feed(b, c);
   check(got && lroundf(c.p1) == 1 && lroundf(c.p2) == 300 && fabsf(c.p3 - 2.0f) < 1e-6f, "COMMAND_INT survey, parsed");
+  got = false;
+  for (uint8_t b : unhex("fd2000000a01bf4b00000000803f000096430000004000e44046000000000000000000000000227947dc5bac"))
+    got |= parser.feed(b, c);
+  check(got && lroundf(c.p1) == 1 && lroundf(c.p4) == 12345, "COMMAND_INT survey with request number 12345, parsed");
   auto bad = unhex("fd2000000a01bf4b00000000803f000096430000004000000000000000000000000000000000227947dc6b6a");
   got = false;
   for (uint8_t b : bad) got |= parser.feed(b, c);
