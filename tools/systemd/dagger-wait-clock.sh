@@ -9,13 +9,19 @@
 # gps_heading_imu stuck "seeding", and the FCU estimate drifted -> Direction,
 # Obstacle sensor and Position all NOT READY until the stack was restarted.
 #
-# With an internet route (a default route): wait up to WAIT_S for the first
-# sync. Without one (the field, SIYI radio only) there is no time server, so the
+# First, the time from GPS (tools/gps_time.py, through the Cube -- before the stack
+# opens its port): right anywhere under the sky, with no internet (2026-10-21: Wi-Fi
+# came up after the stack had started and the clock jumped 44 h under it). A later
+# time server then only nudges it.
+# No GPS time within GPS_WAIT_S (indoors): with an internet route (a default route),
+# wait up to WAIT_S for the first sync; without one there is no time server, so the
 # clock cannot jump later either: start at once.
 # The real fix is a coin cell for the RTC; then this returns immediately.
-WAIT_S=120
+WAIT_S=85                  # with GPS_WAIT_S, inside the unit's TimeoutStartSec (180 s)
+GPS_WAIT_S=90
 synced() { [ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" = "yes" ]; }
 if synced; then echo "clock already synchronized"; exit 0; fi
+if python3 "$(dirname "$0")/../gps_time.py" --set --wait "$GPS_WAIT_S"; then exit 0; fi
 if ! ip route show default | grep -q .; then
     echo "no internet route: no time server to wait for -- starting with the clock as it is"
     exit 0
