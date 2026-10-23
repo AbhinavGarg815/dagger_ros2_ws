@@ -165,6 +165,23 @@ def test_recorder_keeps_a_point_every_spacing_and_at_turns():
     assert abs(rec.length_m() - (4.2 + 0.8)) < 0.1
 
 
+def test_a_point_the_path_passes_on_the_way_starts_the_next_window():
+    # Owner, 2026-10-23: 10 m ahead, then back to 5 m -- it "finished" at 5 m on the way out.
+    out_and_back = [(10.0, 0.0), (5.0, 0.0)]
+    assert route_window(out_and_back, 0, (0.0, 0.0), 15.0, dist=math.dist) == (0, 1), "go to 10 m first"
+    assert route_window(out_and_back, 1, (10.0, 0.0), 15.0, dist=math.dist) == (1, 2), "then back to 5 m"
+    # the same in lat/lon (GPS missions)
+    gps = [north(10.0), north(5.0)]
+    assert window(gps, 0, north(0.0), 15.0) == (0, 1)
+    # beside the way out by more than 1.5 m: one window, as before
+    assert route_window([(10.0, 0.0), (5.0, 3.0)], 0, (0.0, 0.0), 15.0, dist=math.dist) == (0, 2)
+    # an ordinary route straight on: all in one
+    assert route_window([(5.0, 0.0), (10.0, 0.0), (10.0, 5.0)], 0, (0.0, 0.0), 15.0, dist=math.dist) == (0, 3)
+    # a loop back to where it started: the last point waits for its own window
+    loop = [(5.0, 0.0), (5.0, 5.0), (0.0, 5.0), (0.0, 0.3)]
+    assert route_window(loop, 0, (0.0, 0.0), 15.0, dist=math.dist) == (0, 3)
+
+
 def test_progress_and_window():
     pts = [north(m) for m in (0, 10, 20, 30, 40)]
     total = path_length(pts)

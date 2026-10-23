@@ -329,13 +329,41 @@ def progress(points, target, here, start_total_m, dist=distance_m):
     return max(0.0, min(1.0, frac)), left
 
 
-def window(points, start, here, max_m, dist=None):
+# A window must not end at a point its own path passes before: Nav2's controller judges
+# "arrived" against the path's END, and the goal checker (StickyGoalChecker) keeps a goal
+# position once it has been within 0.4 m of it. A mission 10 m out then back to 5 m drove
+# past the 5 m point on its way out, turned to its heading and "finished" there (owner,
+# 2026-10-23). Such a point starts the next window instead, after the one before is reached.
+PASSED_CLEAR_M = 1.5
+
+
+def _seg_dist(p, a, b):
+    """Distance from p to the segment a-b (plane, metres)."""
+    ax, ay = b[0] - a[0], b[1] - a[1]
+    L = ax * ax + ay * ay
+    k = 0.0 if L == 0 else max(0.0, min(1.0, ((p[0] - a[0]) * ax + (p[1] - a[1]) * ay) / L))
+    return math.hypot(p[0] - a[0] - k * ax, p[1] - a[1] - k * ay)
+
+
+def window(points, start, here, max_m, dist=None, clear_m=PASSED_CLEAR_M):
     """Indices points[start:end] to send to Nav2 now: consecutive points from
     `start` while each is within `max_m` of the rover — the global costmap is a
     rolling window (40 m: ~18 m to a goal, tools/gps_goal.py). Always at least
-    one point, so a far first point is still tried (Nav2 says if it cannot)."""
+    one point, so a far first point is still tried (Nav2 says if it cannot).
+    The window also stops before a point that lies within `clear_m` of the path to
+    it (rover -> points[start] -> ...): it would be "reached" on the way (see above)."""
     end = start + 1
+    metric = dist is math.dist            # map missions and odometry: (x, y) metres
     dist = dist or distance_m             # lat/lon; map missions pass math.dist (metres)
+    if metric:
+        xy = lambda p: (p[0], p[1])  # noqa: E731
+    else:
+        xy = lambda p: ll_to_en(p[0], p[1], here[0], here[1])  # noqa: E731
+    path = [xy(here), xy(points[start])]
     while end < len(points) and dist(here, points[end]) <= max_m:
+        q = xy(points[end])
+        if any(_seg_dist(q, a, b) < clear_m for a, b in zip(path, path[1:])):
+            break
+        path.append(q)
         end += 1
     return start, end
