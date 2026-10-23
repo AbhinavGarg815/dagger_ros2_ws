@@ -448,6 +448,27 @@ def _turn_deg(a, b, c):
     return abs(math.degrees(math.atan2(ux * vy - uy * vx, ux * vx + uy * vy)))
 
 
+# A point beyond the window (Nav2 plans only inside its 40 m rolling costmap, +-20 m round the
+# rover) is aimed at in steps (owner, 2026-10-23): a 24 m leg on Map 5 was refused, "Goal
+# Coordinates were outside map bounds", and the mission paused with "can't find a way".
+STONE_BACK_M = 3.0
+
+
+def stepping_stones(here, goal, reach_m, back_m=STONE_BACK_M):
+    """Where to aim instead of `goal` when it is beyond `reach_m` of `here` (both (x, y) metres in
+    one frame): points on the straight line, `reach_m` along, then nearer by `back_m` each (the
+    next is tried when one is on an obstacle). None when the goal is within reach."""
+    d = math.dist(here, goal)
+    if d <= reach_m:
+        return None
+    out, r = [], reach_m
+    while r > 0.5:
+        k = r / d
+        out.append((here[0] + k * (goal[0] - here[0]), here[1] + k * (goal[1] - here[1])))
+        r -= back_m
+    return out
+
+
 def _seg_dist(p, a, b):
     """Distance from p to the segment a-b (plane, metres)."""
     ax, ay = b[0] - a[0], b[1] - a[1]

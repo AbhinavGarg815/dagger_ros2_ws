@@ -31,7 +31,7 @@ from geometry_msgs.msg import PoseStamped
 from nav2_msgs.action import NavigateThroughPoses
 from rclpy.action import ActionClient
 
-from .routes import apply, ll_to_en, map_to_odom, window
+from .routes import apply, ll_to_en, map_to_odom, stepping_stones, window
 
 
 class RouteExecutor:
@@ -48,6 +48,9 @@ class RouteExecutor:
         self.xy = None                     # a map mission's points on its map, else None
         self.odom = None                   # the points in odom (GPS lost, Step D3), else None
         self.handle, self.gen = None, 0
+        # Aiming at a step on a long leg (stepping_stones), not at a route point: reaching it passes
+        # no point, and the next window goes out from there.
+        self.stone = False
 
     # ---------------- from the loop ----------------
     def start(self, points, index=0, xy=None, odom=None):
@@ -143,8 +146,13 @@ class RouteExecutor:
             return
         with self.lock:
             w = self._window_poses(self.points, self.index, self.xy, self.odom)
+            stones = None
             if w is not None:
                 s, e, xy, prev, frame = w
+                stones = stepping_stones(prev, xy[0], self.window_m)
+                if stones is not None:
+                    e = s                      # no route point in this drive
+                self.stone = stones is not None
                 self.batch = (s, e)
                 self.gen += 1
                 gen = self.gen
@@ -156,6 +164,26 @@ class RouteExecutor:
         # nearest clear spot (<= 1 m); one deeper in is skipped -- Nav2's planner
         # would refuse it and give up on the whole route.
         poses = []
+        if stones is not None:
+            for x, y in stones:                # the first step not on an obstacle
+                verdict, x2, y2 = self.node.costmap_fix(x, y, frame)
+                if verdict != "blocked":
+                    poses.append(self._pose(x2, y2, math.atan2(y2 - prev[1], x2 - prev[0]), frame))
+                    break
+            if poses:
+                self.node.get_logger().info(
+                    f"route: point {s + 1} is {math.dist(prev, xy[0]):.1f} m away, beyond the "
+                    f"{self.window_m:g} m window: a step {math.dist(prev, (x2, y2)):.1f} m along the way to Nav2")
+                fut = self.client.send_goal_async(NavigateThroughPoses.Goal(poses=poses),
+                                                  feedback_callback=lambda fb, g=gen: self._feedback(fb, g))
+                fut.add_done_callback(lambda f, g=gen: self._accepted(f, g))
+                return
+            # every step on an obstacle: the point itself, as before (Nav2 says if it cannot)
+            with self.lock:
+                self.stone = False
+                self.batch = (s, s + 1)
+            xy = xy[:1]
+            e = s + 1
         for k, (x, y) in enumerate(xy):
             verdict, x2, y2 = self.node.costmap_fix(x, y, frame)
             if verdict == "blocked":

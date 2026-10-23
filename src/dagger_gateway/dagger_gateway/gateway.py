@@ -857,20 +857,25 @@ class Gateway:
         ex, pts = self.route_exec, self.node.fresh_plan()
         if ex is None or not pts:
             return
+        s, e = ex.batch
         if ex.mode == "map":                   # a map mission (or the way home on a map)
             pair, ml = self.node.map_pose_and_odom(), self.node.maps
             m = map_info(ml, ml.localizing) if ml is not None and ml.localizing else None
             if pair is None or m is None:
                 return
             t = map_to_odom(*pair)
-            for x, y in pts:
-                mx, my = odom_to_map(t, x, y)
+
+            def on_map(mx, my):
                 if m.placed and len(m.geo) == 5:
                     lat, lon = to_latlon(tuple(m.geo), mx, my)
                     rp.planned_path.add(latitude_deg=lat, longitude_deg=lon)
                 else:
                     px, py = to_picture(m, mx, my)
                     rp.planned_path.add(map_x_m=round(px, 3), map_y_m=round(py, 3))
+            for x, y in pts:
+                on_map(*odom_to_map(t, x, y))
+            if ex.stone and s < len(ex.xy or []):
+                on_map(*ex.xy[s])
         else:                                  # GPS: now, or as it was when GPS was lost
             snap = self.lost_snap if ex.mode == "odom" else self.node.gps_snapshot()
             if snap is None:
@@ -878,7 +883,13 @@ class Gateway:
             for x, y in pts:
                 lat, lon = odom_to_ll(x, y, snap)
                 rp.planned_path.add(latitude_deg=lat, longitude_deg=lon)
-        rp.planned_through_index = ex.batch[1]
+            if ex.stone and ex.mode == "odom" and s < len(ex.odom or []):
+                lat, lon = odom_to_ll(*ex.odom[s], snap)
+                rp.planned_path.add(latitude_deg=lat, longitude_deg=lon)
+            elif ex.stone and s < len(ex.points):
+                rp.planned_path.add(latitude_deg=ex.points[s][0], longitude_deg=ex.points[s][1])
+        # Aiming at a step on a long leg: the plan to the step, then straight on to the point.
+        rp.planned_through_index = s + 1 if ex.stone else e
 
     def estimated_position(self):
         """(lat, lon) from odometry while GPS is lost, else None."""

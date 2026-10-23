@@ -202,6 +202,20 @@ def test_a_point_where_the_route_turns_back_ends_its_window():
     assert route_window(zigzag, 0, (0.0, 0.0), 15.0, dist=math.dist) == (0, 2)
 
 
+def test_a_point_beyond_the_window_is_aimed_at_in_steps():
+    from dagger_gateway.routes import stepping_stones
+    # Owner, 2026-10-23: Map 5, point 2 24.3 m from point 1 -- "outside map bounds".
+    here, goal = (-19.5, -17.1), (2.9, -7.8)
+    assert stepping_stones(here, (-10.0, -15.0), 15.0) is None, "within reach: the point itself"
+    st = stepping_stones(here, goal, 15.0)
+    assert abs(math.dist(here, st[0]) - 15.0) < 1e-9, "first: 15 m along"
+    assert [round(math.dist(here, p), 6) for p in st] == [15.0, 12.0, 9.0, 6.0, 3.0], "then nearer"
+    for p in st:                                   # all on the straight line to the point
+        assert abs((p[0] - here[0]) * (goal[1] - here[1]) - (p[1] - here[1]) * (goal[0] - here[0])) < 1e-6
+    # from the step, the rest (9.3 m) is within reach
+    assert stepping_stones(st[0], goal, 15.0) is None
+
+
 def test_the_plan_is_cut_to_its_corners():
     from dagger_gateway.routes import simplify
     straight = [(0.05 * k, 0.0) for k in range(201)]          # 10 m, a point every 5 cm
