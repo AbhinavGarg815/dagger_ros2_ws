@@ -35,7 +35,7 @@ from . import api_pb2 as pb
 from .ros_io import RosIO
 from .route_executor import RouteExecutor
 from .rover_state import RoverCore, Settings
-from .routes import (Recorder, RouteStore, Trail, distance_m, home_path, ll_to_odom, mission_waypoints,
+from .routes import (HomeStore, Recorder, RouteStore, Trail, distance_m, home_path, ll_to_odom, mission_waypoints,
                      odom_to_ll, path_length, progress)
 from .gps_watch import DisagreeWatch, GpsWatch, RtkWatch
 from .base import base_pb, sites_pb
@@ -54,7 +54,8 @@ except ImportError:                        # running from a tree setup.py has no
 
 CAPABILITIES = (pb.CAPABILITY_STOP, pb.CAPABILITY_READINESS, pb.CAPABILITY_ALERTS)
 ROUTE_CAPABILITIES = (pb.CAPABILITY_RUN_ROUTE, pb.CAPABILITY_RECORD_ROUTE, pb.CAPABILITY_PLAN_ROUTE,
-                      pb.CAPABILITY_IMPORT_MISSION, pb.CAPABILITY_COME_HOME, pb.CAPABILITY_FOLLOW)
+                      pb.CAPABILITY_IMPORT_MISSION, pb.CAPABILITY_COME_HOME, pb.CAPABILITY_FOLLOW,
+                      pb.CAPABILITY_SET_HOME)
 IMPORT_WAIT_S = 4.0     # ImportMission is answered within this (the app waits 5 s)
 MAP_WAIT_S = 3.0        # map commands: the map manager answers within this, or no answer
 # The map manager's words for "no" -> the contract's reasons.
@@ -99,6 +100,12 @@ class Gateway:
         self.results = collections.OrderedDict()   # command_id -> CommandResult (rule 3)
         self.importing = set()                     # ImportMission ids being read
         self.trail = None                          # routes.Trail from home, once the first job starts
+        # Home kept across restarts (SetHome, owner 2026-10-23): the trail back starts from it.
+        self.homes = HomeStore(g("home_file"))
+        kept = self.homes.load()
+        if kept is not None:
+            self.trail = Trail(kept)
+            self.log.info(f"home kept from before: {kept[0]:.7f}, {kept[1]:.7f}")
         # Step D3, GPS lost during a job (DaggerGCS docs/proposals/operating-modes.md section 4)
         self.gps = GpsWatch(float(g("gps_lost_after_s")), float(g("gps_lost_accuracy_m")),
                             float(g("gps_back_after_s")))
@@ -185,7 +192,31 @@ class Gateway:
             here = self.node.good_fix()
             if here is not None:
                 self.trail = Trail(here)
+                self.homes.save(*here)
                 self.log.info(f"home set at {here[0]:.7f}, {here[1]:.7f}")
+
+    def on_set_home(self, cmd):
+        """Move home (owner, 2026-10-23): where the rover stands -- its trail back starts again
+        here -- or a place tapped on the map: the way home then goes back along the trail as
+        far as it leads and Nav2 plans the last leg. Moves nothing; kept across restarts."""
+        if self.core.route is not None:
+            return pb.REJECT_REASON_NOT_IN_THIS_STATE     # a mission or the way home is on
+        if cmd.here:
+            at = self.node.good_fix()
+            if at is None:
+                return pb.REJECT_REASON_NOT_READY
+            odom = self.node.odom_now()
+            self.trail = Trail(at, odom[:2] if odom is not None else None)
+        else:
+            at = (cmd.at.latitude_deg, cmd.at.longitude_deg)
+            if not (math.isfinite(at[0]) and math.isfinite(at[1])) or at == (0.0, 0.0):
+                return pb.REJECT_REASON_NOT_SUPPORTED
+            snap = self.node.gps_snapshot()
+            self.trail = Trail(at, ll_to_odom([at], snap)[0] if snap is not None else None)
+        self.homes.save(*at)
+        self.log.info(f"home moved {'to where the rover stands' if cmd.here else 'to a place on the map'}: "
+                      f"{at[0]:.7f}, {at[1]:.7f}")
+        return None
 
     def on_route_done(self):
         if self.core.going_home and self.trail is not None:

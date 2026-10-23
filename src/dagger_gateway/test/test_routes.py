@@ -182,6 +182,28 @@ def test_a_point_the_path_passes_on_the_way_starts_the_next_window():
     assert route_window(loop, 0, (0.0, 0.0), 15.0, dist=math.dist) == (0, 3)
 
 
+def test_home_is_kept_across_restarts_and_a_bad_file_is_no_home():
+    from dagger_gateway.routes import HomeStore
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "home.json")
+        assert HomeStore(path).load() is None
+        HomeStore(path).save(26.7479600, 75.8552800)
+        assert HomeStore(path).load() == (26.7479600, 75.8552800)
+        with open(path, "w") as f:
+            f.write("{not json")
+        assert HomeStore(path).load() is None
+
+
+def test_the_way_to_a_home_tapped_on_the_map_goes_back_along_the_trail_then_to_it():
+    home = north(0.0, east=-10.0)                 # tapped: where the rover has never been
+    trail = Trail(home)
+    for m in range(0, 21):                        # then the rover drives 20 m north from (0, 0)
+        trail.add(*north(float(m)))
+    way = home_path(trail.points, north(20.0))
+    assert way[-1] == home, "it ends at the home that was set"
+    assert distance_m(way[-2], north(0.0)) < 1.0, "after coming back along its own trail"
+
+
 def test_progress_and_window():
     pts = [north(m) for m in (0, 10, 20, 30, 40)]
     total = path_length(pts)

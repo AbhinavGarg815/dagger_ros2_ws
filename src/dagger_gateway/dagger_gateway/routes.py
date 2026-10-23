@@ -146,6 +146,30 @@ def clear_spot(cost_at, cx, cy, radius_cells):
     return None if best is None else (best[1], best[2])
 
 
+class HomeStore:
+    """Home kept across restarts (owner, 2026-10-23): one small JSON file, written atomically.
+    A missing or damaged file is no home, never fatal."""
+
+    def __init__(self, path):
+        self.path = os.path.expanduser(path)
+
+    def load(self):
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                d = json.load(f)
+            lat, lon = float(d["lat"]), float(d["lon"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        return (lat, lon) if math.isfinite(lat) and math.isfinite(lon) else None
+
+    def save(self, lat, lon):
+        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+        tmp = self.path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"lat": lat, "lon": lon, "saved_ms": wall_ms()}, f)
+        os.replace(tmp, self.path)
+
+
 def wall_ms():
     return int(time.time() * 1000)
 

@@ -162,6 +162,8 @@ class RosIO(Node):
         # Phase 3: routes recorded by driving and run with Nav2
         p("routes_enabled", True)
         p("route_dir", "~/dagger_routes")
+        # Home, kept across restarts (SetHome, owner 2026-10-23)
+        p("home_file", "~/dagger_home.json")
         p("record_point_spacing_m", 2.0)
         # each Nav2 goal within this of the rover (global costmap: 40 m rolling window)
         p("route_window_m", 15.0)
