@@ -19,6 +19,39 @@ LIVE = "~live"          # the map being made, as its picture is named
 A_WGS84, E2_WGS84 = 6378137.0, 6.69437999014e-3
 
 
+class SlamHeard:
+    """What the shadow localization last said about the map in use: /slam/localized and
+    /slam/finding. Both are latched, so after a gateway restart they arrive once, in any order
+    with /maps/list. Kept as heard and judged against the map in use, they survive that order;
+    a CHANGE of map drops them (the new localization says for itself). Before 2026-10-23 the
+    first /maps/list cleared them as if the map had changed: after every gateway restart with
+    a map found, *Place on the map* stayed red until SLAM's verdict next changed (owner)."""
+
+    def __init__(self):
+        self.map_known = False
+        self.localizing = ""
+        self.localized_heard = None
+        self.finding_heard = None
+
+    def map_in_use(self, name):
+        """From /maps/list. True when the map in use changed (its verdicts are dropped)."""
+        changed = self.map_known and name != self.localizing
+        if changed:
+            self.localized_heard = self.finding_heard = None
+        self.map_known, self.localizing = True, name
+        return changed
+
+    @property
+    def localized(self):
+        """Found on the map in use."""
+        return bool(self.localized_heard) and bool(self.localizing)
+
+    @property
+    def finding(self):
+        """slam_geo_init's step (the contract's MapFinding values), or None."""
+        return self.finding_heard if self.localizing else None
+
+
 def _enu_scale(lat0_deg):
     """Metres per degree (east, north) at lat0: as dagger_bringup/geo_map.enu_scale."""
     lat = math.radians(lat0_deg)

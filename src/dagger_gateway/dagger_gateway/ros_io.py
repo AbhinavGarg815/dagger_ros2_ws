@@ -34,6 +34,7 @@ from dagger_msgs.srv import MapName
 from sensor_msgs.msg import CompressedImage as _CompressedImage   # noqa: F401 -- the raw video's type
 
 from .base import rtk_of
+from .maps import SlamHeard
 from .readiness import Readiness
 from .rover_state import pending_checks
 
@@ -227,7 +228,7 @@ class RosIO(Node):
         # Map missions (Step D1): the shadow localization's pose and verdict on the shown
         # map, and odom's pose history to pair with it (map -> odom at the same moment).
         self.slam_pose = None              # (stamp s, x, y, yaw) on the map, from /slam/pose
-        self.slam_localized = False        # /slam/localized (latched), reset when the map changes
+        self.slam = SlamHeard()            # /slam/localized, /slam/finding (latched), per map in use
         self.odom_hist = collections.deque(maxlen=1500)   # (stamp s, x, y, yaw), ~60 s at 25 Hz
         self.create_subscription(PoseWithCovarianceStamped, "/slam/pose", self.on_slam_pose, 10,
                                  event_callbacks=QUIET_SUB)
@@ -235,7 +236,6 @@ class RosIO(Node):
                                  event_callbacks=QUIET_SUB)
         # "I am here" (Step D2): slam_geo_init's progress (the contract's MapFinding values)
         # and the operator's tap, on the map, out to it.
-        self.slam_finding = None           # 1 searching .. 5 found; None: nothing heard
         self.create_subscription(UInt8, "/slam/finding", self.on_slam_finding, maps_qos,
                                  event_callbacks=QUIET_SUB)
         self.here_pub = self.create_publisher(PoseWithCovarianceStamped, "/slam/here", 10,
@@ -467,11 +467,18 @@ class RosIO(Node):
     def on_costmap(self, m):
         self.costmap = m
 
+    @property
+    def slam_localized(self):
+        return self.slam.localized
+
+    @property
+    def slam_finding(self):
+        """1 searching .. 5 found; None: nothing heard."""
+        return self.slam.finding
+
     def on_map_list(self, m):
-        if self.maps is None or m.localizing != self.maps.localizing:
-            self.slam_localized = False    # a new localization says for itself
-            self.slam_pose = None
-            self.slam_finding = None
+        if self.slam.map_in_use(m.localizing):
+            self.slam_pose = None          # a new localization says for itself
         self.maps = m
         if self.on_maps:
             self.on_maps()
@@ -491,10 +498,10 @@ class RosIO(Node):
         self.slam_pose = (st.sec + st.nanosec * 1e-9, p.x, p.y, yaw)
 
     def on_slam_localized(self, m):
-        self.slam_localized = bool(m.data) and bool(self.maps is not None and self.maps.localizing)
+        self.slam.localized_heard = bool(m.data)
 
     def on_slam_finding(self, m):
-        self.slam_finding = int(m.data) if self.maps is not None and self.maps.localizing else None
+        self.slam.finding_heard = int(m.data)
 
     def send_here(self, x, y, yaw):
         """"I am here" on the map (Step D2): the spot, and the way it faces when the

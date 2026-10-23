@@ -10,7 +10,7 @@ from types import SimpleNamespace as NS
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, ".."))
-from dagger_gateway.maps import map_list_pb, mapping_pb, placed_map, to_latlon, to_map  # noqa: E402
+from dagger_gateway.maps import SlamHeard, map_list_pb, mapping_pb, placed_map, to_latlon, to_map  # noqa: E402
 
 
 def info(name, placed=True, version=1792047715):
@@ -100,6 +100,29 @@ def test_only_a_placed_map_with_its_tie_takes_missions():
     ml = NS(maps=[yard, work], shown="", localizing="")
     assert placed_map(ml, "Yard") is yard
     assert placed_map(ml, "Workshop") is None and placed_map(ml, "Nowhere") is None and placed_map(None, "Yard") is None
+
+def test_found_on_the_map_survives_a_gateway_restart_in_either_order():
+    # Owner, 2026-10-23: after a gateway restart with Map 5 found, Place on the map stayed red.
+    for first in ("verdict", "list"):
+        s = SlamHeard()
+        if first == "verdict":
+            s.localized_heard, s.finding_heard = True, 5
+            assert not s.localized, "no map known yet: not found"
+            assert s.map_in_use("Map 5") is False, "the first list is not a change"
+        else:
+            assert s.map_in_use("Map 5") is False
+            s.localized_heard, s.finding_heard = True, 5
+        assert s.localized and s.finding == 5, f"found ({first} first)"
+    # a real change of map drops the old verdicts; the new localization says for itself
+    assert s.map_in_use("Map 4") is True
+    assert not s.localized and s.finding is None
+    s.localized_heard = True
+    assert s.localized
+    # no map in use: never found, whatever was heard
+    assert s.map_in_use("") is True and not s.localized
+    s.localized_heard, s.finding_heard = True, 2
+    assert not s.localized and s.finding is None
+
 
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
