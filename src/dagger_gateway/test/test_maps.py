@@ -79,6 +79,19 @@ def test_the_same_tie_as_the_map_manager():
             assert abs(a[0] - b[0]) < 1e-9 and abs(a[1] - b[1]) < 1e-9
 
 
+def test_points_on_a_picture_and_on_its_map():
+    # Step D2: the picture's bottom-left is the map's .yaml origin; headings clockwise from up.
+    from dagger_gateway.maps import from_picture, map_info, picture_heading, to_picture
+    m = NS(name="Workshop", origin_x=-12.5, origin_y=-4.0)
+    assert from_picture(m, 4.25, 7.5) == (-8.25, 3.5)
+    assert to_picture(m, *from_picture(m, 4.25, 7.5)) == (4.25, 7.5)
+    assert picture_heading(0.0) == 90.0, "the map's +x is the picture's right"
+    assert picture_heading(math.pi / 2) == 0.0, "+y is up"
+    assert abs(picture_heading(math.pi) - 270.0) < 1e-9
+    assert map_info(NS(maps=[m]), "Workshop") is m and map_info(NS(maps=[m]), "Yard") is None
+    assert map_info(None, "Workshop") is None
+
+
 def test_only_a_placed_map_with_its_tie_takes_missions():
     yard = info("Yard")
     yard.geo = [26.7479, 75.8553, 0.5, 1.0, 2.0]

@@ -13,7 +13,9 @@ OPERATING STATE, first match wins:
     RECORDING      the operator drives, the gateway notes the route
     MAPPING        the operator drives, the map manager makes a map (Step C2)
     STARTING       a readiness check is still PENDING
-    NOT_READY      a check FAILs -- never READY next to a failing check
+    NOT_READY      a check FAILs -- never READY next to a failing check; except
+                   (Step D2) Position and Direction once the rover is found on the
+                   shown map: they block only GPS missions then (indoors: no GPS)
     READY
 An alert about a state ends when the state does (STOPPED_BY_OPERATOR,
 PAUSED_APP_SILENT): a stale "paused" card sat over a STOPPED rover on the MK32.
@@ -34,8 +36,11 @@ import time
 from . import api_pb2 as pb
 
 ALL_JOBS = (pb.JOB_RUN_ROUTE, pb.JOB_GO_TO_PLACE, pb.JOB_FOLLOW, pb.JOB_COME_HOME,
-            pb.JOB_RECORD_ROUTE, pb.JOB_MAKE_MAP)    # making a map needs the LiDAR, not GPS
+            pb.JOB_RECORD_ROUTE, pb.JOB_MAKE_MAP,     # making a map needs the LiDAR, not GPS
+            pb.JOB_RUN_MAP_MISSION)                   # a map mission: on the map, not GPS (D2)
 DRIVING_JOBS = (pb.JOB_RUN_ROUTE, pb.JOB_GO_TO_PLACE, pb.JOB_COME_HOME)
+# GPS only places these; a map mission drives on the map (Step D2)
+GPS_CHECKS = (pb.CHECK_POSITION, pb.CHECK_HEADING)
 
 # The nine checks, in the order the app shows them, and the jobs each one blocks.
 CHECKS = (
@@ -44,10 +49,13 @@ CHECKS = (
     (pb.CHECK_POSITION, DRIVING_JOBS + (pb.JOB_RECORD_ROUTE,)),   # a recording is lat/lon
     (pb.CHECK_HEADING, DRIVING_JOBS),
     (pb.CHECK_OBSTACLE_SENSOR, ALL_JOBS),
-    (pb.CHECK_LOCALISATION, DRIVING_JOBS),
-    (pb.CHECK_NAVIGATION, DRIVING_JOBS),
+    (pb.CHECK_LOCALISATION, DRIVING_JOBS + (pb.JOB_RUN_MAP_MISSION,)),
+    (pb.CHECK_NAVIGATION, DRIVING_JOBS + (pb.JOB_RUN_MAP_MISSION,)),
     (pb.CHECK_BATTERY, ALL_JOBS),          # FAILs only below critical
     (pb.CHECK_CAMERA, (pb.JOB_FOLLOW,)),
+    # Step D2: the autopilot's position to drive on (GPS, or with none its LiDAR source);
+    # worked out by the gateway (its EKF source), not by readiness.py.
+    (pb.CHECK_DRIVE_SOURCE, (pb.JOB_RUN_MAP_MISSION,)),
 )
 
 # contract: highest severity first
@@ -155,6 +163,8 @@ class RoverCore:
         self.pause_silence_s = 0.0
         self.gps_ask_lidar_m = None        # GPS lost: metres driven on LiDAR when it asks again (D3)
         self.position_disagrees = False    # the autopilot vs GPS (D3): says more than "not accurate"
+        self.found_on_map = False          # found on the shown map (D2): GPS checks don't decide READY
+        self.no_gps_on_map = False         # a map in use and no GPS (D2, indoors): no "wait under open sky"
         self.follow_off_sent = -1e9        # monotonic s: link-loss follow-off, resent at most 1/s
 
     # ---------------- inputs ----------------
@@ -164,6 +174,13 @@ class RoverCore:
         self.checks = {cid: v for cid, v in checks.items() if cid in ids}
         self._readiness_alerts()
         self.update(pb.STATE_REASON_READINESS)
+
+    def set_on_map(self, found, no_gps):
+        """Step D2: found on the shown map; a map in use with no GPS at all."""
+        if (found, no_gps) != (self.found_on_map, self.no_gps_on_map):
+            self.found_on_map, self.no_gps_on_map = found, no_gps
+            self._readiness_alerts()
+            self.update(pb.STATE_REASON_READINESS)
 
     def set_following(self, on, reason=pb.STATE_REASON_OPERATOR):
         if on != self.following:
@@ -295,7 +312,8 @@ class RoverCore:
             return pb.OPERATING_STATE_RECORDING
         if self.mapping:
             return pb.OPERATING_STATE_MAPPING
-        statuses = [s for s, _ in self.checks.values()]
+        statuses = [s for cid, (s, _) in self.checks.items()
+                    if not (self.found_on_map and cid in GPS_CHECKS)]
         if pb.CHECK_STATUS_PENDING in statuses:
             return pb.OPERATING_STATE_STARTING
         if pb.CHECK_STATUS_FAIL in statuses:
@@ -332,10 +350,15 @@ class RoverCore:
         fail = lambda cid: st.get(cid) == pb.CHECK_STATUS_FAIL  # noqa: E731
         # When the autopilot disagrees with GPS (its indoor source outdoors), that is the
         # reason and the fix: "not accurate, wait under open sky" would send the operator wrong.
-        self.alerts.set(pb.ALERT_POSITION_NOT_ACCURATE, fail(pb.CHECK_POSITION) and not self.position_disagrees)
+        # Indoors on a map (Step D2) GPS is simply not there: "wait under open sky" would be
+        # wrong; the checks still say so, and still block GPS missions.
+        indoors = self.no_gps_on_map
+        self.alerts.set(pb.ALERT_POSITION_NOT_ACCURATE, fail(pb.CHECK_POSITION) and not self.position_disagrees
+                        and not indoors)
         # WARN too: a heading gap or a patchy one is "not reliable yet" to the operator
         self.alerts.set(pb.ALERT_HEADING_UNKNOWN, st.get(pb.CHECK_HEADING) in (pb.CHECK_STATUS_FAIL,
-                                                                             pb.CHECK_STATUS_WARN))
+                                                                             pb.CHECK_STATUS_WARN)
+                        and not indoors)
         self.alerts.set(pb.ALERT_RC_LINK_LOST, fail(pb.CHECK_REMOTE_CONTROL), pb.SEVERITY_PROBLEM)
         bstat, bval = self.checks.get(pb.CHECK_BATTERY, (pb.CHECK_STATUS_PENDING, {}))
         pct = {"percent": bval["percent"]} if "percent" in bval else {}

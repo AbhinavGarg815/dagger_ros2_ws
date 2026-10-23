@@ -48,9 +48,9 @@ class MapMatcher:
         return float(self._lookup(x + c * pts[:, 0] - s * pts[:, 1],
                                   y + s * pts[:, 0] + c * pts[:, 1]).mean())
 
-    def search(self, pts, x0, y0, yaw0, radius, yaw_window, step=0.2, yaw_step=math.radians(2)):
-        """Best (score, x, y, yaw) on a grid around (x0, y0, yaw0), plus the best
-        score found farther than 1.5 m from it (for ambiguity), then refined."""
+    def _grid(self, pts, x0, y0, yaw0, radius, yaw_window, step, yaw_step):
+        """Every (x, y) on a grid around (x0, y0), for each yaw in the window: the grid
+        (gx, gy) and per yaw (best score, x, y, yaw, all scores)."""
         xs = np.arange(x0 - radius, x0 + radius + 1e-6, step, dtype=np.float32)
         ys = np.arange(y0 - radius, y0 + radius + 1e-6, step, dtype=np.float32)
         gx, gy = np.meshgrid(xs, ys)
@@ -63,11 +63,9 @@ class MapMatcher:
             sc = self._lookup(gx + rx[None, :], gy + ry[None, :]).mean(axis=1)
             i = int(np.argmin(sc))
             results.append((float(sc[i]), float(gx[i, 0]), float(gy[i, 0]), float(yaw), sc))
-        best = min(results, key=lambda r: r[0])
-        # second best: anything more than 1.5 m away from the best, any yaw
-        far = (np.hypot(gx[:, 0] - best[1], gy[:, 0] - best[2]) > 1.5)
-        second = min(float(r[4][far].min()) if far.any() else self.clip for r in results)
-        # refine around the best
+        return gx, gy, results
+
+    def _refine(self, pts, best):
         sc, x, y, yaw = best[:4]
         for dyaw in np.radians(np.arange(-2.0, 2.01, 0.25)):
             for dx in np.arange(-0.2, 0.201, 0.05):
@@ -75,7 +73,53 @@ class MapMatcher:
                     s2 = self.score(pts, x + dx, y + dy, best[3] + dyaw)
                     if s2 < sc:
                         sc, x, y, yaw = s2, x + dx, y + dy, best[3] + dyaw
+        return sc, x, y, yaw
+
+    def search(self, pts, x0, y0, yaw0, radius, yaw_window, step=0.2, yaw_step=math.radians(2)):
+        """Best (score, x, y, yaw) on a grid around (x0, y0, yaw0), plus the best
+        score found farther than 1.5 m from it (for ambiguity), then refined."""
+        gx, gy, results = self._grid(pts, x0, y0, yaw0, radius, yaw_window, step, yaw_step)
+        best = min(results, key=lambda r: r[0])
+        # second best: anything more than 1.5 m away from the best, any yaw
+        far = (np.hypot(gx[:, 0] - best[1], gy[:, 0] - best[2]) > 1.5)
+        second = min(float(r[4][far].min()) if far.any() else self.clip for r in results)
+        sc, x, y, yaw = self._refine(pts, best)
         return sc, x, y, yaw, second
+
+    def search_here(self, pts, x0, y0, radius, yaw0=0.0, yaw_window=math.pi, turned_deg=30.0,
+                    step=0.2, yaw_step=math.radians(2)):
+        """"I am here" (Step D2): the operator's tap, and with no direction every way round
+        (yaw_window pi). (score, x, y, yaw, second, turned): `second` as in search (a
+        different place fits as well), `turned` the best score at about the same place
+        (within 1.5 m) facing more than turned_deg another way -- a room that looks the
+        same both ways round, where only the operator can say which way the rover faces."""
+        gx, gy, results = self._grid(pts, x0, y0, yaw0, radius, yaw_window, step, yaw_step)
+        best = min(results, key=lambda r: r[0])
+        d = np.hypot(gx[:, 0] - best[1], gy[:, 0] - best[2])
+        far, near = d > 1.5, d <= 1.5
+        second = min(float(r[4][far].min()) if far.any() else self.clip for r in results)
+        apart = lambda a, b: abs((a - b + math.pi) % (2 * math.pi) - math.pi)  # noqa: E731
+        turned = min((float(r[4][near].min()) for r in results
+                      if apart(r[3], best[3]) > math.radians(turned_deg)), default=self.clip)
+        sc, x, y, yaw = self._refine(pts, best)
+        return sc, x, y, yaw, second, turned
+
+
+FOUND, NOT_FOUND, NEED_FRONT = "found", "not found", "need front"
+
+
+def here_verdict(score, second, turned, has_front, accept=0.15, ambig=2.0, floor=0.05):
+    """"I am here" (Step D2): what search_here's numbers mean. Not found when the best fit
+    is poor or another place fits nearly as well; with no direction given, the front is
+    asked for when another way round at the same place fits nearly as well. "Nearly as
+    well" is against at least `floor` (a locked scan scores ~0.05 m): a near-perfect fit
+    must not make every other fit look clearly worse."""
+    ref = ambig * max(score, floor)
+    if score > accept or second < ref:
+        return NOT_FOUND
+    if not has_front and turned < ref:
+        return NEED_FRONT
+    return FOUND
 
 
 def scan_points(msg, max_range=20.0, max_points=300):

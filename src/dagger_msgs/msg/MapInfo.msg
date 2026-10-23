@@ -21,3 +21,8 @@ uint64 created_ms
 # converted exactly as the picture was placed: [datum_lat, datum_lon, yaw_rad, tx, ty]
 # with p_enu = R(yaw) * p_map + t. Empty when not placed.
 float64[] geo
+# Step D2: where the picture's bottom-left corner lies in the map's own frame (its .yaml
+# origin), metres: a point on the picture, x right and y up from that corner, is at
+# (origin_x + x, origin_y + y) on the map. For every map, placed or not.
+float64 origin_x
+float64 origin_y

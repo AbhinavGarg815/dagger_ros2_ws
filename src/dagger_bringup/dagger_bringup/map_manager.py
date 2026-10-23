@@ -13,12 +13,14 @@ In:   /maps/show            dagger_msgs/srv/MapName  draw this map under mission
       /maps/save_map        dagger_msgs/srv/MapName  keep it ("" = the suggested name)
       /maps/discard_mapping std_srvs/srv/Trigger     throw it away
 
-USING A MAP (Step D1, map missions): while a placed map is shown under missions
-(and no map is being made), slam.launch.py runs in SHADOW localization on it:
-slam_toolbox in its own slam_map frame, no TF, nothing Nav2 uses;
-slam_geo_init finds the start pose from GPS + a scan match and says
-/slam/localized. MapList.localizing names that map. The gateway drives a map
-mission's waypoints relative to /slam/pose.
+USING A MAP (Step D1, map missions): while a map is shown under missions (and no
+map is being made), slam.launch.py runs in SHADOW localization on it: slam_toolbox
+in its own slam_map frame, no TF, nothing Nav2 uses; slam_geo_init finds the start
+pose -- from GPS + a scan match on a placed map, or (Step D2, indoor maps and when
+GPS can't) around the spot the operator taps, "I am here" (/slam/here) -- and says
+/slam/localized and /slam/finding. MapList.localizing names that map; MapInfo's
+origin turns points on its picture into points on the map. The gateway drives a
+map mission's waypoints relative to /slam/pose.
 
 MAKING A MAP starts slam.launch.py in its SHADOW mapping mode as a child process:
 slam_toolbox builds the map from /scan in its own slam_map frame and publishes
@@ -129,15 +131,16 @@ class MapManager(Node):
                 corner_lat=[c[0] for c in m.corners], corner_lon=[c[1] for c in m.corners],
                 placed_error_m=float(m.placed_error_m), picture=m.picture,
                 picture_width_px=m.width_px, picture_height_px=m.height_px,
-                picture_version=m.version, created_ms=m.created_ms, geo=list(m.geo)))
+                picture_version=m.version, created_ms=m.created_ms, geo=list(m.geo),
+                origin_x=float(m.origin[0]), origin_y=float(m.origin[1])))
         self.pub.publish(out)
 
     # ---------------- using a map: shadow localization (D1) ----------------
     def update_localization(self):
-        """Localize on the shown map when it is placed and no map is being made; else not."""
+        """Localize on the shown map, placed or not (Step D2), while no map is being made."""
         shown = self.store.shown()
         m = self.store.maps.get(shown)
-        wanted = shown if (m is not None and m.placed and not self.mapping_on) else ""
+        wanted = shown if (m is not None and not self.mapping_on) else ""
         if wanted != self.loc_name:
             self.loc_name = wanted
             self.launches.localize(wanted)     # done on the worker; answered already
@@ -218,7 +221,8 @@ class MapManager(Node):
         ox, oy = g.info.origin.position.x, g.info.origin.position.y
         fit = self.tie.fit()
         info = MapInfo(name="", width_m=float(w * res), height_m=float(h * res), picture=path,
-                       picture_width_px=w, picture_height_px=h, picture_version=self.version)
+                       picture_width_px=w, picture_height_px=h, picture_version=self.version,
+                       origin_x=float(ox), origin_y=float(oy))
         if fit is not None:
             top, right = oy + h * res, ox + w * res
             corners = [to_latlon(fit, x, y) for x, y in ((ox, top), (right, top), (right, oy), (ox, oy))]

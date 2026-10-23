@@ -60,7 +60,11 @@ def setup(context):
     name = context.launch_configurations["map"]
     maps = os.path.join(bringup, "maps")
     base = name if os.path.isabs(name) else os.path.join(maps, name)
-    for ext in (".posegraph", ".data", ".yaml", "_geo.yaml"):
+    # A map not tied to the Earth (Step D2, made indoors) has no _geo.yaml: shadow
+    # localization still runs on it, started from "I am here" instead of GPS.
+    needed = (".posegraph", ".data", ".yaml") + (() if shadow else ("_geo.yaml",))
+    geo = base + "_geo.yaml"
+    for ext in needed:
         if not os.path.exists(base + ext):
             raise RuntimeError(f"missing {base + ext} (build it with tools/slam_replay.sh "
                                "and tools/slam_georef.py)")
@@ -78,7 +82,7 @@ def setup(context):
                                   "map_start_pose": [0.0, 0.0, 0.0]}]),
         Node(package="dagger_bringup", executable="slam_geo_init",
              name="slam_geo_init", output="screen",
-             parameters=[{"geo_file": base + "_geo.yaml", "map_yaml": base + ".yaml",
+             parameters=[{"geo_file": geo if os.path.exists(geo) else "", "map_yaml": base + ".yaml",
                           "map_frame": frame}]),
     ]
 

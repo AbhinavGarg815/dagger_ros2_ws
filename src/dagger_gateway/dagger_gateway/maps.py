@@ -47,6 +47,32 @@ def to_latlon(geo, x, y):
     return lat0 + n / ky, lon0 + e / kx
 
 
+def map_info(msg, name):
+    """The MapInfo of any map in the list (placed or not), or None."""
+    if msg is None:
+        return None
+    return next((m for m in msg.maps if m.name == name), None)
+
+
+# Step D2: points ON a map's picture (what the app shows and the operator taps) -- metres
+# from its bottom-left corner, x right, y up -- and the map's own frame differ only by
+# the picture's origin (its .yaml origin; map_saver never turns the picture).
+def to_picture(m, x, y):
+    """(x, y) on the map -> metres on its picture."""
+    return x - m.origin_x, y - m.origin_y
+
+
+def from_picture(m, px, py):
+    """Metres on a map's picture -> (x, y) on the map."""
+    return px + m.origin_x, py + m.origin_y
+
+
+def picture_heading(yaw):
+    """A yaw on the map (rad, anticlockwise from its x axis) -> degrees clockwise from the
+    picture's up, as the app draws it."""
+    return (90.0 - math.degrees(yaw)) % 360.0
+
+
 def placed_map(msg, name):
     """The MapInfo of a placed map in the list (with its tie), or None."""
     if msg is None:

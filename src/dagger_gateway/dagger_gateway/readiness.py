@@ -20,10 +20,7 @@ import rclpy
 import tf2_ros
 from lifecycle_msgs.srv import GetState
 from rclpy.duration import Duration
-from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from rclpy.qos_event import SubscriptionEventCallbacks
 from rclpy.time import Time
-from std_msgs.msg import Bool
 
 from . import api_pb2 as pb
 
@@ -62,12 +59,6 @@ class Readiness:
         self.grace_s = float(io.param("startup_grace_s"))
         self.estimator_ok = None           # last verdict while the tracks were at neutral
         self.lifecycle = {}                # node -> label ("ABSENT" when no answer)
-        self.slam_localized = None
-        latched = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, depth=1,
-                             durability=DurabilityPolicy.TRANSIENT_LOCAL)
-        io.create_subscription(Bool, "/slam/localized",
-                               lambda m: setattr(self, "slam_localized", m.data), latched,
-                               event_callbacks=SubscriptionEventCallbacks(use_default_callbacks=False))
         # tf on its own small node and thread: /tf comes at hundreds of Hz, and on
         # the gateway's node every message made rclpy rebuild the whole wait set
         # (py-spy, 2026-10-12). Not TransformListener(spin_thread=True) on `io`:
@@ -188,13 +179,23 @@ class Readiness:
         return (PASS if self.rates_ok(pb.CHECK_OBSTACLE_SENSOR, now) else FAIL), {}
 
     def localisation(self, now):
+        """Odometry and the LiDAR's place on the rover, and where it is on a map: the GPS
+        map (gps_map_odom), or -- Step D2, indoors -- found on the shown saved map.
+        values: needs_here 1 when only the operator can say where it is (I am here)."""
+        io = self.io
         odom_age = self.tf_age("odom", "base_footprint")
+        # A map in use: found on it, as SLAM says (io.slam_localized is reset whenever the map
+        # in use changes). No map in use: the GPS map. Readiness used to keep its own copy of
+        # /slam/localized, never forgotten: a map shown at boot and never found left this check
+        # failing for good after it stopped being shown (seen 21-23 Oct: RTK fixed, still red).
+        localizing = bool(io.maps is not None and io.maps.localizing)
+        placed = io.slam_localized if localizing else self.tf_age("map", "base_footprint") is not None
         good = (self.rates_ok(pb.CHECK_LOCALISATION, now)
                 and odom_age is not None and odom_age < 0.3
                 and self.tf_age("base_footprint", "rslidar") is not None
-                and self.tf_age("map", "base_footprint") is not None
-                and self.slam_localized is not False)      # only when SLAM says
-        return (PASS if good else FAIL), {}
+                and placed)
+        values = {"needs_here": 1} if not good and io.slam_finding in (2, 3, 4) else {}
+        return (PASS if good else FAIL), values
 
     def navigation(self, now):
         return (PASS if all(self.lifecycle.get(n) == "active" for n in NAV2_NODES) else FAIL), {}

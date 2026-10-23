@@ -143,8 +143,43 @@ def test_readiness_alerts_and_order():
     assert active(core) == [], "no reading is not a low battery"
     msgs = core.readiness_msgs()
     assert [m.id for m in msgs] == [cid for cid, _ in CHECKS]
-    cam = msgs[-1]
+    cam = next(m for m in msgs if m.id == pb.CHECK_CAMERA)
     assert list(cam.blocks) == [pb.JOB_FOLLOW]
+    src = next(m for m in msgs if m.id == pb.CHECK_DRIVE_SOURCE)
+    assert list(src.blocks) == [pb.JOB_RUN_MAP_MISSION], "the drive source blocks map missions only"
+
+
+# --- Step D2: indoor maps -----------------------------------------------------
+def test_indoors_gps_blocks_gps_missions_only():
+    core, _, _ = make()
+    no_gps = {pb.CHECK_POSITION: (pb.CHECK_STATUS_FAIL, {}), pb.CHECK_HEADING: (pb.CHECK_STATUS_FAIL, {})}
+    core.set_checks(all_checks(pb.CHECK_STATUS_PASS, no_gps))
+    assert core.may_start(pb.JOB_RUN_ROUTE) == pb.REJECT_REASON_NOT_READY
+    assert core.may_start(pb.JOB_RUN_MAP_MISSION) is None, "a map mission doesn't need GPS"
+    core.set_checks(all_checks(pb.CHECK_STATUS_PASS, {
+        **no_gps, pb.CHECK_DRIVE_SOURCE: (pb.CHECK_STATUS_FAIL, {"needs_switch": 1})}))
+    assert core.may_start(pb.JOB_RUN_MAP_MISSION) == pb.REJECT_REASON_NOT_READY
+    assert core.may_start(pb.JOB_FOLLOW) is None, "the drive source blocks map missions only"
+
+
+def test_found_on_the_map_gps_no_longer_decides_ready():
+    core, _, _ = make()
+    no_gps = {pb.CHECK_POSITION: (pb.CHECK_STATUS_FAIL, {}), pb.CHECK_HEADING: (pb.CHECK_STATUS_FAIL, {})}
+    core.set_checks(all_checks(pb.CHECK_STATUS_PASS, no_gps))
+    assert core.state == pb.OPERATING_STATE_NOT_READY
+    assert pb.ALERT_POSITION_NOT_ACCURATE in active(core)
+    core.set_on_map(found=False, no_gps=True)
+    assert core.state == pb.OPERATING_STATE_NOT_READY, "not found yet"
+    assert pb.ALERT_POSITION_NOT_ACCURATE not in active(core), "indoors: no 'wait under open sky'"
+    assert pb.ALERT_HEADING_UNKNOWN not in active(core)
+    core.set_on_map(found=True, no_gps=True)
+    assert core.state == pb.OPERATING_STATE_READY
+    core.set_checks(all_checks(pb.CHECK_STATUS_PASS, {
+        **no_gps, pb.CHECK_OBSTACLE_SENSOR: (pb.CHECK_STATUS_FAIL, {})}))
+    assert core.state == pb.OPERATING_STATE_NOT_READY, "any other check still decides"
+    core.set_checks(all_checks(pb.CHECK_STATUS_PASS, no_gps))
+    core.set_on_map(found=False, no_gps=False)
+    assert core.state == pb.OPERATING_STATE_NOT_READY and pb.ALERT_POSITION_NOT_ACCURATE in active(core)
 
 
 # --- Phase 3: routes and recordings -------------------------------------------

@@ -49,6 +49,7 @@ def test_lists_maps_with_size_and_a_picture():
         assert sorted(store.maps) == ["Workshop", "Yard"]
         y = store.maps["Yard"]
         assert (y.width_px, y.height_px) == (40, 20) and (y.width_m, y.height_m) == (20.0, 10.0)
+        assert y.origin == (-10.0, -5.0), "the picture's bottom-left on the map (Step D2: I am here)"
         img = np.asarray(Image.open(y.picture))
         assert img.shape == (20, 40, 2)
         assert tuple(img[0, 10]) == (0, 255), "a wall: black, solid"

@@ -127,6 +127,28 @@ def test_the_window_on_a_map_is_in_metres():
     assert route_window(xy, 0, (0.0, 0.0), 15.0, dist=math.dist) == (0, 2)
 
 
+def test_a_mission_on_a_map_not_placed_is_kept_on_its_picture():
+    # Step D2: points in metres on the picture (what the app draws), and on the map (driven).
+    with tempfile.TemporaryDirectory() as d:
+        store = RouteStore(d)
+        pic = [(4.25, 7.5), (15.5, 3.75)]
+        xy = [(x - 2.0, y - 5.0) for x, y in pic]      # the picture's origin at (-2, -5)
+        r = store.save("Bench run", [], "Workshop", xy, pic)
+        again = RouteStore(d).get(r.id)
+        assert again.map_name == "Workshop" and again.xy == xy and again.pic == pic and again.points == []
+        s = again.summary()
+        assert [(w.map_x_m, w.map_y_m) for w in s.waypoints] == pic
+        assert all(w.latitude_deg == 0 and w.longitude_deg == 0 for w in s.waypoints)
+        assert abs(s.length_m - math.dist(*pic)) < 0.01
+
+
+def test_progress_on_a_map_is_in_metres():
+    pts = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)]
+    frac, left = progress(pts, 1, (5.0, 0.0), 20.0, dist=math.dist)
+    assert abs(left - 15.0) < 1e-9 and abs(frac - 0.25) < 1e-9
+    assert path_length(pts, math.dist) == 20.0
+
+
 def test_store_skips_a_damaged_file():
     with tempfile.TemporaryDirectory() as d:
         open(os.path.join(d, "bad.json"), "w").write("{not json")

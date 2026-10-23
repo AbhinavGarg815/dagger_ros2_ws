@@ -26,7 +26,7 @@ from rclpy.time import Time
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.qos_event import PublisherEventCallbacks, SubscriptionEventCallbacks
 from sensor_msgs.msg import BatteryState, CameraInfo, Imu, LaserScan, NavSatFix
-from std_msgs.msg import Bool, Float64, Int32, String
+from std_msgs.msg import Bool, Float64, Int32, String, UInt8
 from dagger_msgs.msg import BaseSiteList, BaseStatus, MapList, MappingStatus, MarkerTracks, PersonTracks
 from std_srvs.srv import Trigger
 from geometry_msgs.msg import PoseWithCovarianceStamped
@@ -56,7 +56,7 @@ TOPICS = (
     ("/mavros/imu/data", Imu, True),
     ("/mavros/imu/data_raw", Imu, True),
     ("/mavros/rc/out", RCOut, False),
-    ("/mavros/rc/in", RCIn, True),
+    ("/mavros/rc/in", RCIn, False),       # read (Step D2): the INDOOR switch's position
     ("/mavros/gpsstatus/gps1/raw", GPSRAW, False),
     ("/mavros/global_position/global", NavSatFix, False),
     # Step D3: the receiver's own fix and the autopilot's own heading, to catch the
@@ -189,6 +189,10 @@ class RosIO(Node):
         # changes the flight controller's behaviour: OFF until the owner has tried it with
         # the RC in hand; meanwhile the gateway only logs what it would send.
         p("ekf_source_switching", False)
+        # Step D2: the RC channel of the INDOOR switch (RCx_OPTION 90, EKF source set: low 1,
+        # middle 2, high 3). The Cube acts on it when it moves, so the source in use is the
+        # last of its moves and the gateway's own requests. 0: no such switch.
+        p("indoor_switch_channel", 10)
         g = lambda n: self.get_parameter(n).value  # noqa: E731
         self.param = g
         self.dry_run = bool(g("stop_dry_run"))
@@ -227,6 +231,13 @@ class RosIO(Node):
                                  event_callbacks=QUIET_SUB)
         self.create_subscription(Bool, "/slam/localized", self.on_slam_localized, maps_qos,
                                  event_callbacks=QUIET_SUB)
+        # "I am here" (Step D2): slam_geo_init's progress (the contract's MapFinding values)
+        # and the operator's tap, on the map, out to it.
+        self.slam_finding = None           # 1 searching .. 5 found; None: nothing heard
+        self.create_subscription(UInt8, "/slam/finding", self.on_slam_finding, maps_qos,
+                                 event_callbacks=QUIET_SUB)
+        self.here_pub = self.create_publisher(PoseWithCovarianceStamped, "/slam/here", 10,
+                                              event_callbacks=QUIET_PUB)
         self.map_clis = {kind: self.create_client(typ, srv) for kind, typ, srv in (
             ("show_map", MapName, "/maps/show"), ("delete_map", MapName, "/maps/delete"),
             ("save_map", MapName, "/maps/save_map"), ("start_mapping", Trigger, "/maps/start_mapping"),
@@ -458,6 +469,7 @@ class RosIO(Node):
         if self.maps is None or m.localizing != self.maps.localizing:
             self.slam_localized = False    # a new localization says for itself
             self.slam_pose = None
+            self.slam_finding = None
         self.maps = m
         if self.on_maps:
             self.on_maps()
@@ -478,6 +490,28 @@ class RosIO(Node):
 
     def on_slam_localized(self, m):
         self.slam_localized = bool(m.data) and bool(self.maps is not None and self.maps.localizing)
+
+    def on_slam_finding(self, m):
+        self.slam_finding = int(m.data) if self.maps is not None and self.maps.localizing else None
+
+    def send_here(self, x, y, yaw):
+        """"I am here" on the map (Step D2): the spot, and the way it faces when the
+        operator said (yaw None: unknown -- a huge yaw variance tells slam_geo_init)."""
+        m = PoseWithCovarianceStamped()
+        m.header.stamp = self.get_clock().now().to_msg()
+        m.header.frame_id = "slam_map"
+        m.pose.pose.position.x, m.pose.pose.position.y = float(x), float(y)
+        a = yaw if yaw is not None else 0.0
+        m.pose.pose.orientation.z, m.pose.pose.orientation.w = math.sin(a / 2), math.cos(a / 2)
+        m.pose.covariance[0] = m.pose.covariance[7] = 1.0
+        m.pose.covariance[35] = math.radians(15) ** 2 if yaw is not None else 1e6
+        for _ in range(3):                 # one message can be dropped; a repeat is harmless
+            self.here_pub.publish(m)
+
+    def rc_channel(self, n):
+        """PWM of RC channel n (1-based) as the Cube receives it, or None."""
+        rc = self.fresh("/mavros/rc/in", 2.0)
+        return rc.channels[n - 1] if rc is not None and 0 < n <= len(rc.channels) else None
 
     def map_pose_and_odom(self, max_gap_s=0.2):
         """((x, y, yaw) on the map, (x, y, yaw) in odom) at the same moment -- the
@@ -692,10 +726,11 @@ class RosIO(Node):
 
     def set_ekf_source(self, source_set, done):
         """Ask the Cube to use EK3 source set 1 (GPS) or 2 (LiDAR, ExternalNav); done(ok)
-        in the rclpy thread. With ekf_source_switching off, only logged (done(True))."""
+        in the rclpy thread. With ekf_source_switching off, nothing is sent and done(False):
+        the source stays where the INDOOR switch put it (Step D2: no pretending)."""
         if not self.param("ekf_source_switching"):
             self.get_logger().warn(f"EKF source set {source_set}: switching is off (ekf_source_switching) -- not sent")
-            done(True)
+            done(False)
             return
         if self.dry_run or not self.cmd_cli.service_is_ready():
             self.get_logger().error(f"EKF source set {source_set}: /mavros/cmd/command not available")

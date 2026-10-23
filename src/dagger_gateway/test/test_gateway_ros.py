@@ -264,7 +264,10 @@ async def scene_telemetry(rover):
     check(abs(st.speed_mps - 0.42) < 1e-4, "speed from /odometry/filtered")
     check(st.HasField("battery") and abs(st.battery.percent - 76.0) < 1e-3
           and abs(st.battery.voltage_v - 24.3) < 1e-3, "battery when the Cube measures it")
-    check(not st.HasField("heading"), "invalid GNSS heading -> no heading")
+    # A dropout is bridged on odometry for up to 10 s (gateway-heading-tolerant), marked
+    # POOR; "gone > 10 s -> no heading" is checked in scene_readiness.
+    check(st.HasField("heading") and st.heading.quality == pb.QUALITY_POOR,
+          "invalid GNSS heading just now -> the last one carried on, POOR")
     check(not st.HasField("position"), "no fix -> no position")
     rover.speed, rover.gps_yaw, rover.fix_type = 0.003, 9050, 3
     app.close()

@@ -44,8 +44,9 @@ def distance_m(a, b):
     return math.hypot(e, n)
 
 
-def path_length(points):
-    return sum(distance_m(a, b) for a, b in zip(points, points[1:]))
+def path_length(points, dist=distance_m):
+    """Along the points: lat/lon (distance_m), or pass math.dist for (x, y) in metres."""
+    return sum(dist(a, b) for a, b in zip(points, points[1:]))
 
 
 # MAVLink mission items (MAV_CMD / MAV_FRAME) that ImportMission keeps: a
@@ -191,13 +192,22 @@ def odom_to_ll(x, y, snap):
 class Route:
     """A saved route: points (lat, lon) in driving order. A map mission (Step D1)
     also has the map it belongs to and its points ON that map (x, y), which are
-    what is driven; its lat/lon are for drawing and progress."""
+    what is driven; its lat/lon are for drawing and progress. On a map that is not
+    placed (Step D2) there is no lat/lon: `pic`, the points in metres on the map's
+    picture, is what the app draws, and `points` is empty."""
 
-    def __init__(self, rid, name, points, created_ms, map_name="", xy=None):
+    def __init__(self, rid, name, points, created_ms, map_name="", xy=None, pic=None):
         self.id, self.name, self.points, self.created_ms = rid, name, list(points), created_ms
         self.map_name, self.xy = map_name, [tuple(p) for p in xy] if xy else None
+        self.pic = [tuple(p) for p in pic] if pic else None
 
     def summary(self):
+        if self.pic:
+            r = pb.RouteSummary(id=self.id, name=self.name, created_at_ms=self.created_ms,
+                                length_m=round(path_length(self.pic, math.dist), 2), map_name=self.map_name)
+            for x, y in self.pic:
+                r.waypoints.add(map_x_m=x, map_y_m=y)
+            return r
         r = pb.RouteSummary(id=self.id, name=self.name, length_m=round(path_length(self.points), 2),
                             created_at_ms=self.created_ms, map_name=self.map_name)
         for lat, lon in self.points:
@@ -209,12 +219,14 @@ class Route:
              "points": [[lat, lon] for lat, lon in self.points]}
         if self.map_name:
             d["map"], d["xy"] = self.map_name, [[x, y] for x, y in self.xy]
+        if self.pic:
+            d["pic"] = [[x, y] for x, y in self.pic]
         return d
 
     @staticmethod
     def from_json(d):
         return Route(d["id"], d["name"], [tuple(p) for p in d["points"]], int(d["created_ms"]),
-                     d.get("map", ""), d.get("xy"))
+                     d.get("map", ""), d.get("xy"), d.get("pic"))
 
 
 class RouteStore:
@@ -249,8 +261,8 @@ class RouteStore:
             n += 1
         return f"Route {n}"
 
-    def save(self, name, points, map_name="", xy=None):
-        r = Route(f"r-{uuid.uuid4().hex[:8]}", name, points, wall_ms(), map_name, xy)
+    def save(self, name, points, map_name="", xy=None, pic=None):
+        r = Route(f"r-{uuid.uuid4().hex[:8]}", name, points, wall_ms(), map_name, xy, pic)
         path = os.path.join(self.folder, r.id + ".json")
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
@@ -305,13 +317,14 @@ class Recorder:
         return path_length(pts) if len(pts) >= 2 else 0.0
 
 
-def progress(points, target, here, start_total_m):
+def progress(points, target, here, start_total_m, dist=distance_m):
     """(fraction 0..1, metres remaining) with the rover at `here` driving to
     points[target]. `start_total_m`: the whole drive as it stood at the start
-    (rover to the first point, plus the route)."""
+    (rover to the first point, plus the route). A map mission passes its (x, y) on
+    the map, the rover's SLAM pose and dist=math.dist."""
     if here is None or not points:
         return 0.0, 0.0
-    left = distance_m(here, points[target]) + path_length(points[target:])
+    left = dist(here, points[target]) + path_length(points[target:], dist)
     frac = 1.0 - left / start_total_m if start_total_m > 0 else 0.0
     return max(0.0, min(1.0, frac)), left
 

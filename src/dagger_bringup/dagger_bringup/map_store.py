@@ -36,7 +36,7 @@ class SavedMap:
     """One map: what the app is told about it (`summary`) and its PNG on disk."""
 
     def __init__(self, name, width_px, height_px, resolution, corners, placed_error_m, created_ms, picture,
-                 geo=()):
+                 geo=(), origin=(0.0, 0.0)):
         self.name = name
         self.width_px, self.height_px = width_px, height_px
         self.width_m, self.height_m = width_px * resolution, height_px * resolution
@@ -46,6 +46,7 @@ class SavedMap:
         self.picture = picture                  # absolute path of the PNG
         self.version = int(os.path.getmtime(picture))
         self.geo = tuple(geo)                   # (lat0, lon0, yaw_rad, tx, ty) when placed
+        self.origin = tuple(origin)             # the picture's bottom-left on the map (its .yaml origin)
 
     @property
     def placed(self):
@@ -158,7 +159,7 @@ class MapStore:
             with open(geo) as f:
                 err = float(yaml.safe_load(f).get("residual_rms_m", 0.0))
         created = int(os.path.getmtime(self.path(name, ".yaml")) * 1000)
-        return SavedMap(name, w, h, res, corners, err, created, png, tie)
+        return SavedMap(name, w, h, res, corners, err, created, png, tie, (ox, oy))
 
     # -- naming a new map ----------------------------------------------------
     @staticmethod

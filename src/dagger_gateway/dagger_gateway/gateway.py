@@ -39,7 +39,8 @@ from .routes import (Recorder, RouteStore, Trail, distance_m, home_path, ll_to_o
                      odom_to_ll, path_length, progress)
 from .gps_watch import DisagreeWatch, GpsWatch, RtkWatch
 from .base import base_pb, sites_pb
-from .maps import MapPicture, map_list_pb, mapping_pb, placed_map, to_map
+from .maps import (MapPicture, from_picture, map_info, map_list_pb, mapping_pb, picture_heading, placed_map,
+                   to_map, to_picture)
 from .session import ApiSocket
 from .video import VideoSocket
 from .follow import follow_status, is_selectable, stamp_s, targets_msg, geometry
@@ -80,7 +81,7 @@ class Gateway:
         self.routes_on = bool(g("routes_enabled"))
         self.maps_on = bool(g("maps_enabled"))
         self.capabilities = (CAPABILITIES + (ROUTE_CAPABILITIES if self.routes_on else ())
-                             + ((pb.CAPABILITY_MAPS,) if self.maps_on else ())
+                             + ((pb.CAPABILITY_MAPS, pb.CAPABILITY_FIND_ON_MAP) if self.maps_on else ())
                              + ((pb.CAPABILITY_MAKE_MAP,) if self.maps_on and g("make_maps_enabled") else ())
                              + ((pb.CAPABILITY_BASE_STATION,) if g("base_enabled") else ()))
         self.base_on = bool(g("base_enabled"))
@@ -108,8 +109,15 @@ class Gateway:
         self.snaps = collections.deque(maxlen=15)  # (monotonic s, gps_snapshot), 1 a second while GPS is good
         self.lost_snap = None                      # the last good one before GPS went
         self.lidar_m, self.lidar_last = 0.0, None  # driven on odometry since the last answer
-        self.cube_source = 1                       # the EKF source set last asked for (GPS at boot)
+        self.cube_source = 1                       # the EKF source set in use (GPS at boot)
         self.switching = False
+        # Step D2: the INDOOR switch moves the Cube's source too (the last move wins); the
+        # gateway switches by itself, when allowed, whenever there is no GPS and it is parked.
+        self.indoor_switch = int(g("indoor_switch_channel"))
+        self.switch_pos = None                     # the INDOOR switch's last position (1, 2, 3)
+        self.switch_retry_at = 0.0                 # monotonic s: a refused switch is asked again after
+        self.map_mission_gps = False               # GPS was good when the running map mission began
+        self.drive_source = None                   # (status, values) of CHECK_DRIVE_SOURCE
         self.video_sockets = set()                 # apps watching the picture (video.VideoSocket)
         node.on_video = lambda raw: loop.call_soon_threadsafe(self.on_video_frame, raw)
         node.on_targets = lambda: loop.call_soon_threadsafe(self.on_targets)
@@ -188,10 +196,12 @@ class Gateway:
     # Phase 3 (docs/proposals/phase3-routes.md in DaggerGCS): each returns None when
     # accepted, else the reject reason. The rules are the core's; the ROS side is here.
     def on_start_route(self, cmd):
-        why = self.core.may_start(pb.JOB_RUN_ROUTE)
+        route = self.store.get(cmd.route_id)
+        # A map mission (Step D2) is its own job: on the map, not GPS.
+        why = self.core.may_start(pb.JOB_RUN_MAP_MISSION if route is not None and route.map_name
+                                  else pb.JOB_RUN_ROUTE)
         if why:
             return why
-        route = self.store.get(cmd.route_id)
         if route is None:
             return pb.REJECT_REASON_UNKNOWN_ROUTE
         if route.map_name:
@@ -201,16 +211,43 @@ class Gateway:
                 return pb.REJECT_REASON_NOT_ON_MAP
         if not self.node.armed():
             return pb.REJECT_REASON_NOT_ARMED
-        blocked = self.route_exec.precheck(route.points, route.xy)
+        # A map mission is driven and measured on its map: its (x, y), from the SLAM pose.
+        pts = route.xy if route.map_name else route.points
+        blocked = self.route_exec.precheck(pts, route.xy)
         if blocked:
             return pb.REJECT_REASON_WAYPOINT_BLOCKED, blocked
         self.set_home()
-        here = self.node.good_fix()
-        total = (distance_m(here, route.points[0]) if here else 0.0) + path_length(route.points)
+        if route.map_name:
+            pose = self.node.slam_pose
+            here = pose[1:3] if pose is not None else None
+            total = (math.dist(here, pts[0]) if here else 0.0) + path_length(pts, math.dist)
+            self.map_mission_gps = not self.gps.lost
+        else:
+            here = self.node.good_fix()
+            total = (distance_m(here, pts[0]) if here else 0.0) + path_length(pts)
         self.node.release_estop()
         self.node.ensure_guided()
-        self.core.route_started(route.id, route.points, total)
-        self.route_exec.start(route.points, 0, route.xy)
+        self.core.route_started(route.id, pts, total)
+        self.route_exec.start(pts, 0, route.xy)
+        return None
+
+    def on_set_here_on_map(self, cmd):
+        """"I am here" (Step D2): the operator's tap on the shown map's picture, to the map
+        frame, then to slam_geo_init, which searches around it. Moves nothing."""
+        if not self.maps_on:
+            return pb.REJECT_REASON_NOT_SUPPORTED
+        m = map_info(self.node.maps, cmd.map_name)
+        if m is None:
+            return pb.REJECT_REASON_UNKNOWN_MAP
+        if self.node.maps.localizing != cmd.map_name:
+            return pb.REJECT_REASON_NOT_ON_MAP
+        if self.core.route == "running" or self.core.following:
+            return pb.REJECT_REASON_NOT_IN_THIS_STATE
+        x, y = from_picture(m, cmd.x_m, cmd.y_m)
+        yaw = math.atan2(cmd.front_y_m - cmd.y_m, cmd.front_x_m - cmd.x_m) if cmd.has_front else None
+        self.node.send_here(x, y, yaw)
+        self.log.info(f"I am here on '{cmd.map_name}': ({cmd.x_m:.2f}, {cmd.y_m:.2f}) on the picture"
+                      + (f", facing {picture_heading(yaw):.0f} deg" if yaw is not None else ""))
         return None
 
     # ---------------- following (Phase 4) ----------------
@@ -333,6 +370,9 @@ class Gateway:
         if self.gps.lost:
             # Carry on with no GPS (Step D3): a GPS route goes on, on odometry, from the
             # last good moment; a new allowance of lidar_carry_on_m before it asks again.
+            if self.cube_source != 2 and not self.node.param("ekf_source_switching"):
+                # The Cube stays on GPS (no position): only the INDOOR switch can change that.
+                return pb.REJECT_REASON_NOT_READY
             if self.route_exec.mode == "gps":
                 if self.lost_snap is None:
                     return pb.REJECT_REASON_NOT_READY
@@ -395,20 +435,27 @@ class Gateway:
         if len(cmd.waypoints) < 2:
             return pb.REJECT_REASON_TOO_SHORT
         points = [(w.latitude_deg, w.longitude_deg) for w in cmd.waypoints]
-        xy = None
+        xy = pic = None
         if cmd.map_name:
             # Planned on a placed map (Step D1): kept as points ON it, converted with the
             # map's own tie -- the same as placed its picture, so a waypoint sits exactly
             # where it was put relative to the walls.
             m = placed_map(self.node.maps, cmd.map_name)
-            if m is None:
-                return pb.REJECT_REASON_UNKNOWN_MAP
-            xy = [to_map(tuple(m.geo), lat, lon) for lat, lon in points]
+            if m is not None:
+                xy = [to_map(tuple(m.geo), lat, lon) for lat, lon in points]
+            else:
+                # A map not placed (Step D2): the points come as metres on its picture.
+                m = map_info(self.node.maps, cmd.map_name)
+                if m is None:
+                    return pb.REJECT_REASON_UNKNOWN_MAP
+                pic = [(w.map_x_m, w.map_y_m) for w in cmd.waypoints]
+                xy = [from_picture(m, x, y) for x, y in pic]
+                points = []
         name = cmd.name.strip() or self.store.suggested_name()
         if self.store.name_taken(name):
             return pb.REJECT_REASON_NAME_TAKEN
-        route = self.store.save(name, points, cmd.map_name, xy)
-        self.log.info(f"mission saved: '{route.name}' ({len(route.points)} waypoints) as {route.id}"
+        route = self.store.save(name, points, cmd.map_name, xy, pic)
+        self.log.info(f"mission saved: '{route.name}' ({len(cmd.waypoints)} waypoints) as {route.id}"
                       + (f" on map '{cmd.map_name}'" if cmd.map_name else ""))
         self.broadcast_routes()
         return None
@@ -618,7 +665,17 @@ class Gateway:
                                              quality=pb.QUALITY_POOR, rtk=pb.RTK_STATUS_NONE,
                                              from_odometry=True))
             here = est
-        if core.route is not None and core.route_points:
+        on_map = self.route_exec is not None and self.route_exec.mode == "map" and not core.going_home
+        if core.route is not None and core.route_points and on_map:
+            pose = self.node.slam_pose        # a map mission: on its map (Step D2)
+            frac, left = progress(core.route_points, core.target, pose[1:3] if pose else None,
+                                  core.route_total_m, dist=math.dist)
+            st.route.route_id = core.route_id
+            st.route.target_index = core.target + 1
+            st.route.waypoint_count = len(core.route_points)
+            st.route.fraction_done = frac
+            st.route.distance_remaining_m = round(left, 2)
+        elif core.route is not None and core.route_points:
             frac, left = progress(core.route_points, core.target, here, core.route_total_m)
             st.route.route_id = core.route_id
             st.route.target_index = core.target + 1
@@ -643,8 +700,19 @@ class Gateway:
             st.base.CopyFrom(base_pb(self.node.base_status))
         ml = self.node.maps
         if self.maps_on and ml is not None and ml.localizing:
-            st.map_position.map_name = ml.localizing
-            st.map_position.located = self.node.slam_localized
+            mp = st.map_position
+            mp.map_name = ml.localizing
+            mp.located = self.node.slam_localized
+            f = self.node.slam_finding
+            mp.finding = (pb.MAP_FINDING_FOUND if mp.located
+                          else f if f in (pb.MAP_FINDING_SEARCHING, pb.MAP_FINDING_NEED_HERE,
+                                          pb.MAP_FINDING_NOT_FOUND_HERE, pb.MAP_FINDING_NEED_FRONT)
+                          else pb.MAP_FINDING_SEARCHING)
+            m, pose = map_info(ml, ml.localizing), self.node.slam_pose
+            if mp.located and m is not None and pose is not None:
+                mp.has_pose = True
+                mp.x_m, mp.y_m = (round(v, 3) for v in to_picture(m, pose[1], pose[2]))
+                mp.heading_deg = round(picture_heading(pose[3]), 1)
         mp = mapping_pb(self.node.mapping) if self.maps_on else None
         if mp is not None:
             st.mapping.CopyFrom(mp)
@@ -742,13 +810,24 @@ class Gateway:
                 c.route_paused(pb.STATE_REASON_GPS_LOST)
         else:
             self.lidar_last = None
+        self.watch_indoor_switch()
+        switching_on = bool(self.node.param("ekf_source_switching"))
+        may_ask = switching_on and not self.switching and self.parked() and now >= self.switch_retry_at
         # GPS back and the rover parked: the Cube back on GPS.
-        if self.cube_source == 2 and not self.gps.lost and not self.switching and self.parked():
-            self.switch_source(1, lambda ok: self.log.warn("FCU back on GPS" if ok else "FCU: back on GPS refused"))
+        if self.cube_source == 2 and not self.gps.lost and may_ask:
+            self.switch_source(1, lambda ok: self.switched(1, ok))
+        # Step D2 (owner, 2026-10-21: "the gateway can do it whenever required"): no GPS and
+        # parked -- indoors from the start, or GPS gone -- the Cube onto its LiDAR source, so a
+        # map mission (or Follow) has a position to drive on.
+        elif self.cube_source != 2 and self.gps.lost and may_ask:
+            self.switch_source(2, lambda ok: self.switched(2, ok))
+        self.drive_source = self.drive_source_check(switching_on)
         a, driving = c.alerts, c.route == "running"
         a.set(pb.ALERT_NO_GPS_ON_LIDAR, on_odometry, pb.SEVERITY_WARNING,
               {"metres_left": max(0, round(self.lidar_limit_m - self.lidar_m))})
-        a.set(pb.ALERT_NO_GPS_ON_MAP, self.gps.lost and driving and ex is not None and ex.mode == "map")
+        # Only when GPS went DURING the mission: one begun indoors never had it (Step D2).
+        a.set(pb.ALERT_NO_GPS_ON_MAP, self.gps.lost and driving and ex is not None and ex.mode == "map"
+              and self.map_mission_gps)
         base = self.node.base_status if self.base_on else None
         sending = base is not None and base.heard and base.mode == base.MODE_FIXED
         a.set(pb.ALERT_RTK_LOST, self.rtk_watch.feed(now, sending, fix_type) and not self.gps.lost)
@@ -756,11 +835,58 @@ class Gateway:
         off = self.disagree.feed(now, not self.gps.lost and self.cube_source == 1, fcu, gnss, apart)
         c.set_position_disagrees(off, {"degrees": round(self.disagree.deg), "metres": round(self.disagree.m, 1)})
 
+    def switched(self, source_set, ok):
+        if ok:
+            self.log.warn(f"FCU on EKF source set {source_set} ({'GPS' if source_set == 1 else 'LiDAR'})")
+        else:
+            self.switch_retry_at = time.monotonic() + 10.0
+            self.log.error(f"FCU: EKF source set {source_set} refused; asking again in 10 s")
+
+    def watch_indoor_switch(self):
+        """The INDOOR switch (Step D2): when it moves, the Cube takes its source set."""
+        pwm = self.node.rc_channel(self.indoor_switch) if self.indoor_switch > 0 else None
+        if pwm is None or pwm <= 0:
+            return
+        pos = 1 if pwm < 1200 else 3 if pwm > 1800 else 2     # ArduPilot's aux switch thresholds
+        if pos != self.switch_pos:
+            first = self.switch_pos is None
+            self.switch_pos = pos
+            if not self.switching:
+                self.cube_source = pos
+            self.log.warn(f"INDOOR switch {'at' if first else 'moved to'} {('low', 'middle', 'high')[pos - 1]}: "
+                          f"the Cube on EKF source set {pos}")
+
+    def drive_source_check(self, switching_on):
+        """CHECK_DRIVE_SOURCE (Step D2): the Cube has a position to drive a map mission on --
+        GPS, or with none its LiDAR source -- and its estimator is steady while parked.
+        Judged only while a map is in use: it blocks only map missions, and outdoors a
+        heading dropout (GPS "lost" for a few seconds) must not make the rover NOT_READY.
+        PENDING until the Cube is heard: nothing is known about its source before."""
+        fc = self.core.checks.get(pb.CHECK_FLIGHT_CONTROLLER, (pb.CHECK_STATUS_PENDING, {}))[0]
+        if fc == pb.CHECK_STATUS_PENDING:
+            return pb.CHECK_STATUS_PENDING, {}
+        ml = self.node.maps
+        if not (self.maps_on and ml is not None and ml.localizing):
+            return pb.CHECK_STATUS_PASS, {}
+        if self.node.readiness.estimator_ok is False:
+            return pb.CHECK_STATUS_FAIL, {}
+        if not self.gps.lost or self.cube_source == 2:
+            return pb.CHECK_STATUS_PASS, {}
+        return pb.CHECK_STATUS_FAIL, ({} if switching_on else {"needs_switch": 1})
+
     def tick_state(self):
         checks = self.node.checks
-        if checks is not self.checks_in:   # readiness replaces the dict once a second
+        ds = self.drive_source
+        if checks is not self.checks_in or (ds is not None and ds != self.core.checks.get(pb.CHECK_DRIVE_SOURCE)):
+            # readiness replaces the dict once a second; the drive source is the gateway's own
             self.checks_in = checks
+            if ds is not None:
+                checks = dict(checks)
+                checks[pb.CHECK_DRIVE_SOURCE] = ds
             self.core.set_checks(checks)
+        ml = self.node.maps
+        in_use = bool(self.maps_on and ml is not None and ml.localizing)
+        self.core.set_on_map(in_use and self.node.slam_localized, in_use and self.gps.lost)
         self.core.set_following(self.node.following())
         here = None
         if self.core.state == pb.OPERATING_STATE_RECORDING:
