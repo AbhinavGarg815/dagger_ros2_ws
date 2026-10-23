@@ -35,12 +35,13 @@ from . import api_pb2 as pb
 from .ros_io import RosIO
 from .route_executor import RouteExecutor
 from .rover_state import RoverCore, Settings
-from .routes import (HomeStore, Recorder, RouteStore, Trail, distance_m, home_path, ll_to_odom, mission_waypoints,
+from .routes import (HomeStore, MapTrail, Recorder, RouteStore, Trail, distance_m, home_path, ll_to_odom,
+                     mission_waypoints,
                      odom_to_ll, path_length, progress)
 from .gps_watch import DisagreeWatch, GpsWatch, RtkWatch
 from .base import base_pb, sites_pb
 from .maps import (MapPicture, from_picture, map_info, map_list_pb, mapping_pb, picture_heading, placed_map,
-                   to_map, to_picture)
+                   to_latlon, to_map, to_picture)
 from .session import ApiSocket
 from .video import VideoSocket
 from .follow import follow_status, is_selectable, stamp_s, targets_msg, geometry
@@ -82,7 +83,8 @@ class Gateway:
         self.routes_on = bool(g("routes_enabled"))
         self.maps_on = bool(g("maps_enabled"))
         self.capabilities = (CAPABILITIES + (ROUTE_CAPABILITIES if self.routes_on else ())
-                             + ((pb.CAPABILITY_MAPS, pb.CAPABILITY_FIND_ON_MAP) if self.maps_on else ())
+                             + ((pb.CAPABILITY_MAPS, pb.CAPABILITY_FIND_ON_MAP, pb.CAPABILITY_HOME_ON_MAP)
+                                if self.maps_on else ())
                              + ((pb.CAPABILITY_MAKE_MAP,) if self.maps_on and g("make_maps_enabled") else ())
                              + ((pb.CAPABILITY_BASE_STATION,) if g("base_enabled") else ()))
         self.base_on = bool(g("base_enabled"))
@@ -102,10 +104,18 @@ class Gateway:
         self.trail = None                          # routes.Trail from home, once the first job starts
         # Home kept across restarts (SetHome, owner 2026-10-23): the trail back starts from it.
         self.homes = HomeStore(g("home_file"))
+        # Home on a saved map (indoors, Step D2+): (map name, x, y on the map), and where the
+        # rover has been on the map in use, to drive home on it. One home at a time.
+        self.map_home = None
+        self.map_trail = None
         kept = self.homes.load()
         if kept is not None:
             self.trail = Trail(kept)
             self.log.info(f"home kept from before: {kept[0]:.7f}, {kept[1]:.7f}")
+        else:
+            self.map_home = self.homes.load_map()
+            if self.map_home is not None:
+                self.log.info(f"home kept from before, on the map '{self.map_home[0]}'")
         # Step D3, GPS lost during a job (DaggerGCS docs/proposals/operating-modes.md section 4)
         self.gps = GpsWatch(float(g("gps_lost_after_s")), float(g("gps_lost_accuracy_m")),
                             float(g("gps_back_after_s")))
@@ -188,12 +198,51 @@ class Gateway:
 
     def set_home(self):
         """The session's first job fixes home where the rover is (a 3-D fix)."""
-        if self.trail is None:
+        if self.trail is None and self.map_home is None:
             here = self.node.good_fix()
             if here is not None:
                 self.trail = Trail(here)
                 self.homes.save(*here)
                 self.log.info(f"home set at {here[0]:.7f}, {here[1]:.7f}")
+            else:
+                f = self.found_pose()                    # indoors: where it is on the map in use
+                if f is not None:
+                    self.set_map_home(f[0], f[1], f[2])
+
+    def found_pose(self):
+        """(map name, x, y, yaw) of the rover on the shown map once found on it, else None."""
+        ml, pose = self.node.maps, self.node.slam_pose
+        if not (self.maps_on and ml is not None and ml.localizing and self.node.slam_localized and pose):
+            return None
+        return ml.localizing, pose[1], pose[2], pose[3]
+
+    def set_map_home(self, name, x, y):
+        """Home on a saved map (Step D2+). The map trail starts again from it."""
+        self.map_home, self.trail = (name, x, y), None
+        self.map_trail = MapTrail(name, (x, y))
+        self.homes.save_map(name, x, y)
+        self.log.info(f"home set on the map '{name}' at ({x:.2f}, {y:.2f})")
+
+    def map_way_home(self):
+        """(reject reason or None, points on the map or None): the way home on the map in use,
+        when the rover is found on it and home is on it -- a home on this map, or a GPS home
+        on a placed map (through its tie). (None, None): not on a map, go on GPS as before."""
+        f = self.found_pose()
+        target = None
+        if self.map_home is not None:
+            if f is None or f[0] != self.map_home[0]:
+                return pb.REJECT_REASON_NOT_ON_MAP, None
+            target = self.map_home[1:]
+        elif self.trail is not None and f is not None:
+            m = placed_map(self.node.maps, f[0])
+            if m is not None:
+                target = to_map(tuple(m.geo), *self.trail.home)
+        if target is None:
+            return None, None
+        been = list(self.map_trail.points) if self.map_trail is not None and self.map_trail.name == f[0] else []
+        if not been or math.dist(been[0], target) > 0.05:
+            been = [tuple(target)] + been
+        return None, home_path(been, (f[1], f[2]), dist=math.dist)
 
     def on_set_home(self, cmd):
         """Move home (owner, 2026-10-23): where the rover stands -- its trail back starts again
@@ -204,23 +253,38 @@ class Gateway:
         if cmd.here:
             at = self.node.good_fix()
             if at is None:
-                return pb.REJECT_REASON_NOT_READY
+                f = self.found_pose()                    # indoors: where it is on the map in use
+                if f is None:
+                    return pb.REJECT_REASON_NOT_READY
+                self.set_map_home(f[0], f[1], f[2])
+                return None
             odom = self.node.odom_now()
             self.trail = Trail(at, odom[:2] if odom is not None else None)
+        elif cmd.on_map:
+            m = map_info(self.node.maps, cmd.map_name)
+            if m is None:
+                return pb.REJECT_REASON_UNKNOWN_MAP
+            if self.node.maps.localizing != cmd.map_name:
+                return pb.REJECT_REASON_NOT_ON_MAP
+            self.set_map_home(cmd.map_name, *from_picture(m, cmd.map_x_m, cmd.map_y_m))
+            return None
         else:
             at = (cmd.at.latitude_deg, cmd.at.longitude_deg)
             if not (math.isfinite(at[0]) and math.isfinite(at[1])) or at == (0.0, 0.0):
                 return pb.REJECT_REASON_NOT_SUPPORTED
             snap = self.node.gps_snapshot()
             self.trail = Trail(at, ll_to_odom([at], snap)[0] if snap is not None else None)
+        self.map_home = None                             # one home: this one, on the Earth
         self.homes.save(*at)
         self.log.info(f"home moved {'to where the rover stands' if cmd.here else 'to a place on the map'}: "
                       f"{at[0]:.7f}, {at[1]:.7f}")
         return None
 
     def on_route_done(self):
-        if self.core.going_home and self.trail is not None:
-            self.trail.reset()
+        if self.core.going_home and (self.trail is not None or self.map_home is not None):
+            if self.trail is not None:
+                self.trail.reset()
+            self.map_trail = MapTrail(*self.map_home[:1], self.map_home[1:]) if self.map_home else None
             self.log.info("route: home reached")
         self.core.route_finished()
 
@@ -337,10 +401,26 @@ class Gateway:
         why = None if gps_question else self.core.may_start(pb.JOB_COME_HOME)
         if why:
             return why
-        if self.trail is None:
+        if self.trail is None and self.map_home is None:
             return pb.REJECT_REASON_NO_HOME
         if not self.node.armed():
             return pb.REJECT_REASON_NOT_ARMED
+        # Found on the map in use (Step D2+, owner 2026-10-23): home is driven on the map.
+        why, points = self.map_way_home()
+        if why:
+            return why
+        if points:
+            if gps_question:
+                self.route_exec.cancel()
+                self.core.route_cancelled()
+            pose = self.node.slam_pose
+            total = math.dist(pose[1:3], points[0]) + path_length(points, math.dist)
+            self.log.info(f"return to home on the map '{self.node.maps.localizing}': {len(points)} points, {total:.0f} m")
+            self.node.release_estop()
+            self.node.ensure_guided()
+            self.core.route_started("", points, total, home=True)
+            self.route_exec.start(points, 0, xy=points)
+            return None
         if self.gps.lost:
             return self.come_home_on_odometry(gps_question)
         if gps_question:
@@ -696,7 +776,7 @@ class Gateway:
                                              quality=pb.QUALITY_POOR, rtk=pb.RTK_STATUS_NONE,
                                              from_odometry=True))
             here = est
-        on_map = self.route_exec is not None and self.route_exec.mode == "map" and not core.going_home
+        on_map = self.route_exec is not None and self.route_exec.mode == "map"
         if core.route is not None and core.route_points and on_map:
             pose = self.node.slam_pose        # a map mission: on its map (Step D2)
             frac, left = progress(core.route_points, core.target, pose[1:3] if pose else None,
@@ -706,6 +786,15 @@ class Gateway:
             st.route.waypoint_count = len(core.route_points)
             st.route.fraction_done = frac
             st.route.distance_remaining_m = round(left, 2)
+            if core.going_home:                # the way home on the map (Step D2+)
+                m = map_info(self.node.maps, self.node.maps.localizing) if self.node.maps is not None else None
+                for x, y in core.route_points[:200]:
+                    if m is not None and m.placed and len(m.geo) == 5:
+                        lat, lon = to_latlon(tuple(m.geo), x, y)
+                        st.route.waypoints.add(latitude_deg=lat, longitude_deg=lon)
+                    elif m is not None:
+                        px, py = to_picture(m, x, y)
+                        st.route.waypoints.add(map_x_m=round(px, 3), map_y_m=round(py, 3))
         elif core.route is not None and core.route_points:
             frac, left = progress(core.route_points, core.target, here, core.route_total_m)
             st.route.route_id = core.route_id
@@ -722,6 +811,15 @@ class Gateway:
         if self.trail is not None:
             st.home.latitude_deg, st.home.longitude_deg = self.trail.home
             st.home.quality = pb.QUALITY_GOOD
+        elif self.map_home is not None:            # home on a saved map (Step D2+)
+            name, hx, hy = self.map_home
+            m = map_info(self.node.maps, name)
+            if m is not None:
+                px, py = to_picture(m, hx, hy)
+                st.home_on_map.map_name, st.home_on_map.x_m, st.home_on_map.y_m = name, round(px, 3), round(py, 3)
+                if m.placed and len(m.geo) == 5:   # on the Earth too
+                    st.home.latitude_deg, st.home.longitude_deg = to_latlon(tuple(m.geo), hx, hy)
+                    st.home.quality = pb.QUALITY_GOOD
         if core.recording is not None:
             for lat, lon in core.recording.points:
                 st.recording.waypoints.add(latitude_deg=lat, longitude_deg=lon)
@@ -905,6 +1003,17 @@ class Gateway:
             return pb.CHECK_STATUS_PASS, {}
         return pb.CHECK_STATUS_FAIL, ({} if switching_on else {"needs_switch": 1})
 
+    def record_map_trail(self):
+        """Where the rover goes on the map in use, while found on it (Step D2+): the way home
+        indoors. Not while it is on its way home."""
+        f = self.found_pose()
+        if f is None or self.core.going_home:
+            return
+        if self.map_trail is None or self.map_trail.name != f[0]:
+            on_it = self.map_home is not None and self.map_home[0] == f[0]
+            self.map_trail = MapTrail(f[0], self.map_home[1:] if on_it else None)
+        self.map_trail.add(f[1], f[2])
+
     def tick_state(self):
         checks = self.node.checks
         ds = self.drive_source
@@ -931,6 +1040,7 @@ class Gateway:
             if here is not None:
                 self.trail.add(*here)
         self.watch_gps()
+        self.record_map_trail()
         self.core.link_tick([s.silence_ms() for s in self.apps()])
         for s in self.apps():
             s.send_state()

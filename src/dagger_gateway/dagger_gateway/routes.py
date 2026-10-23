@@ -162,12 +162,46 @@ class HomeStore:
             return None
         return (lat, lon) if math.isfinite(lat) and math.isfinite(lon) else None
 
+    def load_map(self):
+        """Home on a saved map (indoors, Step D2+): (map name, x, y on the map), or None."""
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                d = json.load(f)
+            name, x, y = str(d["map"]), float(d["x"]), float(d["y"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        return (name, x, y) if name and math.isfinite(x) and math.isfinite(y) else None
+
     def save(self, lat, lon):
+        self._write({"lat": lat, "lon": lon, "saved_ms": wall_ms()})
+
+    def save_map(self, name, x, y):
+        self._write({"map": name, "x": x, "y": y, "saved_ms": wall_ms()})
+
+    def _write(self, d):
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
         tmp = self.path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"lat": lat, "lon": lon, "saved_ms": wall_ms()}, f)
+            json.dump(d, f)
         os.replace(tmp, self.path)
+
+
+class MapTrail:
+    """Where the rover has been on one saved map, (x, y) on it, a point every TRAIL_STEP_M
+    (Step D2+, home indoors): recorded while it is found on the map in use, so the way home
+    can be driven on the map. points[0] is home when home is on this map."""
+
+    MAX_POINTS = 3000
+
+    def __init__(self, name, start=None):
+        self.name = name
+        self.points = [tuple(start)] if start is not None else []
+
+    def add(self, x, y):
+        if not self.points or math.dist(self.points[-1], (x, y)) >= TRAIL_STEP_M:
+            self.points.append((x, y))
+            if len(self.points) > self.MAX_POINTS:      # keep where it started (home), drop the oldest after
+                del self.points[1]
 
 
 def wall_ms():

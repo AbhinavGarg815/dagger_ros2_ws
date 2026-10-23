@@ -204,6 +204,24 @@ def test_the_way_to_a_home_tapped_on_the_map_goes_back_along_the_trail_then_to_i
     assert distance_m(way[-2], north(0.0)) < 1.0, "after coming back along its own trail"
 
 
+def test_home_on_a_map_is_kept_and_the_map_trail_starts_at_home():
+    from dagger_gateway.routes import HomeStore, MapTrail
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "home.json")
+        HomeStore(path).save_map("Workshop", -8.0, 3.5)
+        assert HomeStore(path).load_map() == ("Workshop", -8.0, 3.5)
+        assert HomeStore(path).load() is None, "a map home is not a GPS home"
+        HomeStore(path).save(26.7479600, 75.8552800)
+        assert HomeStore(path).load_map() is None and HomeStore(path).load() is not None
+    trail = MapTrail("Workshop", (-8.0, 3.5))
+    for k in range(1, 11):
+        trail.add(-8.0 + k, 3.5)                  # 10 m along the map
+    trail.add(1.5, 3.5)                           # 0.5 m: not a new point
+    assert trail.points[0] == (-8.0, 3.5) and len(trail.points) == 11
+    way = home_path(trail.points, (2.0, 3.5), dist=math.dist)
+    assert way[-1] == (-8.0, 3.5), "the way home ends at home"
+
+
 def test_progress_and_window():
     pts = [north(m) for m in (0, 10, 20, 30, 40)]
     total = path_length(pts)
