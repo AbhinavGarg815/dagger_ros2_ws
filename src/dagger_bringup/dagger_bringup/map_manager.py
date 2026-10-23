@@ -53,6 +53,7 @@ from nav_msgs.msg import OccupancyGrid
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
+from mavros_msgs.msg import GPSRAW
 from sensor_msgs.msg import Imu, NavSatFix
 from slam_toolbox.srv import SerializePoseGraph
 from std_srvs.srv import Trigger
@@ -186,15 +187,26 @@ class MapManager(Node):
             self.create_subscription(NavSatFix, "/mavros/global_position/global", self.on_fix,
                                      qos_profile_sensor_data),
             self.create_subscription(Imu, "/gps/heading_imu", self.on_heading, qos_profile_sensor_data),
+            # the receiver's own accuracy for each fix (the tie, stricter 2026-10-23)
+            self.create_subscription(GPSRAW, "/mavros/gpsstatus/gps1/raw", self.on_raw, qos_profile_sensor_data),
         ]
         self.publish_status()
         res.success, res.message = True, ""
         return res
 
+    def on_raw(self, m):
+        self.raw = (time.monotonic(), m.fix_type, m.h_acc / 1000.0 if m.h_acc > 0 else None)
+
     def on_fix(self, m):
-        if self.tie is not None and m.status.status >= 0:
-            sigma = math.sqrt(max(m.position_covariance[0], m.position_covariance[4], 1e-4))
-            self.tie.add_fix(stamp_s(m.header), m.latitude, m.longitude, sigma)
+        """A fix for the tie, with the RECEIVER's accuracy (gps1/raw): the autopilot's own
+        covariance said a few metres whether RTK fixed or indoors (Map 4, 2026-10-23)."""
+        raw = getattr(self, "raw", None)
+        if self.tie is None or m.status.status < 0 or raw is None or time.monotonic() - raw[0] > 1.0:
+            return
+        _, fix_type, h_acc = raw
+        if fix_type < 3 or h_acc is None:
+            return
+        self.tie.add_fix(stamp_s(m.header), m.latitude, m.longitude, max(h_acc, 0.01))
 
     def on_heading(self, m):
         if self.tie is not None:
@@ -273,7 +285,9 @@ class MapManager(Node):
                 if fit is not None:
                     with open(base + "_geo.yaml", "w") as f:
                         f.write(geo_yaml(fit, f"saved {time.strftime('%Y-%m-%d %H:%M')}"))
-                self.get_logger().info(f"map saved: '{name}'" + ("" if fit else " (not placed: no good GPS)"))
+                self.get_logger().info(f"map saved: '{name}'" + (
+                    f" (placed: turn {math.degrees(fit['rot']):+.2f} deg, rms {fit['rms']:.2f} m over "
+                    f"{fit['kept']} pairs)" if fit else " (not placed: no good GPS)"))
         except Exception as e:  # noqa: BLE001
             self.get_logger().error(f"save '{name}': {e!r}")
             ok = False

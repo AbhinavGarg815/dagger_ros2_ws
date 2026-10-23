@@ -54,6 +54,39 @@ def test_the_fit_finds_the_turn_and_the_shift():
     assert fit["rms"] < 1.5
 
 
+def test_an_outdoor_then_indoor_drive_is_placed_by_its_good_outdoor_part():
+    # Map 4, 2026-10-23: a minute in the open with RTK and a good heading, then through a door:
+    # the SLAM heading drifts up to 15 deg indoors while GPS still gives fixes a few metres off
+    # (sigma 3-6 m) and the odd heading. Only the good outdoor part may place the map.
+    random.seed(2)
+    tie = Tie()
+    kx, ky = enu_scale(LAT0)
+    c, s = math.cos(ROT), math.sin(ROT)
+    for i in range(160):
+        t = i * 1.0
+        x, y = 0.4 * i, 2.0 * math.sin(i / 9.0)
+        indoors = i >= 60
+        drift = math.radians(15.0) * min(1.0, (i - 60) / 60.0) if indoors else 0.0
+        true_yaw = 0.2 * math.sin(i / 5.0)
+        e, n = c * x - s * y + TX, s * x + c * y + TY
+        if indoors:
+            sig = random.uniform(3.0, 6.0)
+            tie.add_fix(t + 0.05, LAT0 + (n + 8.0 + random.gauss(0, 2)) / ky, LON0 + (e - 6.0) / kx, sig)
+            if i % 3 == 0:
+                tie.add_heading(t + 0.03, true_yaw + ROT + math.radians(random.uniform(-20, 20)))
+        else:
+            tie.add_fix(t + 0.05, LAT0 + (n + random.gauss(0, 0.02)) / ky, LON0 + (e + random.gauss(0, 0.02)) / kx, 0.03)
+            tie.add_heading(t + 0.03, true_yaw + ROT)
+        tie.add_pose(t, x, y, true_yaw + drift)          # SLAM's own heading drifts indoors
+    fit = tie.fit()
+    assert fit is not None
+    assert abs(math.degrees(fit["rot"]) - 30.0) < 0.5, math.degrees(fit["rot"])
+    lat, lon = to_latlon(fit, 20.0, 1.0)
+    e, n = (lon - LON0) * kx, (lat - LAT0) * ky
+    assert math.hypot(e - (c * 20 - s * 1 + TX), n - (s * 20 + c * 1 + TY)) < 0.3
+    assert fit["rms"] < 0.3, "rms over the good pairs, not inflated by indoor fixes"
+
+
 def test_not_placed_without_heading_or_with_too_few_fixes():
     t1 = Tie()
     drive(t1, heading=False)

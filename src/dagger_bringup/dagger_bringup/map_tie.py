@@ -16,6 +16,18 @@ from a recording afterwards:
 Not placed until there are MIN_PAIRS heading pairs and position pairs: indoors,
 or with no heading, the map is saved "not placed" (owner, 2026-10-15).
 The result is written as <name>_geo.yaml, read by geo_map.GeoMap.
+
+STRICTER (2026-10-23, Map 4 turned 4.8 deg on an outdoor -> indoor drive: the heading was
+patchy by the building and the map drifted indoors before the drive came back out):
+  * sigma is the RECEIVER's own accuracy (gps1/raw h_acc), not the autopilot's blend;
+  * with RTK-grade fixes in the drive (sigma <= RTK_SIGMA_M) only fixes up to
+    GOOD_SIGMA_M count: one minute of RTK outweighs nothing, it replaces the rest;
+  * a heading pair counts only when a good fix (<= GOOD_SIGMA_M) came at the same moment
+    -- out in the open, not by a wall or indoors;
+  * the turn is the MEDIAN of (heading - SLAM yaw), not the mean: a stretch of bad pairs
+    can't pull it;
+  * position pairs further than max(OUTLIER_MIN_M, 3 x median) from the fit are left out
+    and the shift fitted again; rms / max are of the pairs kept.
 """
 import bisect
 import collections
@@ -26,6 +38,9 @@ import numpy as np
 from .geo_map import enu_scale
 
 MAX_SIGMA_M = 8.0
+RTK_SIGMA_M = 0.5      # an RTK-grade fix (float or fixed)
+GOOD_SIGMA_M = 2.0     # good enough to place a map by; and for a heading pair to count
+OUTLIER_MIN_M = 1.0
 PAIR_S = 0.2           # a fix / heading counts for a pose this close in time
 MIN_PAIRS = 10
 KEEP_S = 3.0           # fixes and headings older than this wait for no pose
@@ -82,27 +97,45 @@ class Tie:
         self._trim(self.recent_heads, t)
 
     def add_pose(self, t, x, y, yaw):
-        h = self._nearest(list(self.recent_heads), t)
-        if h is not None:
-            self.dyaw.append(math.remainder(h[1] - yaw, 2 * math.pi))
         g = self._nearest(list(self.recent_fixes), t)
+        h = self._nearest(list(self.recent_heads), t)
+        if h is not None and g is not None and g[3] <= GOOD_SIGMA_M:
+            self.dyaw.append(math.remainder(h[1] - yaw, 2 * math.pi))
         if g is not None:
             self.pairs.append((x, y, g))
 
+    @staticmethod
+    def _median_angle(angles):
+        """The median of angles (rad) about their circular mean: robust to a bad stretch."""
+        m = math.atan2(sum(math.sin(a) for a in angles), sum(math.cos(a) for a in angles))
+        return m + float(np.median([math.remainder(a - m, 2 * math.pi) for a in angles]))
+
     def fit(self):
-        """dict(lat0, lon0, rot, tx, ty, rms, max), or None while not enough to place the map."""
-        if len(self.dyaw) < MIN_PAIRS or len(self.pairs) < MIN_PAIRS:
+        """dict(lat0, lon0, rot, tx, ty, rms, max, kept), or None while not enough to place the map."""
+        rtk = any(f[3] <= RTK_SIGMA_M for f in self.fixes)
+        limit = GOOD_SIGMA_M if rtk else MAX_SIGMA_M
+        fixes = [f for f in self.fixes if f[3] <= limit]
+        pairs = [p for p in self.pairs if p[2][3] <= limit]
+        if len(self.dyaw) < MIN_PAIRS or len(pairs) < MIN_PAIRS:
             return None
-        w = np.array([1 / f[3] ** 2 for f in self.fixes])
-        lat0 = float((w * np.array([f[1] for f in self.fixes])).sum() / w.sum())
-        lon0 = float((w * np.array([f[2] for f in self.fixes])).sum() / w.sum())
+        w = np.array([1 / f[3] ** 2 for f in fixes])
+        lat0 = float((w * np.array([f[1] for f in fixes])).sum() / w.sum())
+        lon0 = float((w * np.array([f[2] for f in fixes])).sum() / w.sum())
         kx, ky = enu_scale(lat0)
-        rot = math.atan2(sum(math.sin(d) for d in self.dyaw), sum(math.cos(d) for d in self.dyaw))
-        P = np.array([(x, y) for x, y, _ in self.pairs])
-        Q = np.array([((g[2] - lon0) * kx, (g[1] - lat0) * ky) for _, _, g in self.pairs])
-        W = np.array([1 / g[3] ** 2 for _, _, g in self.pairs])
+        rot = self._median_angle(self.dyaw)
+        P = np.array([(x, y) for x, y, _ in pairs])
+        Q = np.array([((g[2] - lon0) * kx, (g[1] - lat0) * ky) for _, _, g in pairs])
+        W = np.array([1 / g[3] ** 2 for _, _, g in pairs])
         R = np.array([[math.cos(rot), -math.sin(rot)], [math.sin(rot), math.cos(rot)]])
-        t = ((Q - P @ R.T) * W[:, None]).sum(axis=0) / W.sum()
-        res = np.linalg.norm(P @ R.T + t - Q, axis=1)
+        keep = np.ones(len(P), dtype=bool)
+        for _ in range(2):                       # fit, leave the far-off pairs out, fit again
+            t = ((Q[keep] - P[keep] @ R.T) * W[keep, None]).sum(axis=0) / W[keep].sum()
+            res = np.linalg.norm(P @ R.T + t - Q, axis=1)
+            keep = res <= max(OUTLIER_MIN_M, 3.0 * float(np.median(res)))
+            if keep.sum() < MIN_PAIRS:
+                keep = np.ones(len(P), dtype=bool)
+                break
+        t = ((Q[keep] - P[keep] @ R.T) * W[keep, None]).sum(axis=0) / W[keep].sum()
+        res = np.linalg.norm(P[keep] @ R.T + t - Q[keep], axis=1)
         return dict(lat0=lat0, lon0=lon0, rot=rot, tx=float(t[0]), ty=float(t[1]),
-                    rms=float(np.sqrt((res ** 2).mean())), max=float(res.max()))
+                    rms=float(np.sqrt((res ** 2).mean())), max=float(res.max()), kept=int(keep.sum()))
