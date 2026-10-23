@@ -882,19 +882,13 @@ class Gateway:
         if c.route != "running" or ex is None:
             return
         if ex.mode == "map":
-            # A map mission carries on (owner, 2026-10-19): a moment's stop while the Cube's source switches.
+            # A map mission stops and asks too (owner, 2026-10-23: "take a pause before carrying on":
+            # Carry on or Come home), replacing "map missions carry on" (2026-10-19). The Cube goes
+            # onto its LiDAR source at once, so either answer can drive.
             ex.pause()
-
-            def go(ok):
-                if c.route != "running":
-                    return
-                if ok:
-                    self.node.ensure_guided()
-                    ex.resume()
-                else:
-                    c.gps_ask_lidar_m = None
-                    c.route_paused(pb.STATE_REASON_GPS_LOST)
-            self.switch_source(2, go)
+            c.gps_ask_lidar_m = None
+            c.route_paused(pb.STATE_REASON_GPS_LOST)
+            self.switch_source(2, lambda ok: self.switched(2, ok))
         elif ex.mode == "gps":
             ex.pause()
             c.gps_ask_lidar_m = None
