@@ -36,8 +36,8 @@ from .ros_io import RosIO
 from .route_executor import RouteExecutor
 from .rover_state import RoverCore, Settings
 from .routes import (HomeStore, MapTrail, Recorder, RouteStore, Trail, distance_m, home_path, ll_to_odom,
-                     mission_waypoints,
-                     odom_to_ll, path_length, progress)
+                     map_to_odom, mission_waypoints,
+                     odom_to_ll, odom_to_map, path_length, progress)
 from .gps_watch import DisagreeWatch, GpsWatch, RtkWatch
 from .base import base_pb, sites_pb
 from .maps import (MapPicture, from_picture, map_info, map_list_pb, mapping_pb, picture_heading, placed_map,
@@ -805,6 +805,8 @@ class Gateway:
             if core.going_home:                # the way home is not in the route list
                 for lat, lon in core.route_points[:200]:
                     st.route.waypoints.add(latitude_deg=lat, longitude_deg=lon)
+        if st.HasField("route") and core.route == "running":
+            self.fill_plan(st.route)
         fs = follow_status(*self.node.latest_tracks())
         if fs is not None:
             st.follow.CopyFrom(fs)
@@ -848,6 +850,36 @@ class Gateway:
         return st
 
     # ---------------- GPS lost (Step D3) ----------------
+    def fill_plan(self, rp):
+        """The rover's plan for what it drives now (owner, 2026-10-23): Nav2's /plan from where the
+        rover is through the points of this drive, as the app draws it -- lat/lon, or metres on a
+        map that is not placed. Nothing when there is no fresh plan, or no way to place it."""
+        ex, pts = self.route_exec, self.node.fresh_plan()
+        if ex is None or not pts:
+            return
+        if ex.mode == "map":                   # a map mission (or the way home on a map)
+            pair, ml = self.node.map_pose_and_odom(), self.node.maps
+            m = map_info(ml, ml.localizing) if ml is not None and ml.localizing else None
+            if pair is None or m is None:
+                return
+            t = map_to_odom(*pair)
+            for x, y in pts:
+                mx, my = odom_to_map(t, x, y)
+                if m.placed and len(m.geo) == 5:
+                    lat, lon = to_latlon(tuple(m.geo), mx, my)
+                    rp.planned_path.add(latitude_deg=lat, longitude_deg=lon)
+                else:
+                    px, py = to_picture(m, mx, my)
+                    rp.planned_path.add(map_x_m=round(px, 3), map_y_m=round(py, 3))
+        else:                                  # GPS: now, or as it was when GPS was lost
+            snap = self.lost_snap if ex.mode == "odom" else self.node.gps_snapshot()
+            if snap is None:
+                return
+            for x, y in pts:
+                lat, lon = odom_to_ll(x, y, snap)
+                rp.planned_path.add(latitude_deg=lat, longitude_deg=lon)
+        rp.planned_through_index = ex.batch[1]
+
     def estimated_position(self):
         """(lat, lon) from odometry while GPS is lost, else None."""
         if not self.gps.lost or self.lost_snap is None:

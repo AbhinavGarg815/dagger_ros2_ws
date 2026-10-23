@@ -224,6 +224,42 @@ def apply(t, x, y):
     return t[0] + c * x - s * y, t[1] + s * x + c * y
 
 
+def odom_to_map(t, x, y):
+    """apply() backwards: a point in odom on the map, given map_to_odom's (tx, ty, th)."""
+    c, s = math.cos(t[2]), math.sin(t[2])
+    dx, dy = x - t[0], y - t[1]
+    return c * dx + s * dy, -s * dx + c * dy
+
+
+# The rover's plan as the app draws it (owner, 2026-10-23: the planned path instead of straight
+# lines): Nav2's /plan, a point every few centimetres, cut to its corners.
+PLAN_TOL_M = 0.1
+PLAN_MAX_POINTS = 200
+
+
+def simplify(points, tol_m=PLAN_TOL_M, max_points=PLAN_MAX_POINTS):
+    """The corners of a path of (x, y) metres: every point dropped is within `tol_m` of what is
+    kept (Douglas-Peucker); both ends kept; at most `max_points` (then the first ones and the end)."""
+    pts = list(points)
+    if len(pts) <= 2:
+        return pts
+    keep = [False] * len(pts)
+    keep[0] = keep[-1] = True
+    stack = [(0, len(pts) - 1)]
+    while stack:
+        a, b = stack.pop()
+        far, at = -1.0, None
+        for k in range(a + 1, b):
+            d = _seg_dist(pts[k], pts[a], pts[b])
+            if d > far:
+                far, at = d, k
+        if at is not None and far > tol_m:
+            keep[at] = True
+            stack += [(a, at), (at, b)]
+    out = [p for p, k in zip(pts, keep) if k]
+    return out if len(out) <= max_points else out[:max_points - 1] + [out[-1]]
+
+
 def ll_to_odom(points, snap):
     """GPS points as odom (x, y), with GPS lost (Step D3), from the last good moment:
     snap = ((lat, lon) of the fix, (x, y) of the autopilot's local position -- the GPS

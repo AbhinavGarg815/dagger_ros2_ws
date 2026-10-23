@@ -202,6 +202,36 @@ def test_a_point_where_the_route_turns_back_ends_its_window():
     assert route_window(zigzag, 0, (0.0, 0.0), 15.0, dist=math.dist) == (0, 2)
 
 
+def test_the_plan_is_cut_to_its_corners():
+    from dagger_gateway.routes import simplify
+    straight = [(0.05 * k, 0.0) for k in range(201)]          # 10 m, a point every 5 cm
+    assert simplify(straight) == [(0.0, 0.0), (10.0, 0.0)]
+    # round something in the way: out 2 m sideways and back -- the corners stay
+    bend = [(0.05 * k, 0.0) for k in range(81)] + [(4.0, 0.05 * k) for k in range(1, 41)] \
+        + [(4.0 + 0.05 * k, 2.0) for k in range(1, 41)] + [(6.0, 2.0 - 0.05 * k) for k in range(1, 41)] \
+        + [(6.0 + 0.05 * k, 0.0) for k in range(1, 81)]
+    out = simplify(bend)
+    assert out[0] == (0.0, 0.0) and out[-1] == bend[-1]
+    for corner in [(4.0, 0.0), (4.0, 2.0), (6.0, 2.0), (6.0, 0.0)]:
+        assert any(math.dist(corner, p) < 0.06 for p in out), corner
+    assert len(out) <= 8
+    # every point dropped is within 10 cm of what is kept
+    from dagger_gateway.routes import _seg_dist
+    assert all(min(_seg_dist(p, a, b) for a, b in zip(out, out[1:])) <= 0.1 + 1e-9 for p in bend)
+    # at most 200 points, the end kept
+    zigzag = [(0.5 * k, (k % 2) * 1.0) for k in range(500)]
+    z = simplify(zigzag)
+    assert len(z) == 200 and z[-1] == zigzag[-1]
+
+
+def test_a_point_in_odom_goes_back_onto_the_map():
+    from dagger_gateway.routes import odom_to_map
+    t = (3.0, -2.0, 0.7)
+    x, y = apply(t, 4.5, 1.25)
+    mx, my = odom_to_map(t, x, y)
+    assert abs(mx - 4.5) < 1e-9 and abs(my - 1.25) < 1e-9
+
+
 def test_home_is_kept_across_restarts_and_a_bad_file_is_no_home():
     from dagger_gateway.routes import HomeStore
     with tempfile.TemporaryDirectory() as d:

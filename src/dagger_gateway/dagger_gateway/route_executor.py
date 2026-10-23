@@ -75,6 +75,7 @@ class RouteExecutor:
         with self.lock:
             self.gen += 1
             h, self.handle = self.handle, None
+        self.node.clear_plan()
         if h is not None:
             h.cancel_goal_async()
 
@@ -147,6 +148,7 @@ class RouteExecutor:
                 self.batch = (s, e)
                 self.gen += 1
                 gen = self.gen
+                self.node.clear_plan()     # the plan drawn is for this drive from now on
         if w is None:
             self.post(self.on_failed, "no_position")
             return

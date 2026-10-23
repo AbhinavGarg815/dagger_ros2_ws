@@ -20,7 +20,7 @@ import time
 from action_msgs.srv import CancelGoal
 from mavros_msgs.msg import GPSRAW, RCIn, RCOut, State, WaypointList
 from mavros_msgs.srv import CommandLong, SetMode, WaypointPull
-from nav_msgs.msg import OccupancyGrid, Odometry
+from nav_msgs.msg import OccupancyGrid, Odometry, Path
 from rclpy.node import Node
 from rclpy.time import Time
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
@@ -36,6 +36,7 @@ from sensor_msgs.msg import CompressedImage as _CompressedImage   # noqa: F401 -
 from .base import rtk_of
 from .maps import SlamHeard
 from .readiness import Readiness
+from .routes import simplify
 from .rover_state import pending_checks
 
 WINDOW_S = 5.0             # rates and fractions are judged over this, as preflight's 5 s sample
@@ -305,6 +306,10 @@ class RosIO(Node):
         self.costmap = None
         self.create_subscription(OccupancyGrid, "/global_costmap/costmap", self.on_costmap, latched,
                                  event_callbacks=QUIET_SUB)
+        # The rover's plan for what it drives now (owner, 2026-10-23): Nav2's /plan (odom, re-planned
+        # about once a second round what the LiDAR sees), kept cut to its corners.
+        self.plan = None                   # (monotonic s, [(x, y) odom]) or None
+        self.create_subscription(Path, "/plan", self.on_plan, 1, event_callbacks=QUIET_SUB)
         self.readiness = Readiness(self)
         self.create_timer(1.0, self.evaluate)
 
@@ -466,6 +471,20 @@ class RosIO(Node):
 
     def on_costmap(self, m):
         self.costmap = m
+
+    def on_plan(self, m):
+        if m.header.frame_id != "odom" or len(m.poses) < 2:
+            return                         # Nav2 plans in odom here; anything else is not drawn
+        pts = [(p.pose.position.x, p.pose.position.y) for p in m.poses]
+        self.plan = (time.monotonic(), simplify(pts))
+
+    def clear_plan(self):
+        """A new drive, or a pause: the plan for the old one is not drawn."""
+        self.plan = None
+
+    def fresh_plan(self, max_age_s=3.0):
+        p = self.plan
+        return p[1] if p is not None and time.monotonic() - p[0] <= max_age_s else None
 
     @property
     def slam_localized(self):
