@@ -173,13 +173,33 @@ def test_a_point_the_path_passes_on_the_way_starts_the_next_window():
     # the same in lat/lon (GPS missions)
     gps = [north(10.0), north(5.0)]
     assert window(gps, 0, north(0.0), 15.0) == (0, 1)
-    # beside the way out by more than 1.5 m: one window, as before
-    assert route_window([(10.0, 0.0), (5.0, 3.0)], 0, (0.0, 0.0), 15.0, dist=math.dist) == (0, 2)
+    # beside the way out by more than 1.5 m, at a right angle: one window, as before
+    assert route_window([(10.0, 0.0), (10.0, 5.0)], 0, (0.0, 0.0), 15.0, dist=math.dist) == (0, 2)
     # an ordinary route straight on: all in one
     assert route_window([(5.0, 0.0), (10.0, 0.0), (10.0, 5.0)], 0, (0.0, 0.0), 15.0, dist=math.dist) == (0, 3)
     # a loop back to where it started: the last point waits for its own window
     loop = [(5.0, 0.0), (5.0, 5.0), (0.0, 5.0), (0.0, 0.3)]
     assert route_window(loop, 0, (0.0, 0.0), 15.0, dist=math.dist) == (0, 3)
+
+
+def test_a_point_where_the_route_turns_back_ends_its_window():
+    # Owner, 2026-10-23: "Carry on" 1.2 m short of the 10 m point, the 5 m point now behind --
+    # both went to Nav2 at once and the rover turned right, left, right on the spot.
+    out_and_back = [(10.0, 0.0), (5.0, 0.0)]
+    assert route_window(out_and_back, 0, (8.8, 0.3), 15.0, dist=math.dist) == (0, 1), "the 10 m point alone"
+    gps = [north(10.0), north(5.0)]
+    assert window(gps, 0, north(8.8, east=0.3), 15.0) == (0, 1), "the same in lat/lon"
+    # back past the way out by more than 1.5 m, still a turn back: its own window too
+    assert route_window([(10.0, 0.0), (5.0, 3.0)], 0, (0.0, 0.0), 15.0, dist=math.dist) == (0, 1)
+    # right angles and gentle turns drive through, as before
+    square = [(5.0, 0.0), (5.0, 5.0), (0.0, 5.0)]
+    assert route_window(square, 0, (0.0, 0.0), 15.0, dist=math.dist) == (0, 3)
+    assert route_window([(5.0, 0.0), (8.0, 3.0)], 0, (0.0, 0.0), 15.0, dist=math.dist) == (0, 2)
+    # within 0.3 m of the first point its direction is unknown: no turn is judged there
+    assert route_window(out_and_back, 0, (9.9, 0.0), 15.0, dist=math.dist) == (0, 2)
+    # the turn is judged at every point, not only the first
+    zigzag = [(5.0, 0.0), (10.0, 0.0), (6.0, 0.5)]
+    assert route_window(zigzag, 0, (0.0, 0.0), 15.0, dist=math.dist) == (0, 2)
 
 
 def test_home_is_kept_across_restarts_and_a_bad_file_is_no_home():

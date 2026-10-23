@@ -394,6 +394,23 @@ def progress(points, target, here, start_total_m, dist=distance_m):
 # 2026-10-23). Such a point starts the next window instead, after the one before is reached.
 PASSED_CLEAR_M = 1.5
 
+# A window must not run THROUGH a point where the route turns back: Nav2 drops a point it
+# passes through only within 0.7 m of it (RemovePassedGoals), and until then its path runs
+# out to the point and back again. Stopped 1.2 m short of the 10 m point after "Carry on",
+# the rover turned right, then left, then right on the spot: each new plan put "back" on the
+# other side (owner, 2026-10-23). Such a point ends its window, so the goal checker says when
+# it is reached; the next window then starts from where the rover stands, one turn to make.
+TURN_BACK_DEG = 120.0
+
+
+def _turn_deg(a, b, c):
+    """How far the way a -> b -> c turns at b, in degrees (0 straight on, 180 straight back);
+    0 when a -> b is too short to have a direction."""
+    ux, uy, vx, vy = b[0] - a[0], b[1] - a[1], c[0] - b[0], c[1] - b[1]
+    if math.hypot(ux, uy) < 0.3 or math.hypot(vx, vy) < 1e-6:
+        return 0.0
+    return abs(math.degrees(math.atan2(ux * vy - uy * vx, ux * vx + uy * vy)))
+
 
 def _seg_dist(p, a, b):
     """Distance from p to the segment a-b (plane, metres)."""
@@ -403,13 +420,14 @@ def _seg_dist(p, a, b):
     return math.hypot(p[0] - a[0] - k * ax, p[1] - a[1] - k * ay)
 
 
-def window(points, start, here, max_m, dist=None, clear_m=PASSED_CLEAR_M):
+def window(points, start, here, max_m, dist=None, clear_m=PASSED_CLEAR_M, turn_back_deg=TURN_BACK_DEG):
     """Indices points[start:end] to send to Nav2 now: consecutive points from
     `start` while each is within `max_m` of the rover — the global costmap is a
     rolling window (40 m: ~18 m to a goal, tools/gps_goal.py). Always at least
     one point, so a far first point is still tried (Nav2 says if it cannot).
     The window also stops before a point that lies within `clear_m` of the path to
-    it (rover -> points[start] -> ...): it would be "reached" on the way (see above)."""
+    it (rover -> points[start] -> ...): it would be "reached" on the way (see above),
+    and after a point where the way turns back by more than `turn_back_deg` (see above)."""
     end = start + 1
     metric = dist is math.dist            # map missions and odometry: (x, y) metres
     dist = dist or distance_m             # lat/lon; map missions pass math.dist (metres)
@@ -421,6 +439,8 @@ def window(points, start, here, max_m, dist=None, clear_m=PASSED_CLEAR_M):
     while end < len(points) and dist(here, points[end]) <= max_m:
         q = xy(points[end])
         if any(_seg_dist(q, a, b) < clear_m for a, b in zip(path, path[1:])):
+            break
+        if _turn_deg(path[-2], path[-1], q) > turn_back_deg:
             break
         path.append(q)
         end += 1
