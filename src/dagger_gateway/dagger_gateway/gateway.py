@@ -40,6 +40,7 @@ from .routes import (HomeStore, MapTrail, Recorder, RouteStore, Trail, distance_
                      odom_to_ll, odom_to_map, path_length, progress)
 from .gps_watch import DisagreeWatch, GpsWatch, RtkWatch
 from .origin import OriginKeeper, OriginStore
+from .motion_watch import CAUSE_WORDS, MotionWatch, not_moving_cause
 from .base import base_pb, sites_pb
 from .maps import (MapPicture, from_picture, map_info, map_list_pb, mapping_pb, picture_heading, placed_map,
                    to_latlon, to_map, to_picture)
@@ -110,6 +111,8 @@ class Gateway:
         self.origins = OriginStore(g("origin_file"))
         self.origin_keeper = OriginKeeper()
         self.origin_saved = self.origins.load()
+        # Told to drive, not moving: pause and say why (motion_watch, owner 2026-10-26)
+        self.motion_watch = MotionWatch(float(g("not_moving_s")))
         # Home on a saved map (indoors, Step D2+): (map name, x, y on the map), and where the
         # rover has been on the map in use, to drive home on it. One home at a time.
         self.map_home = None
@@ -1084,8 +1087,23 @@ class Gateway:
             self.log.warn(f"EKF origin: none from GPS -- set to {lat:.7f}, {lon:.7f}, {alt:.1f} m "
                           f"({'the one kept' if self.origin_saved else 'home, 0 m'}) so the Cube takes drive commands")
 
+    def watch_motion(self):
+        """A running mission told to drive for not_moving_s without moving pauses, saying why."""
+        if self.core.route != "running" or self.route_exec is None:
+            self.motion_watch.reset()
+            return
+        if not self.motion_watch.step(time.monotonic(), self.node.nav_commanding(), self.node.odom_now()):
+            return
+        self.motion_watch.reset()
+        cause = not_moving_cause(self.node.armed(), self.node.fcu_mode(), self.node.out_flowing())
+        self.route_exec.pause()
+        self.core.route_not_moving(cause)
+        self.log.warn(f"route: told to drive for {self.motion_watch.wait_s:g} s, did not move "
+                      f"({CAUSE_WORDS[cause]}) -- paused")
+
     def tick_state(self):
         self.keep_origin()
+        self.watch_motion()
         checks = self.node.checks
         ds = self.drive_source
         if checks is not self.checks_in or (ds is not None and ds != self.core.checks.get(pb.CHECK_DRIVE_SOURCE)):

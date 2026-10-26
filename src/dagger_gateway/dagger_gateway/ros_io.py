@@ -29,13 +29,14 @@ from sensor_msgs.msg import BatteryState, CameraInfo, Imu, LaserScan, NavSatFix
 from std_msgs.msg import Bool, Float64, Int32, String, UInt8
 from dagger_msgs.msg import BaseSiteList, BaseStatus, MapList, MappingStatus, MarkerTracks, PersonTracks
 from std_srvs.srv import Trigger
-from geometry_msgs.msg import PoseWithCovarianceStamped
+from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
 from geographic_msgs.msg import GeoPointStamped
 from dagger_msgs.srv import MapName
 from sensor_msgs.msg import CompressedImage as _CompressedImage   # noqa: F401 -- the raw video's type
 
 from .base import rtk_of
 from .follow import follow_enabled
+from .motion_watch import commanding
 from .maps import SlamHeard
 from .readiness import Readiness
 from .routes import simplify
@@ -170,6 +171,8 @@ class RosIO(Node):
         p("home_file", "~/dagger_home.json")
         # The Cube's EKF origin when the rover starts without GPS (origin.py; owner 2026-10-26)
         p("set_origin_without_gps", True)
+        # Told to drive this long without moving: the mission pauses and says why (motion_watch)
+        p("not_moving_s", 5.0)
         p("origin_file", "~/dagger_origin.json")
         p("record_point_spacing_m", 2.0)
         # each Nav2 goal within this of the rover (global costmap: 40 m rolling window)
@@ -275,6 +278,12 @@ class RosIO(Node):
         self.create_subscription(String, "/follow/state", self.on_follow_state, 10,
                                  event_callbacks=QUIET_SUB)
         self.mode_cli = self.create_client(SetMode, "/mavros/set_mode")
+        # Told to drive, not moving (motion_watch): Nav2's command after the collision monitor
+        # (an obstacle stop is no command), and what leaves twist_mux for the autopilot.
+        self.nav_cmd = None                # (v, w, monotonic s)
+        self.out_cmd = None
+        self.create_subscription(Twist, "/cmd_vel_nav", self._cmd_cb("nav_cmd"), 10, event_callbacks=QUIET_SUB)
+        self.create_subscription(Twist, "/cmd_vel_out", self._cmd_cb("out_cmd"), 10, event_callbacks=QUIET_SUB)
         # The Cube's EKF origin (origin.py): heard from it, and set when it has none (no GPS).
         self.fcu_origin = None             # (lat, lon, alt m) as the Cube last reported it
         self.create_subscription(GeoPointStamped, "/mavros/global_position/gp_origin", self.on_fcu_origin, 10,
@@ -713,6 +722,26 @@ class RosIO(Node):
                 self.estop_pub.publish(Bool(data=False))
         self.get_logger().warn("STOP latch released by a new job" if was
                                else "a new job: STOP released (none known here; one from before a restart is cleared too)")
+
+    def _cmd_cb(self, attr):
+        def cb(m):
+            setattr(self, attr, (m.linear.x, m.angular.z, time.monotonic()))
+        return cb
+
+    def _asking(self, cmd, max_age_s=0.5):
+        return cmd is not None and time.monotonic() - cmd[2] <= max_age_s and commanding(cmd[0], cmd[1])
+
+    def nav_commanding(self):
+        """Nav2 asks for motion now (after the collision monitor)."""
+        return self._asking(self.nav_cmd)
+
+    def out_flowing(self):
+        """Motion commands leave twist_mux for the autopilot (not held back by a STOP lock)."""
+        return self._asking(self.out_cmd)
+
+    def fcu_mode(self):
+        st = self.fresh("/mavros/state", 3.0)
+        return st.mode if st is not None else None
 
     def armed(self):
         st = self.fresh("/mavros/state", 3.0)

@@ -162,6 +162,7 @@ class RoverCore:
         self.mapping = False               # the map manager is making a map, kept after a STOP
         self.pause_silence_s = 0.0
         self.gps_ask_lidar_m = None        # GPS lost: metres driven on LiDAR when it asks again (D3)
+        self.not_moving_cause = None       # paused NOT_MOVING: motion_watch's cause
         self.position_disagrees = False    # the autopilot vs GPS (D3): says more than "not accurate"
         self.found_on_map = False          # found on the shown map (D2): GPS checks don't decide READY
         self.no_gps_on_map = False         # a map in use and no GPS (D2, indoors): no "wait under open sky"
@@ -271,6 +272,12 @@ class RoverCore:
             self.route, self.pause_reason = None, None
             self.update(pb.STATE_REASON_HOME_REACHED if home else pb.STATE_REASON_ROUTE_FINISHED)
 
+    def route_not_moving(self, cause):
+        """Told to drive, did not move (motion_watch): paused where it is, saying why."""
+        if self.route == "running":
+            self.route, self.pause_reason, self.not_moving_cause = "paused", pb.STATE_REASON_NOT_MOVING, cause
+            self.update(pb.STATE_REASON_NOT_MOVING)
+
     def route_failed(self):
         """Nav2 refused or gave up: paused where it is, with "can't find a way"."""
         if self.route == "running":
@@ -337,6 +344,13 @@ class RoverCore:
         asked_again = {"lidar_m": round(self.gps_ask_lidar_m)} if self.gps_ask_lidar_m is not None else {}
         self.alerts.set(pb.ALERT_GPS_LOST, paused and self.pause_reason == pb.STATE_REASON_GPS_LOST,
                         pb.SEVERITY_ACTION, asked_again)
+        # Told to drive, did not move (owner, 2026-10-26): not armed asks for the arm switch;
+        # anything else says the cause (motion_watch: 0 not known, 1 on hold, 2 held back).
+        not_moving = paused and self.pause_reason == pb.STATE_REASON_NOT_MOVING
+        unarmed = not_moving and self.not_moving_cause == -1
+        self.alerts.set(pb.ALERT_ARM_WITH_SWITCH, unarmed, pb.SEVERITY_ACTION)
+        self.alerts.set(pb.ALERT_NOT_MOVING, not_moving and not unarmed, pb.SEVERITY_ACTION,
+                        {"cause": float(self.not_moving_cause or 0)})
 
     def set_position_disagrees(self, on, values):
         """The autopilot's heading/position against the receiver's (gps_watch.DisagreeWatch)."""
