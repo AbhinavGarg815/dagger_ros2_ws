@@ -24,14 +24,26 @@ arrive in the rclpy thread. Every callback to the gateway goes through `post`
 A generation number drops callbacks from a goal that was paused or cancelled.
 """
 import math
+import os
 import threading
 
 from action_msgs.msg import GoalStatus
+from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
 from geometry_msgs.msg import PoseStamped
 from nav2_msgs.action import NavigateThroughPoses
 from rclpy.action import ActionClient
 
 from .routes import apply, ll_to_en, map_to_odom, stepping_stones, window
+
+
+def odom_tree():
+    """The installed odom variant of the route tree (dagger_bringup), or None."""
+    try:
+        p = os.path.join(get_package_share_directory("dagger_bringup"), "behavior_trees",
+                         "dagger_navigate_through_poses_odom.xml")
+    except PackageNotFoundError:
+        return None
+    return p if os.path.exists(p) else None
 
 
 class RouteExecutor:
@@ -43,6 +55,14 @@ class RouteExecutor:
         self.node, self.window_m, self.post = node, window_m, post
         self.on_reached, self.on_done, self.on_failed = on_reached, on_done, on_failed
         self.client = ActionClient(node, NavigateThroughPoses, "/navigate_through_poses")
+        # Goals in odom (map missions, GPS lost, the way home on a map) need the odom variant of
+        # the route tree: the default one's RemovePassedGoals looks the rover up in 'map', the
+        # GPS map frame -- which does not exist when GPS has had no fix since boot (indoors, owner
+        # 2026-10-26: every map mission "can't find a way", map <-> base_link not connected).
+        self.odom_bt = odom_tree()
+        if self.odom_bt is None:
+            node.get_logger().warn("route: dagger_navigate_through_poses_odom.xml not found -- "
+                                   "map missions need GPS's map frame")
         self.lock = threading.Lock()
         self.points, self.index, self.batch = [], 0, (0, 0)
         self.xy = None                     # a map mission's points on its map, else None
@@ -174,7 +194,7 @@ class RouteExecutor:
                 self.node.get_logger().info(
                     f"route: point {s + 1} is {math.dist(prev, xy[0]):.1f} m away, beyond the "
                     f"{self.window_m:g} m window: a step {math.dist(prev, (x2, y2)):.1f} m along the way to Nav2")
-                fut = self.client.send_goal_async(NavigateThroughPoses.Goal(poses=poses),
+                fut = self.client.send_goal_async(self._goal(poses, frame),
                                                   feedback_callback=lambda fb, g=gen: self._feedback(fb, g))
                 fut.add_done_callback(lambda f, g=gen: self._accepted(f, g))
                 return
@@ -197,7 +217,7 @@ class RouteExecutor:
             self.post(self.on_failed, "aborted")
             return
         self.node.get_logger().info(f"route: points {s + 1}-{e} of {len(self.points)} to Nav2")
-        fut = self.client.send_goal_async(NavigateThroughPoses.Goal(poses=poses),
+        fut = self.client.send_goal_async(self._goal(poses, frame),
                                           feedback_callback=lambda fb, g=gen: self._feedback(fb, g))
         fut.add_done_callback(lambda f, g=gen: self._accepted(f, g))
 
@@ -248,6 +268,10 @@ class RouteExecutor:
                 self.handle = None
             self.post(self.on_failed, "aborted")
         # CANCELED: ours (pause, cancel, STOP) — nothing to report
+
+    def _goal(self, poses, frame):
+        """The Nav2 goal: the odom route tree for goals in odom, else the default tree."""
+        return NavigateThroughPoses.Goal(poses=poses, behavior_tree=self.odom_bt if frame == "odom" and self.odom_bt else "")
 
     @staticmethod
     def _pose(x, y, yaw, frame="map"):
