@@ -701,15 +701,18 @@ class RosIO(Node):
 
     def release_estop(self):
         """A new job (the operator's slide) releases the STOP latch: the 10 Hz
-        stream stops and twist_mux / cmd_vel_safety are told so."""
-        if not self.latched:
-            return
+        stream stops and twist_mux / cmd_vel_safety are told so -- every time, latched here or
+        not: twist_mux's estop lock never times out, and a gateway restarted after a STOP no
+        longer knows of it; the lock then kept holding every drive command back (owner,
+        2026-10-26: Driving, Nav2 commanding, /cmd_vel_out silent)."""
+        was = self.latched
         self.latched = False
         self.released_at = time.monotonic()   # our own trues still in flight are ignored
         if not self.dry_run:
             for _ in range(3):
                 self.estop_pub.publish(Bool(data=False))
-        self.get_logger().warn("STOP latch released by a new job")
+        self.get_logger().warn("STOP latch released by a new job" if was
+                               else "a new job: STOP released (none known here; one from before a restart is cleared too)")
 
     def armed(self):
         st = self.fresh("/mavros/state", 3.0)
