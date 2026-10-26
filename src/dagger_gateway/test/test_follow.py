@@ -11,7 +11,7 @@ from types import SimpleNamespace as NS
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, ".."))
 from dagger_gateway import api_pb2 as pb  # noqa: E402
-from dagger_gateway.follow import follow_status, is_selectable, targets_msg  # noqa: E402
+from dagger_gateway.follow import follow_enabled, follow_status, is_selectable, targets_msg  # noqa: E402
 
 
 def header(t):
@@ -72,6 +72,17 @@ def test_only_selectable_targets_may_be_picked():
     assert is_selectable(tracks(), markers(), 1000)
     assert not is_selectable(tracks(), markers(), 1001)
     assert not is_selectable(tracks(), markers(), 42)
+
+
+def test_a_stop_does_not_look_like_following():
+    # Owner, 2026-10-26: after STOP, /follow/state said "estop" and every new job was refused.
+    assert follow_enabled("following", None) and follow_enabled("searching", None)
+    assert follow_enabled("no target", None)
+    assert not follow_enabled("disabled: app off", None)
+    assert not follow_enabled("estop", None), "nothing before the estop: not following"
+    assert not follow_enabled("estop", "disabled: STOP (gateway)"), "STOP turned it off"
+    assert not follow_enabled("estop", "disabled: never enabled")
+    assert follow_enabled("estop", "following"), "a STOP from elsewhere while following: still on"
 
 
 if __name__ == "__main__":

@@ -34,6 +34,7 @@ from dagger_msgs.srv import MapName
 from sensor_msgs.msg import CompressedImage as _CompressedImage   # noqa: F401 -- the raw video's type
 
 from .base import rtk_of
+from .follow import follow_enabled
 from .maps import SlamHeard
 from .readiness import Readiness
 from .routes import simplify
@@ -205,6 +206,7 @@ class RosIO(Node):
         self.latched = False
         self.released_at = -1e9            # monotonic s of the last /estop false edge
         self.follow_state = None           # (text, monotonic s)
+        self.follow_before_estop = None    # its last text that was not "estop" (follow.follow_enabled)
         self.follow_off_at = -1e9
 
         self.estop_pub = self.create_publisher(Bool, "/estop", 10, event_callbacks=QUIET_PUB)
@@ -650,6 +652,8 @@ class RosIO(Node):
 
     def on_follow_state(self, m):
         self.follow_state = (m.data, time.monotonic())
+        if m.data != "estop":
+            self.follow_before_estop = m.data
 
     def following(self):
         """follow_controller is enabled, per its own /follow/state (2 Hz)."""
@@ -657,7 +661,7 @@ class RosIO(Node):
             return False
         text, t = self.follow_state
         now = time.monotonic()
-        if now - t > FOLLOW_STATE_TIMEOUT_S or text.startswith("disabled"):
+        if now - t > FOLLOW_STATE_TIMEOUT_S or not follow_enabled(text, self.follow_before_estop):
             return False
         return t - self.follow_off_at > FOLLOW_OFF_GRACE_S
 
@@ -793,6 +797,8 @@ class RosIO(Node):
         if self.dry_run and why == "STOP":
             return
         self.follow_off_at = time.monotonic()
+        # Under a STOP the controller keeps saying "estop": it is off because we said so.
+        self.follow_before_estop = f"disabled: {why} (gateway)"
         for _ in range(3):
             self.follow_pub.publish(Bool(data=False))
         self.get_logger().warn(f"follow OFF ({why})")

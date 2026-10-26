@@ -77,3 +77,14 @@ def is_selectable(tracks, markers, target_id):
     person, a confirmed marker) -- what the trackers themselves would accept."""
     t = targets_msg(tracks, markers)
     return any(x.id == target_id and x.selectable for x in t.targets)
+
+
+def follow_enabled(text, before_estop):
+    """Is follow_controller enabled, from its /follow/state `text`? It says "estop" while the
+    STOP latch is on, whatever its enable -- then what it said before the estop decides
+    (`before_estop`, None if nothing). Taking "estop" as enabled refused every new job after a
+    STOP from the app ("not in this state"), and starting a job is what releases the STOP: the
+    rover could not be started again (owner, 2026-10-26)."""
+    if text == "estop":
+        return before_estop is not None and not before_estop.startswith("disabled")
+    return not text.startswith("disabled")
