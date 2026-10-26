@@ -39,6 +39,7 @@ from .routes import (HomeStore, MapTrail, Recorder, RouteStore, Trail, distance_
                      map_to_odom, mission_waypoints,
                      odom_to_ll, odom_to_map, path_length, progress)
 from .gps_watch import DisagreeWatch, GpsWatch, RtkWatch
+from .origin import OriginKeeper, OriginStore
 from .base import base_pb, sites_pb
 from .maps import (MapPicture, from_picture, map_info, map_list_pb, mapping_pb, picture_heading, placed_map,
                    to_latlon, to_map, to_picture)
@@ -104,6 +105,11 @@ class Gateway:
         self.trail = None                          # routes.Trail from home, once the first job starts
         # Home kept across restarts (SetHome, owner 2026-10-23): the trail back starts from it.
         self.homes = HomeStore(g("home_file"))
+        # The Cube's EKF origin when the rover starts without GPS (origin.py, owner 2026-10-26)
+        self.origin_on = bool(g("set_origin_without_gps"))
+        self.origins = OriginStore(g("origin_file"))
+        self.origin_keeper = OriginKeeper()
+        self.origin_saved = self.origins.load()
         # Home on a saved map (indoors, Step D2+): (map name, x, y on the map), and where the
         # rover has been on the map in use, to drive home on it. One home at a time.
         self.map_home = None
@@ -1051,7 +1057,35 @@ class Gateway:
             self.map_trail = MapTrail(f[0], self.map_home[1:] if on_it else None)
         self.map_trail.add(f[1], f[2])
 
+    def keep_origin(self):
+        """The Cube's EKF origin (origin.py): keep the one it reports; set the kept one -- or home's
+        lat/lon -- when it has none and there is no GPS fix (booted indoors). Moves nothing."""
+        fcu_ok = self.node.fcu_connected()
+        if not fcu_ok:
+            self.node.fcu_origin = None    # a Cube that restarts has lost its origin
+        heard = self.node.fcu_origin
+        if heard is not None and heard != self.origin_saved:
+            self.origins.save(*heard)
+            self.origin_saved = heard
+            self.log.info(f"EKF origin kept: {heard[0]:.7f}, {heard[1]:.7f}, {heard[2]:.1f} m")
+        if not self.origin_on:
+            return
+        fallback = self.origin_saved
+        if fallback is None:
+            home = self.homes.load()
+            fallback = (home[0], home[1], 0.0) if home is not None else None
+        act = self.origin_keeper.step(time.monotonic(), fcu_ok, heard is not None,
+                                      self.node.good_fix() is not None, fallback)
+        if act == "ask":
+            self.node.request_origin()
+        elif act is not None:
+            lat, lon, alt = act[1]
+            self.node.set_origin(lat, lon, alt)
+            self.log.warn(f"EKF origin: none from GPS -- set to {lat:.7f}, {lon:.7f}, {alt:.1f} m "
+                          f"({'the one kept' if self.origin_saved else 'home, 0 m'}) so the Cube takes drive commands")
+
     def tick_state(self):
+        self.keep_origin()
         checks = self.node.checks
         ds = self.drive_source
         if checks is not self.checks_in or (ds is not None and ds != self.core.checks.get(pb.CHECK_DRIVE_SOURCE)):

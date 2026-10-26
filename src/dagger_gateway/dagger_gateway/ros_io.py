@@ -30,6 +30,7 @@ from std_msgs.msg import Bool, Float64, Int32, String, UInt8
 from dagger_msgs.msg import BaseSiteList, BaseStatus, MapList, MappingStatus, MarkerTracks, PersonTracks
 from std_srvs.srv import Trigger
 from geometry_msgs.msg import PoseWithCovarianceStamped
+from geographic_msgs.msg import GeoPointStamped
 from dagger_msgs.srv import MapName
 from sensor_msgs.msg import CompressedImage as _CompressedImage   # noqa: F401 -- the raw video's type
 
@@ -167,6 +168,9 @@ class RosIO(Node):
         p("route_dir", "~/dagger_routes")
         # Home, kept across restarts (SetHome, owner 2026-10-23)
         p("home_file", "~/dagger_home.json")
+        # The Cube's EKF origin when the rover starts without GPS (origin.py; owner 2026-10-26)
+        p("set_origin_without_gps", True)
+        p("origin_file", "~/dagger_origin.json")
         p("record_point_spacing_m", 2.0)
         # each Nav2 goal within this of the rover (global costmap: 40 m rolling window)
         p("route_window_m", 15.0)
@@ -271,6 +275,11 @@ class RosIO(Node):
         self.create_subscription(String, "/follow/state", self.on_follow_state, 10,
                                  event_callbacks=QUIET_SUB)
         self.mode_cli = self.create_client(SetMode, "/mavros/set_mode")
+        # The Cube's EKF origin (origin.py): heard from it, and set when it has none (no GPS).
+        self.fcu_origin = None             # (lat, lon, alt m) as the Cube last reported it
+        self.create_subscription(GeoPointStamped, "/mavros/global_position/gp_origin", self.on_fcu_origin, 10,
+                                 event_callbacks=QUIET_SUB)
+        self.origin_pub = self.create_publisher(GeoPointStamped, "/mavros/global_position/set_gp_origin", 10)
         self.cmd_cli = self.create_client(CommandLong, "/mavros/cmd/command")
         self.cancel_clis = [self.create_client(CancelGoal, f"/{a}/_action/cancel_goal")
                             for a in ("navigate_to_pose", "navigate_through_poses")]
@@ -778,6 +787,28 @@ class RosIO(Node):
                 self.get_logger().error(f"FCU refused EKF source set {source_set}")
             done(ok)
         self.cmd_cli.call_async(req).add_done_callback(answered)
+
+    def on_fcu_origin(self, m):
+        p = m.position
+        if math.isfinite(p.latitude) and math.isfinite(p.longitude) and (p.latitude, p.longitude) != (0.0, 0.0):
+            self.fcu_origin = (p.latitude, p.longitude, p.altitude)
+
+    def fcu_connected(self):
+        st = self.fresh("/mavros/state", 3.0)
+        return bool(st is not None and st.connected)
+
+    def request_origin(self):
+        """Ask the Cube for its EKF origin (MAV_CMD_REQUEST_MESSAGE, GPS_GLOBAL_ORIGIN = 49): it
+        answers only when it has one, and mavros then publishes gp_origin. Moves nothing."""
+        if self.cmd_cli.service_is_ready():
+            self.cmd_cli.call_async(CommandLong.Request(command=512, param1=49.0))
+
+    def set_origin(self, lat, lon, alt):
+        """SET_GPS_GLOBAL_ORIGIN through mavros (altitude as gp_origin reports it). Moves nothing."""
+        m = GeoPointStamped()
+        m.header.stamp = self.get_clock().now().to_msg()
+        m.position.latitude, m.position.longitude, m.position.altitude = lat, lon, alt
+        self.origin_pub.publish(m)
 
     def good_fix(self):
         """(lat, lon) of a 3-D fix, or None: what a recording keeps."""
