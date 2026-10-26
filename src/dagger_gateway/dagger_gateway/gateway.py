@@ -37,9 +37,10 @@ from .route_executor import RouteExecutor
 from .rover_state import RoverCore, Settings
 from .routes import (HomeStore, MapTrail, Recorder, RouteStore, Trail, distance_m, home_path, ll_to_odom,
                      map_to_odom, mission_waypoints,
-                     odom_to_ll, odom_to_map, path_length, progress)
+                     ll_to_en, odom_to_ll, odom_to_map, path_length, progress)
 from .gps_watch import DisagreeWatch, GpsWatch, RtkWatch
 from .origin import OriginKeeper, OriginStore
+from .obstacles import CELL_M as OBSTACLE_CELL_M, as_cells, occupied_near
 from .motion_watch import CAUSE_WORDS, MotionWatch, not_moving_cause
 from .base import base_pb, sites_pb
 from .maps import (MapPicture, from_picture, map_info, map_list_pb, mapping_pb, picture_heading, placed_map,
@@ -55,7 +56,7 @@ try:
 except ImportError:                        # running from a tree setup.py has not built
     VERSION = "gateway (unbuilt)"
 
-CAPABILITIES = (pb.CAPABILITY_STOP, pb.CAPABILITY_READINESS, pb.CAPABILITY_ALERTS)
+CAPABILITIES = (pb.CAPABILITY_STOP, pb.CAPABILITY_READINESS, pb.CAPABILITY_ALERTS, pb.CAPABILITY_OBSTACLES)
 ROUTE_CAPABILITIES = (pb.CAPABILITY_RUN_ROUTE, pb.CAPABILITY_RECORD_ROUTE, pb.CAPABILITY_PLAN_ROUTE,
                       pb.CAPABILITY_IMPORT_MISSION, pb.CAPABILITY_COME_HOME, pb.CAPABILITY_FOLLOW,
                       pb.CAPABILITY_SET_HOME)
@@ -661,6 +662,45 @@ class Gateway:
     def map_list(self):
         return map_list_pb(self.node.maps)
 
+    def tick_obstacles(self):
+        """What the rover plans round now (owner, 2026-10-26): Nav2's costmap's obstacles within
+        10 m, to every app, where the app draws the rover -- on the map in use once found on it
+        (lat/lon if placed, the picture's metres if not), else by GPS (or as worked out since
+        GPS was lost). Nothing while the rover's place is not known."""
+        apps = self.apps()
+        cm, here = self.node.costmap, self.node.odom_now()
+        if not apps or cm is None or here is None or cm.header.frame_id != "odom":
+            return
+        pts = occupied_near(cm.info, cm.data, here[:2])
+        o = pb.Obstacles(cell_m=OBSTACLE_CELL_M)
+        f = self.found_pose()
+        if f is not None:                                    # on the map in use
+            pair, m = self.node.map_pose_and_odom(), map_info(self.node.maps, f[0])
+            if pair is None or m is None:
+                return
+            t = map_to_odom(*pair)
+            on_map = [odom_to_map(t, x, y) for x, y in pts]
+            if m.placed and len(m.geo) == 5:
+                geo = tuple(m.geo)
+                self._obstacles_ll(o, to_latlon(geo, f[1], f[2]), [to_latlon(geo, x, y) for x, y in on_map])
+            else:
+                ax, ay = to_picture(m, f[1], f[2])
+                o.anchor.map_x_m, o.anchor.map_y_m = round(ax, 3), round(ay, 3)
+                o.cells.extend(as_cells((ax, ay), [to_picture(m, x, y) for x, y in on_map]))
+        else:                                                # by GPS, or since it was lost
+            snap = self.lost_snap if self.gps.lost else self.node.gps_snapshot()
+            if snap is None:
+                return
+            self._obstacles_ll(o, odom_to_ll(here[0], here[1], snap), [odom_to_ll(x, y, snap) for x, y in pts])
+        for s in apps:
+            s.send(obstacles=o)
+
+    @staticmethod
+    def _obstacles_ll(o, anchor, points):
+        """Fill `o` round a lat/lon anchor: cells as east/north steps."""
+        o.anchor.latitude_deg, o.anchor.longitude_deg = anchor
+        o.cells.extend(as_cells((0.0, 0.0), [ll_to_en(lat, lon, anchor[0], anchor[1]) for lat, lon in points]))
+
     def broadcast_maps(self):
         ml = self.map_list()
         for s in self.apps():
@@ -1188,6 +1228,7 @@ def main():
             loop.add_signal_handler(sig, loop.stop)
         loop.create_task(every(gw.settings.state_ms / 1000.0, gw.tick_state, gw.log))
         loop.create_task(every(gw.settings.heartbeat_ms / 1000.0, gw.tick_heartbeat, gw.log))
+        loop.create_task(every(1.0, gw.tick_obstacles, gw.log))
         gw.log.info(f"{VERSION} on ws://{host}:{port}/api as '{gw.rover_id}'"
                     + (" -- STOP DRY RUN" if node.dry_run else ""))
         loop.run_forever()
