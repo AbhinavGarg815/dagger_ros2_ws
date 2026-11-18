@@ -161,6 +161,20 @@ def test_seen_on_the_picture_is_where_it_is_not_transparent():
     assert not seen_on_picture(m, -2.0 - 1.0, 0.0), "off the picture: not seen"
 
 
+def test_a_place_on_the_earth_lands_on_the_placed_map_in_use():
+    # Owner, 2026-11-18: indoors on the map of this drive, tied outdoors -- the app sends lat/lon.
+    from dagger_gateway.maps import place_on_map
+    geo = (26.7480, 75.8553, 0.3, 2.0, -1.0)
+    tied = NS(**{**vars(info("~drive")), "geo": list(geo)})
+    alone = NS(**{**vars(info("Work shop", placed=False)), "geo": []})
+    msg = NS(maps=[tied, alone], shown="", localizing="~drive")
+    lat, lon = to_latlon(geo, 4.0, 7.5)
+    m, (x, y) = place_on_map(msg, ("~drive", 0.0, 0.0, 0.0), lat, lon)
+    assert m is tied and abs(x - 4.0) < 1e-6 and abs(y - 7.5) < 1e-6, "back where it was tapped"
+    assert place_on_map(msg, None, lat, lon) is None, "not found on a map: no"
+    assert place_on_map(msg, ("Work shop", 0.0, 0.0, 0.0), lat, lon) is None, "a map not placed: no"
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

@@ -119,6 +119,16 @@ def placed_map(msg, name):
     return next((m for m in msg.maps if m.name == name and m.placed and len(m.geo) == 5), None)
 
 
+def place_on_map(msg, found, lat, lon):
+    """A place on the Earth onto the map the rover is found on, when that map is placed:
+    (MapInfo, (x, y)) -- else None. found: the gateway's found_pose (map name, x, y, yaw) or None.
+    Go to a place with no GPS (owner, 2026-11-18): the app sends a tap on a placed map as lat/lon."""
+    if found is None:
+        return None
+    m = placed_map(msg, found[0])
+    return (m, to_map(tuple(m.geo), lat, lon)) if m is not None else None
+
+
 def picture_path(m):
     """Where the app fetches a map's picture; changes whenever the picture does."""
     return f"/maps/{urllib.parse.quote(m.name or LIVE)}.png?v={m.picture_version}"

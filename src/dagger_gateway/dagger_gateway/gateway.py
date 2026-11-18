@@ -44,7 +44,7 @@ from .obstacles import CELL_M as OBSTACLE_CELL_M, as_cells, occupied_near
 from .motion_watch import CAUSE_WORDS, MotionWatch, not_moving_cause
 from .base import base_pb, sites_pb
 from .maps import (DRIVE, MapPicture, from_picture, map_info, map_list_pb, mapping_pb, picture_heading,
-                   placed_map, seen_on_picture, to_latlon, to_map, to_picture)
+                   place_on_map, placed_map, seen_on_picture, to_latlon, to_map, to_picture)
 from .session import ApiSocket
 from .video import VideoSocket
 from .follow import follow_status, is_selectable, stamp_s, targets_msg, geometry
@@ -367,34 +367,24 @@ class Gateway:
         why = self.core.may_start(pb.JOB_GO_TO_PLACE)
         if why:
             return why
+        f = self.found_pose()
         if cmd.on_map:
-            m, f = map_info(self.node.maps, cmd.map_name), self.found_pose()
+            m = map_info(self.node.maps, cmd.map_name)
             if m is None or f is None or f[0] != cmd.map_name:
                 return pb.REJECT_REASON_NOT_ON_MAP
-            target = from_picture(m, cmd.map_x_m, cmd.map_y_m)
-            if not seen_on_picture(m, *target):
-                return pb.REJECT_REASON_NOT_SEEN
-            if not self.node.armed():
-                return pb.REJECT_REASON_NOT_ARMED
-            been = list(self.map_trail.points) if self.map_trail is not None and self.map_trail.name == f[0] else []
-            pts = way_to(been, (f[1], f[2]), target, lambda x, y: seen_on_picture(m, x, y))
-            if self.route_exec.precheck(pts, pts):
-                return pb.REJECT_REASON_WAYPOINT_BLOCKED, 1
-            self.set_home()
-            total = math.dist((f[1], f[2]), pts[0]) + path_length(pts, math.dist)
-            self.map_mission_gps = not self.gps.lost
-            self.log.info(f"go to a place on the map '{f[0]}': {len(pts)} points, {total:.0f} m")
-            self.node.release_estop()
-            self.node.ensure_guided()
-            self.core.route_started("", pts, total, place=True)
-            self.route_exec.start(pts, 0, xy=pts)
-            return None
+            return self.go_on_map(m, f, from_picture(m, cmd.map_x_m, cmd.map_y_m))
         at = (cmd.at.latitude_deg, cmd.at.longitude_deg)
         if not (math.isfinite(at[0]) and math.isfinite(at[1])) or at == (0.0, 0.0):
             return pb.REJECT_REASON_NOT_SUPPORTED
         here = self.node.good_fix()
         if here is None or self.gps.lost:
-            return pb.REJECT_REASON_NOT_READY
+            # No GPS, but found on a placed map in use -- the map of this drive tied outdoors, or a
+            # saved placed map (owner, 2026-11-18: indoors every tap was refused NOT_READY): the
+            # tapped place onto that map, and driven on it.
+            on = place_on_map(self.node.maps, f, *at)
+            if on is None:
+                return pb.REJECT_REASON_NOT_READY
+            return self.go_on_map(on[0], f, on[1])
         if not self.node.armed():
             return pb.REJECT_REASON_NOT_ARMED
         if self.route_exec.precheck([at]):
@@ -406,6 +396,27 @@ class Gateway:
         self.node.ensure_guided()
         self.core.route_started("", [at], total, place=True)
         self.route_exec.start([at], 0)
+        return None
+
+    def go_on_map(self, m, f, target):
+        """Go to a place on the map in use (m, found f): only where seen, the way through what was
+        seen (way_to), driven as a map mission."""
+        if not seen_on_picture(m, *target):
+            return pb.REJECT_REASON_NOT_SEEN
+        if not self.node.armed():
+            return pb.REJECT_REASON_NOT_ARMED
+        been = list(self.map_trail.points) if self.map_trail is not None and self.map_trail.name == f[0] else []
+        pts = way_to(been, (f[1], f[2]), target, lambda x, y: seen_on_picture(m, x, y))
+        if self.route_exec.precheck(pts, pts):
+            return pb.REJECT_REASON_WAYPOINT_BLOCKED, 1
+        self.set_home()
+        total = math.dist((f[1], f[2]), pts[0]) + path_length(pts, math.dist)
+        self.map_mission_gps = not self.gps.lost
+        self.log.info(f"go to a place on the map '{f[0]}': {len(pts)} points, {total:.0f} m")
+        self.node.release_estop()
+        self.node.ensure_guided()
+        self.core.route_started("", pts, total, place=True)
+        self.route_exec.start(pts, 0, xy=pts)
         return None
 
     def on_set_here_on_map(self, cmd):
