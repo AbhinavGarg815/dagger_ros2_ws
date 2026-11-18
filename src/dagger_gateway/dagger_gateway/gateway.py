@@ -552,8 +552,9 @@ class Gateway:
 
     def on_save_route(self, cmd):
         """A mission planned on the map in the app (owner, 2026-10-12: missions are
-        planned, not recorded). Moves nothing, so it is accepted in any state."""
-        if len(cmd.waypoints) < 2:
+        planned, not recorded). Moves nothing, so it is accepted in any state.
+        One waypoint is a mission (owner, 2026-11-09; was two)."""
+        if not cmd.waypoints:
             return pb.REJECT_REASON_TOO_SHORT
         points = [(w.latitude_deg, w.longitude_deg) for w in cmd.waypoints]
         xy = pic = None
@@ -631,10 +632,7 @@ class Gateway:
             points = mission_waypoints(items)
             if not points:
                 answer(pb.REJECT_REASON_NO_MISSION)
-                return
-            if len(points) < 2:
-                answer(pb.REJECT_REASON_TOO_SHORT)
-                return
+                return                    # one waypoint is a mission (owner, 2026-11-09)
             name = wanted or self.store.suggested_name()
             if self.store.name_taken(name):
                 answer(pb.REJECT_REASON_NAME_TAKEN)
