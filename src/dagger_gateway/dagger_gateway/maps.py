@@ -14,6 +14,10 @@ from . import api_pb2 as pb
 
 
 LIVE = "~live"          # the map being made, as its picture is named
+# The map of this drive (CAPABILITY_DRIVE_MAP, owner 2026-11-17): the map manager's shadow mapping
+# whenever no saved map is shown and none is being made, listed under this name. The rover is
+# always "found" on it -- it is making it.
+DRIVE = "~drive"
 
 
 A_WGS84, E2_WGS84 = 6378137.0, 6.69437999014e-3
@@ -43,13 +47,15 @@ class SlamHeard:
 
     @property
     def localized(self):
-        """Found on the map in use."""
-        return bool(self.localized_heard) and bool(self.localizing)
+        """Found on the map in use (always on the map of this drive: it is being made)."""
+        return bool(self.localizing) and (self.localizing == DRIVE or bool(self.localized_heard))
 
     @property
     def finding(self):
         """slam_geo_init's step (the contract's MapFinding values), or None."""
-        return self.finding_heard if self.localizing else None
+        if not self.localizing:
+            return None
+        return pb.MAP_FINDING_FOUND if self.localizing == DRIVE else self.finding_heard
 
 
 def _enu_scale(lat0_deg):
@@ -127,7 +133,7 @@ def summary_pb(m):
         corners=[pb.Waypoint(latitude_deg=la, longitude_deg=lo) for la, lo in corners] if placed else [],
         placed_error_m=m.placed_error_m, picture_path=picture_path(m),
         picture_width_px=m.picture_width_px, picture_height_px=m.picture_height_px,
-        created_at_ms=m.created_ms)
+        created_at_ms=m.created_ms, drive_map=m.name == DRIVE)
 
 
 def mapping_pb(status):
@@ -140,15 +146,47 @@ def mapping_pb(status):
     return out
 
 
-def map_list_pb(msg):
-    """dagger_msgs/MapList -> the contract's MapList (None: no list heard yet)."""
+def map_list_pb(msg, drive_in_use=False):
+    """dagger_msgs/MapList -> the contract's MapList (None: no list heard yet). The map of this
+    drive is listed, and shown, only while it is the map in use (drive_in_use: GPS not good
+    enough to drive on); it is never a saved map."""
     out = pb.MapList()
     if msg is None:
         return out
     for m in msg.maps:
+        if m.name == DRIVE and not drive_in_use:
+            continue
         out.maps.append(summary_pb(m))
     out.shown = msg.shown if any(m.name == msg.shown for m in msg.maps) else ""
+    if drive_in_use and any(m.name == DRIVE for m in msg.maps):
+        out.shown = DRIVE
     return out
+
+
+_pictures = {}          # picture file -> its alpha (PIL image), for seen_on_picture
+
+
+def seen_on_picture(m, x, y):
+    """(x, y) on the map is where the rover has seen (Go to a place, owner 2026-11-17): on the
+    picture and not transparent -- transparent is never seen. Off the picture: not seen."""
+    if not m.picture or m.picture_width_px == 0 or m.picture_height_px == 0 or m.width_m <= 0:
+        return False
+    px, py = to_picture(m, x, y)
+    res = m.width_m / m.picture_width_px
+    col, row = int(px / res), int(m.picture_height_px - 1 - py / res)
+    if not (0 <= col < m.picture_width_px and 0 <= row < m.picture_height_px):
+        return False
+    alpha = _pictures.get(m.picture)
+    if alpha is None:
+        from PIL import Image
+        try:
+            with Image.open(m.picture) as img:
+                alpha = img.convert("LA").getchannel("A")
+        except OSError:
+            return False
+        _pictures.clear()               # one picture at a time is enough: the map in use
+        _pictures[m.picture] = alpha
+    return alpha.getpixel((col, row)) > 0
 
 
 class MapPicture(tornado.web.RequestHandler):

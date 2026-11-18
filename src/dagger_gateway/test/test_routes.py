@@ -325,6 +325,20 @@ def test_the_trail_home_is_kept_in_odom_too_and_driven_with_its_own_distance():
     assert late.home_odom == (5.0, 5.0) and late.odom == [(5.0, 5.0)]
 
 
+def test_go_to_a_place_is_straight_through_what_was_seen_else_back_along_the_trail():
+    from dagger_gateway.routes import way_to
+    been = [(float(x), 0.0) for x in range(0, 21)] + [(20.0, float(y)) for y in range(1, 11)]   # east 20, north 10
+    seen = lambda x, y: (-1 <= y <= 1 and -1 <= x <= 21) or (19 <= x <= 21 and -1 <= y <= 11)  # noqa: E731
+    assert way_to(been, (20.0, 10.0), (20.0, 2.0), seen) == [(20.0, 2.0)], "the line is all seen: straight"
+    path = way_to(been, (20.0, 10.0), (5.0, 0.0), seen)
+    assert path[-1] == (5.0, 0.0), "ends exactly at the place"
+    legs = list(zip([(20.0, 10.0)] + path, path))
+    assert all(seen(p[0] + (q[0] - p[0]) * k / 50, p[1] + (q[1] - p[1]) * k / 50)
+               for p, q in legs for k in range(51)), "no leg crosses what was not seen"
+    assert 2 <= len(path) <= 4, f"round the corner it came by, in a few legs: {path}"
+    assert way_to([], (0.0, 0.0), (3.0, 3.0), lambda x, y: False) == [(3.0, 3.0)], "no trail: just the place"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

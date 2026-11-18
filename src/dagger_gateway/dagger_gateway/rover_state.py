@@ -41,6 +41,10 @@ ALL_JOBS = (pb.JOB_RUN_ROUTE, pb.JOB_GO_TO_PLACE, pb.JOB_FOLLOW, pb.JOB_COME_HOM
 DRIVING_JOBS = (pb.JOB_RUN_ROUTE, pb.JOB_GO_TO_PLACE, pb.JOB_COME_HOME)
 # GPS only places these; a map mission drives on the map (Step D2)
 GPS_CHECKS = (pb.CHECK_POSITION, pb.CHECK_HEADING)
+# Driven on the map in use when the rover is found on it (Return to Home on the map, Go to a place
+# on it): GPS checks do not hold them back then (owner, 2026-11-17: home after driving by hand
+# indoors). GPS missions and recordings still need GPS.
+ON_MAP_JOBS = (pb.JOB_COME_HOME, pb.JOB_GO_TO_PLACE)
 
 # The nine checks, in the order the app shows them, and the jobs each one blocks.
 CHECKS = (
@@ -153,6 +157,7 @@ class RoverCore:
         self.following = False
         self.route = None                  # None | "running" | "paused"
         self.going_home = False            # the route is the way home (Return to Home)
+        self.going_to = False              # the route is one place the operator picked (Go to a place)
         self.pause_reason = None           # why the route is paused (a StateReason)
         self.route_id = None
         self.route_points = []
@@ -193,7 +198,7 @@ class RoverCore:
         2026-10-12) until the operator saves or discards it."""
         self.stopped = True
         self.route = None
-        self.going_home = False
+        self.going_home = self.going_to = False
         self.pause_reason = None
         self.update(pb.STATE_REASON_OPERATOR)
 
@@ -225,7 +230,10 @@ class RoverCore:
 
     # ---------------- jobs (Phase 3) ----------------
     def blocks(self, cid):
-        return next((b for c, b in self.table if c == cid), ())
+        b = next((b for c, b in self.table if c == cid), ())
+        if self.found_on_map and cid in GPS_CHECKS:
+            b = tuple(j for j in b if j not in ON_MAP_JOBS)
+        return b
 
     def may_start(self, job):
         """None if `job` may start now, else the reject reason. A STOP does not
@@ -237,9 +245,9 @@ class RoverCore:
                 return pb.REJECT_REASON_NOT_READY
         return None
 
-    def route_started(self, route_id, points, total_m, home=False):
+    def route_started(self, route_id, points, total_m, home=False, place=False):
         self.stopped = False
-        self.going_home = home
+        self.going_home, self.going_to = home, place
         self.route, self.pause_reason = "running", None
         self.route_id, self.route_points, self.target, self.route_total_m = route_id, list(points), 0, total_m
         self.update(pb.STATE_REASON_OPERATOR)
@@ -256,7 +264,7 @@ class RoverCore:
             self.update(pb.STATE_REASON_OPERATOR)
 
     def route_cancelled(self):
-        self.route, self.pause_reason, self.going_home = None, None, False
+        self.route, self.pause_reason, self.going_home, self.going_to = None, None, False, False
         self.update(pb.STATE_REASON_OPERATOR)
 
     def route_reached(self, index):
@@ -268,9 +276,10 @@ class RoverCore:
 
     def route_finished(self):
         if self.route is not None:
-            home, self.going_home = self.going_home, False
+            home, place, self.going_home, self.going_to = self.going_home, self.going_to, False, False
             self.route, self.pause_reason = None, None
-            self.update(pb.STATE_REASON_HOME_REACHED if home else pb.STATE_REASON_ROUTE_FINISHED)
+            self.update(pb.STATE_REASON_HOME_REACHED if home else pb.STATE_REASON_PLACE_REACHED if place
+                        else pb.STATE_REASON_ROUTE_FINISHED)
 
     def route_not_moving(self, cause):
         """Told to drive, did not move (motion_watch): paused where it is, saying why."""
@@ -385,5 +394,5 @@ class RoverCore:
         out = []
         for cid, blocks in self.table:
             status, values = self.checks.get(cid, (pb.CHECK_STATUS_PENDING, {}))
-            out.append(pb.ReadinessCheck(id=cid, status=status, blocks=blocks, values=values))
+            out.append(pb.ReadinessCheck(id=cid, status=status, blocks=self.blocks(cid), values=values))
         return out

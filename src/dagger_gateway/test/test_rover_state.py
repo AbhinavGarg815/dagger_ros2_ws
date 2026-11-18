@@ -327,6 +327,34 @@ def test_gps_lost_pauses_with_a_question_that_ends_with_the_pause():
     assert pb.ALERT_GPS_LOST not in core.alerts.active
 
 
+def test_on_the_map_in_use_gps_does_not_hold_back_home_or_go_to_a_place():
+    # Owner, 2026-11-17: driven by hand indoors, then home or to a place, on the map.
+    core, _, _ = make()
+    no_gps = {pb.CHECK_POSITION: (pb.CHECK_STATUS_FAIL, {}), pb.CHECK_HEADING: (pb.CHECK_STATUS_FAIL, {})}
+    core.set_checks(all_checks(pb.CHECK_STATUS_PASS, no_gps))
+    assert core.may_start(pb.JOB_COME_HOME) == pb.REJECT_REASON_NOT_READY, "not on a map: GPS needed"
+    assert core.may_start(pb.JOB_GO_TO_PLACE) == pb.REJECT_REASON_NOT_READY
+    core.set_on_map(found=True, no_gps=True)
+    assert core.may_start(pb.JOB_COME_HOME) is None and core.may_start(pb.JOB_GO_TO_PLACE) is None
+    assert core.may_start(pb.JOB_RUN_ROUTE) == pb.REJECT_REASON_NOT_READY, "a GPS mission still needs GPS"
+    pos = next(c for c in core.readiness_msgs() if c.id == pb.CHECK_POSITION)
+    assert pb.JOB_COME_HOME not in pos.blocks and pb.JOB_GO_TO_PLACE not in pos.blocks
+    assert pb.JOB_RUN_ROUTE in pos.blocks, "the app shows what still holds what back"
+
+
+def test_go_to_a_place_arrives_with_its_own_reason():
+    core, ev, _ = ready()
+    core.route_started("", [(0, 0)], 5.0, place=True)
+    assert core.state == pb.OPERATING_STATE_RUNNING_ROUTE and core.going_to
+    core.route_finished()
+    assert changes(ev)[-1] == (pb.OPERATING_STATE_RUNNING_ROUTE, pb.OPERATING_STATE_READY,
+                               pb.STATE_REASON_PLACE_REACHED)
+    assert not core.going_to
+    core.route_started("", [(0, 0)], 5.0, place=True)
+    core.stop()
+    assert not core.going_to, "STOP ends it"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

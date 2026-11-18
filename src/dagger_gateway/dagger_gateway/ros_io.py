@@ -184,6 +184,11 @@ class RosIO(Node):
         p("maps_enabled", True)
         # Step C2: making maps from the app (the map manager runs SLAM in shadow mode)
         p("make_maps_enabled", True)
+        # The map of this drive (owner, 2026-11-17; DaggerGCS docs/proposals/drive-map.md): the map
+        # manager maps whenever no saved map is shown (its own drive_map parameter); while GPS is
+        # not good enough to drive on it is the map in use -- home, the way home and Go to a place
+        # on it. OFF until its CPU cost is measured on the Jetson; set both to turn it on.
+        p("drive_map_enabled", False)
         # Step R1: the RTK base station, through dagger_bringup/base_station
         p("base_enabled", True)
         # Step D3, GPS lost during a job (owner, 2026-10-19): lost after this long with no

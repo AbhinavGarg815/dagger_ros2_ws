@@ -124,6 +124,43 @@ def test_found_on_the_map_survives_a_gateway_restart_in_either_order():
     assert not s.localized and s.finding is None
 
 
+# --- the map of this drive (owner, 2026-11-17) --------------------------------
+
+def test_the_map_of_this_drive_is_listed_and_shown_only_while_in_use():
+    drive = info("~drive", placed=False)
+    msg = NS(maps=[drive, info("lane3fix")], shown="", localizing="~drive")
+    out = map_list_pb(msg)
+    assert [m.name for m in out.maps] == ["lane3fix"] and out.shown == "", "GPS good: the GPS map, not this one"
+    out = map_list_pb(msg, drive_in_use=True)
+    assert [m.name for m in out.maps] == ["~drive", "lane3fix"] and out.shown == "~drive"
+    assert out.maps[0].drive_map and not out.maps[1].drive_map
+
+
+def test_the_rover_is_always_found_on_the_map_of_this_drive():
+    s = SlamHeard()
+    s.map_in_use("~drive")
+    assert s.localized and s.finding == 5, "it is making it: found (MAP_FINDING_FOUND)"
+    s.map_in_use("lane3fix")
+    assert not s.localized and s.finding is None, "a saved map: SLAM says for itself"
+
+
+def test_seen_on_the_picture_is_where_it_is_not_transparent():
+    import tempfile
+    from PIL import Image
+    from dagger_gateway.maps import seen_on_picture
+    img = Image.new("LA", (100, 50), (0, 0))               # 10 m x 5 m at 0.1 m, nothing seen
+    for x in range(0, 40):
+        for y in range(0, 50):
+            img.putpixel((x, y), (255, 255))               # the left 4 m seen, free
+    path = tempfile.mktemp(suffix=".png")
+    img.save(path)
+    m = NS(picture=path, picture_width_px=100, picture_height_px=50, width_m=10.0, height_m=5.0,
+           origin_x=-2.0, origin_y=-1.0)
+    assert seen_on_picture(m, -2.0 + 1.0, -1.0 + 2.5), "1 m from the left edge: seen"
+    assert not seen_on_picture(m, -2.0 + 8.0, -1.0 + 2.5), "8 m from the left: never seen"
+    assert not seen_on_picture(m, -2.0 - 1.0, 0.0), "off the picture: not seen"
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

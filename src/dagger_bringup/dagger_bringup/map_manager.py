@@ -33,6 +33,14 @@ localization launch reads -- <name>.posegraph/.data (serialize_map), .pgm/.yaml
 (as map_saver_cli), _geo.yaml when tied -- then stops SLAM. It is answered at
 once and done on a worker thread (the pose graph is tens of MB).
 
+THE MAP OF THIS DRIVE (drive_map:=true; owner 2026-11-17, DaggerGCS docs/proposals/drive-map.md):
+whenever no saved map is shown and none is being made, the same SHADOW mapping runs by itself, so
+the rover always has a map of where it has been -- driven with the sticks or on a job. It is listed
+as "~drive" (MapInfo name) with MapList.localizing = "~drive": the gateway uses it as the map in use
+while GPS is not good enough to drive on (home, the way home and Go to a place on it). It is tied to
+the Earth from the GPS seen on the way, as a map being made is. It is never saved: showing a saved
+map or making one ends it (one slam_toolbox at a time); it starts again, new, afterwards.
+
 STARTING AND STOPPING SLAM is never done in a service call: a ros2 launch takes
 seconds to stop, longer than the gateway waits (Stop showing went unanswered,
 2026-10-16). The services answer at once with what was asked; the Launches
@@ -66,6 +74,7 @@ from .map_store import PICTURES, MapStore, grid_to_pgm, picture_from_array, save
 from .map_tie import Tie, geo_yaml, to_latlon
 
 LIVE = "~live"                 # the map being made, as the gateway names its picture
+DRIVE = "~drive"               # the map of this drive (drive_map), as it is listed
 SERIALIZE_WAIT_S = 120.0       # a big pose graph takes a while to write
 
 
@@ -83,6 +92,12 @@ class MapManager(Node):
         super().__init__("map_manager")
         self.declare_parameter("map_dir", "~/dagger_maps")
         self.declare_parameter("rescan_s", 10.0)
+        # The map of this drive: OFF until its CPU cost is measured on the Jetson.
+        self.declare_parameter("drive_map", False)
+        self.drive_enabled = bool(self.get_parameter("drive_map").value)
+        self.drive_on = False          # its shadow mapping runs
+        self.drive_subs = []
+        self.drive_info = None         # MapInfo of it, once SLAM has drawn something
         self.store = MapStore(self.get_parameter("map_dir").value)
         self.latched = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
                                   durability=DurabilityPolicy.TRANSIENT_LOCAL,
@@ -125,7 +140,10 @@ class MapManager(Node):
             self.publish()
 
     def publish(self):
-        out = MapList(shown=self.store.shown(), localizing=self.loc_name)
+        localizing = self.loc_name or (DRIVE if self.drive_on else "")
+        out = MapList(shown=self.store.shown(), localizing=localizing)
+        if self.drive_on and self.drive_info is not None:
+            out.maps.append(self.drive_info)
         for m in self.store.maps.values():
             out.maps.append(MapInfo(
                 name=m.name, width_m=float(m.width_m), height_m=float(m.height_m), placed=m.placed,
@@ -138,13 +156,78 @@ class MapManager(Node):
 
     # ---------------- using a map: shadow localization (D1) ----------------
     def update_localization(self):
-        """Localize on the shown map, placed or not (Step D2), while no map is being made."""
+        """Localize on the shown map, placed or not (Step D2), while no map is being made; with
+        none shown, make the map of this drive (drive_map). One slam_toolbox at a time: the one
+        going stops first (the worker keeps the order)."""
         shown = self.store.shown()
         m = self.store.maps.get(shown)
         wanted = shown if (m is not None and not self.mapping_on) else ""
+        drive = self.drive_enabled and not self.mapping_on and not wanted
+        if self.drive_on and not drive:
+            self.drive_stop()
         if wanted != self.loc_name:
             self.loc_name = wanted
             self.launches.localize(wanted)     # done on the worker; answered already
+        if drive and not self.drive_on:
+            self.drive_start()
+
+    # ---------------- the map of this drive ----------------
+    def drive_start(self):
+        self.drive_on, self.drive_info, self.version = True, None, 0
+        self.tie = Tie()
+        self.launches.map(True)
+        self.drive_subs = [
+            self.create_subscription(OccupancyGrid, "/slam/map", self.on_drive_grid, self.latched),
+            self.create_subscription(PoseWithCovarianceStamped, "/slam/pose", self.on_pose, 10),
+            self.create_subscription(NavSatFix, "/mavros/global_position/global", self.on_fix,
+                                     qos_profile_sensor_data),
+            self.create_subscription(Imu, "/gps/heading_imu", self.on_heading, qos_profile_sensor_data),
+            self.create_subscription(GPSRAW, "/mavros/gpsstatus/gps1/raw", self.on_raw, qos_profile_sensor_data),
+        ]
+        self.get_logger().info("the map of this drive: mapping (no saved map shown)")
+
+    def drive_stop(self):
+        for sub in self.drive_subs:
+            self.destroy_subscription(sub)
+        self.drive_subs = []
+        self.launches.map(False)
+        self.drive_on, self.drive_info, self.tie = False, None, None
+        self.remove_pictures(DRIVE)
+        self.get_logger().info("the map of this drive: stopped (a saved map shown, or a map being made)")
+
+    def remove_pictures(self, prefix, keep=None):
+        pics = os.path.join(self.store.folder, PICTURES)
+        for old in os.listdir(pics):
+            if old.startswith(prefix + "-") and old != keep:
+                os.remove(os.path.join(pics, old))
+
+    def on_drive_grid(self, g):
+        """A new /slam/map while making the map of this drive: its picture, tied when it can be."""
+        if not self.drive_on:
+            return
+        self.version += 1
+        path = os.path.join(self.store.folder, PICTURES, f"{DRIVE}-{self.version}.png")
+        picture_from_array(grid_to_pgm(g), path)
+        self.remove_pictures(DRIVE, keep=os.path.basename(path))
+        self.drive_info = self.info_of(DRIVE, g, path, self.tie.fit() if self.tie is not None else None)
+        self.publish()
+
+    def info_of(self, name, g, path, fit):
+        """MapInfo of a map being drawn from /slam/map: its picture, and its corners and tie once fitted."""
+        w, h, res = g.info.width, g.info.height, g.info.resolution
+        ox, oy = g.info.origin.position.x, g.info.origin.position.y
+        info = MapInfo(name=name, width_m=float(w * res), height_m=float(h * res), picture=path,
+                       picture_width_px=w, picture_height_px=h, picture_version=self.version,
+                       origin_x=float(ox), origin_y=float(oy))
+        if fit is not None:
+            top, right = oy + h * res, ox + w * res
+            corners = [to_latlon(fit, x, y) for x, y in ((ox, top), (right, top), (right, oy), (ox, oy))]
+            info.placed = True
+            info.corner_lat = [c[0] for c in corners]
+            info.corner_lon = [c[1] for c in corners]
+            info.placed_error_m = float(fit["rms"])
+            info.geo = [float(fit["lat0"]), float(fit["lon0"]), float(fit["rot"]), float(fit["tx"]), float(fit["ty"])]
+        return info
 
     def on_show(self, req, res):
         res.ok = self.store.show(req.name)
@@ -177,7 +260,7 @@ class MapManager(Node):
             res.success, res.message = False, "already mapping"
             return res
         self.mapping_on = True
-        self.update_localization()             # one slam_toolbox at a time: localization off first
+        self.update_localization()             # one slam_toolbox at a time: localization / the drive's map off first
         self.launches.map(True)
         self.publish()
         self.tie, self.grid, self.live, self.version, self.saving = Tie(), None, None, 0, False

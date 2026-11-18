@@ -120,6 +120,35 @@ def home_path(trail, here, dist=distance_m):
     return out[1:] or [tuple(trail[0])]
 
 
+WAY_LOOK_AHEAD = 40     # Go to a place: how many trail points ahead a straight cut is looked for
+
+
+def way_to(been, here, target, seen, step_m=0.5):
+    """Go to a place on a map (owner, 2026-11-17): straight to `target` when the whole line is
+    where the rover has seen (seen(x, y)); else along where it has been (`been`, oldest first),
+    from the point of it nearest the rover to the one nearest the target, then to the target --
+    each leg cut as far ahead as a straight line stays in what was seen, so no leg crosses the
+    unseen. Ends exactly at the target. Map (x, y) throughout."""
+    here, target = tuple(here), tuple(target)
+
+    def clear(p, q):
+        n = max(1, int(math.dist(p, q) / step_m))
+        return all(seen(p[0] + (q[0] - p[0]) * k / n, p[1] + (q[1] - p[1]) * k / n) for k in range(n + 1))
+
+    if not been or clear(here, target):
+        return [target]
+    a = min(range(len(been)), key=lambda k: math.dist(been[k], here))
+    b = min(range(len(been)), key=lambda k: math.dist(been[k], target))
+    pts = [tuple(p) for p in (been[a:b + 1] if a <= b else reversed(been[b:a + 1]))] + [target]
+    out, cur, i = [], here, 0
+    while i < len(pts):
+        # the furthest point ahead with a clear line from here; the next one when none is clear
+        j = next((k for k in range(min(len(pts) - 1, i + WAY_LOOK_AHEAD), i - 1, -1) if clear(cur, pts[k])), i)
+        out.append(pts[j])
+        cur, i = pts[j], j + 1
+    return out
+
+
 # The waypoint check: OccupancyGrid values from a Nav2 costmap. 100 lethal, 99
 # inscribed (the rover's footprint would touch something): Theta* refuses a goal
 # there ("Either of the start or goal pose are an obstacle!", 2026-10-13).
