@@ -96,7 +96,12 @@ controller_server:
       # 7.1 deg, final turn -1.5 -> 0.0 deg, no weave. Lateral RMS unchanged (0.10 m):
       # that residual is a track imbalance (right track needs +43 us PWM to go
       # straight), not controller gain.
-      desired_linear_vel: 0.4
+      # 0.4 -> 1.0 m/s (owner, 2026-11-18: "very very slow"; all autonomous driving -- missions, Go to a
+      # place, Return to Home). Owner's call without a new stop test: stopping from 1.0 is NOT measured
+      # (0.29 m from 0.6, 2026-09-25; the stop zone leaves ~0.6 m before the bumper). The slow zone
+      # (x0.4 within 2.6 m, nav_slow_zone) is kept, so an approach still enters the stop zone slowly.
+      # The Cube's CRUISE is tuned at 0.4 and full throttle may top out near 0.8 m/s.
+      desired_linear_vel: 1.0
       lookahead_dist: 1.5
       min_lookahead_dist: 1.2
       max_lookahead_dist: 3.0

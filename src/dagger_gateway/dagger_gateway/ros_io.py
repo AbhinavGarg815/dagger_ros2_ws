@@ -153,8 +153,8 @@ class RosIO(Node):
         p("state_period_ms", 200)
         p("follow_stop_after_silence_ms", 1500)
         p("route_pause_after_silence_ms", 3000)
-        # top speed of any job: follow_controller max_linear 0.6 (Nav2 drives at 0.4)
-        p("max_speed_mps", 0.6)
+        # top speed of any job: Nav2 drives at 1.0 (follow_controller max_linear 0.6)
+        p("max_speed_mps", 1.0)          # Nav2's desired_linear_vel (owner, 2026-11-18; was 0.6)
         # position quality GOOD (good enough to drive a route) at or below this 1-sigma
         p("good_position_accuracy_m", 0.5)
         p("battery_low_percent", 30.0)

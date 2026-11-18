@@ -30,6 +30,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
+from nav_msgs.msg import Odometry
 from geometry_msgs.msg import PoseStamped, Twist
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, Int32, String
@@ -62,6 +63,15 @@ class FollowController(Node):
         # the person receded at a median 0.30 and p90 0.77 m/s, so time spent
         # ramping is time spent falling behind.
         self.declare_parameter("accel_limit", 0.5)          # m/s^2 on the request
+        # Match the person's walking speed (owner, 2026-11-18: "speed should grow as per person
+        # speed"): their speed away from the rover -- the rover's own (odometry) along the line to
+        # them plus how fast the range grows -- smoothed over person_speed_tau, is fed forward;
+        # the distance error only corrects the gap on top of it. Only with FRESH odometry: without
+        # it (or off) the controller is distance-only, as before. Still capped by max_linear.
+        self.declare_parameter("match_person_speed", True)
+        self.declare_parameter("person_speed_tau", 0.8)     # s
+        self.declare_parameter("odom_topic", "/odometry/filtered")
+        self.declare_parameter("odom_timeout", 0.5)         # s: older odometry = no feed-forward
         self.declare_parameter("kp_angular", 0.9)
         self.declare_parameter("max_angular", 0.5)
         self.declare_parameter("bearing_deadband_deg", 5.0)
@@ -149,6 +159,12 @@ class FollowController(Node):
         self.declare_parameter("publish_rate", 20.0)
 
         g = lambda n: self.get_parameter(n).value  # noqa: E731
+        self.match_speed = bool(g("match_person_speed"))
+        self.person_tau = float(g("person_speed_tau"))
+        self.odom_timeout = float(g("odom_timeout"))
+        self.rover_v, self.rover_v_time = 0.0, -1e9     # forward speed from odometry, and when
+        self.person_v = 0.0                             # the person's speed away from the rover (smoothed)
+        self.prev_range = None                          # (range, monotonic s) of the last target
         self.d0 = float(g("follow_distance"))
         self.dead = float(g("distance_deadband"))
         self.close_time = max(0.1, float(g("close_time")))
@@ -224,6 +240,7 @@ class FollowController(Node):
         self.create_subscription(Int32, g("select_topic"), self.on_select, 10)
         self.create_subscription(PoseStamped, "/follow/search_hint", self.on_hint, be)
         self.create_subscription(LaserScan, g("slow_scan_topic"), self.on_scan, be)
+        self.create_subscription(Odometry, g("odom_topic"), self.on_odom, be)
         self.create_timer(1.0 / self.rate, self.tick)
 
         self.get_logger().warn(
@@ -310,13 +327,30 @@ class FollowController(Node):
         p = msg.pose.position
         self.hint = (math.atan2(p.y, p.x), time.monotonic(), math.hypot(p.x, p.y))
 
+    def on_odom(self, msg):
+        self.rover_v, self.rover_v_time = msg.twist.twist.linear.x, time.monotonic()
+
+    def odom_fresh(self, now):
+        return now - self.rover_v_time <= self.odom_timeout
+
     def on_target(self, msg):
-        self.target = msg
-        self.target_time = time.monotonic()
-        self.had_target = True
+        now = time.monotonic()
         p = msg.pose.position
-        self.last_bearing = math.atan2(p.y, p.x)
-        self.last_range = math.hypot(p.x, p.y)
+        rng, bearing = math.hypot(p.x, p.y), math.atan2(p.y, p.x)
+        prev = self.prev_range
+        if prev is not None and 0.0 < now - prev[1] <= 1.0 and self.odom_fresh(now):
+            dt = now - prev[1]
+            # their speed along the line from the rover: ours along it + how fast the gap grows
+            u = self.rover_v * math.cos(bearing) + (rng - prev[0]) / dt
+            self.person_v += dt / (self.person_tau + dt) * (u - self.person_v)
+        else:
+            self.person_v = 0.0                     # a fresh start: nothing known about their pace
+        self.prev_range = (rng, now)
+        self.target = msg
+        self.target_time = now
+        self.had_target = True
+        self.last_bearing = bearing
+        self.last_range = rng
 
     def state(self):
         now = time.monotonic()
@@ -453,6 +487,8 @@ class FollowController(Node):
         err = rng - self.d0
         v_want = (0.0 if abs(err) < self.dead
                   else (err - math.copysign(self.dead, err)) / self.close_time)
+        if self.match_speed and self.odom_fresh(now):
+            v_want += max(0.0, self.person_v)       # keep their pace; the gap term corrects on top
         v_want = max(0.0, min(self.v_max, v_want))      # never reverse
 
         close = self.too_close_to_turn(rng, now)

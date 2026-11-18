@@ -17,6 +17,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from geometry_msgs.msg import PoseStamped, Twist
+from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, Int32
 
@@ -32,6 +33,17 @@ en = n.create_publisher(Bool, "/follow/enable", 10)
 tid = n.create_publisher(Int32, "/follow/track_id", 10)
 sel = n.create_publisher(Int32, "/follow/select", 10)
 scan_pub = n.create_publisher(LaserScan, "/scan_safety", be)
+odom_pub = n.create_publisher(Odometry, "/odometry/filtered", be)
+odom_v = [None]              # the rover's speed to report on /odometry/filtered (None: no odometry)
+
+
+def odom():
+    if odom_v[0] is None:
+        return
+    o = Odometry(); o.header.frame_id = "odom"; o.child_frame_id = "base_footprint"
+    o.header.stamp = n.get_clock().now().to_msg()
+    o.twist.twist.linear.x = float(odom_v[0])
+    odom_pub.publish(o)
 obstacle = [False]           # a post 1.8 m ahead in the slow zone?
 
 
@@ -46,6 +58,7 @@ def scan():
 
 
 n.create_timer(0.1, scan)
+n.create_timer(0.05, odom)
 cmds = []
 n.create_subscription(Twist, "/cmd_vel_follow_raw", lambda m: cmds.append(m), 10)
 
@@ -156,6 +169,26 @@ select(7)
 phase("operator clicks #7 again, the one followed (settle)", 0.3, *pol(4.0, 60), track=7)
 r_same = phase("  ...keeps following", 1.5, *pol(4.0, 60), track=7)
 
+# Matching the person's pace (owner, 2026-11-18): odometry says the rover moves at 0.5 m/s and
+# the person stays 3.0 m ahead (in the deadband) -- they walk at 0.5: keep their pace, don't stop.
+enable()
+odom_v[0] = 0.5
+phase("pace: settle at 3.0 m, rover at 0.5 (odometry)", 2.0, 3.0)
+r_pace = phase("  ...3.0 m, rover at 0.5: they walk at 0.5", 2.5, 3.0)
+# They stop: the rover (still 0.5 by odometry) closes in, the range shrinks 0.5 m/s -> their pace 0.
+cmds.clear()
+t0, rng = time.time(), 4.0
+while time.time() - t0 < 3.0:
+    rng = 4.0 - 0.5 * (time.time() - t0)
+    p = PoseStamped(); p.header.frame_id = "base_footprint"
+    p.header.stamp = n.get_clock().now().to_msg()
+    p.pose.position.x = rng
+    tgt.publish(p); spin(0.05)
+vs_stop = [c.linear.x for c in cmds[-10:]] or [1.0]
+print(f"  {'they stop: range 4.0 -> 2.5 at 0.5 m/s':44s} -> last v {vs_stop[-1]:+.3f}")
+odom_v[0] = None
+
+
 def quiet(r):
     """No motion commanded: silent, or zeros only."""
     return r is None or (abs(r[0]) < 1e-6 and abs(r[1]) < 1e-6 and abs(r[2]) < 1e-6 and abs(r[3]) < 1e-6)
@@ -163,6 +196,9 @@ def quiet(r):
 
 checks = [
     ("silent while disabled", r_dis is None),
+    ("keeps a walking person's pace in the deadband (0.35..0.6)", r_pace and 0.35 <= r_pace[1] <= 0.6 + 1e-6
+     and r_pace[0] >= 0.25),
+    ("slows right down when the person stops", max(vs_stop) < 0.25),
     ("drives forward when too far", r_fwd and r_fwd[1] > 0.05),
     ("respects max_linear 0.6 (the default)", r_fwd and r_fwd[1] <= 0.6 + 1e-6),
     ("settles to zero in the deadband (after ramping down)", r_dead and r_dead[0] < 1e-6),
