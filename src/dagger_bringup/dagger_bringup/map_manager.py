@@ -41,6 +41,17 @@ while GPS is not good enough to drive on (home, the way home and Go to a place o
 the Earth from the GPS seen on the way, as a map being made is. It is never saved: showing a saved
 map or making one ends it (one slam_toolbox at a time); it starts again, new, afterwards.
 
+NEVER ACROSS AN ODOMETRY LOSS OR JUMP (owner, 2026-11-18: after a dagger-nav restart the map of
+this drive drew its walls twice): SLAM places each scan by odometry. When /odometry/filtered goes
+silent (odom_lost_s: a restart or a crash) the running SLAM is stopped at once, before the reset
+odometry can smear the map; when odometry is back, the map of this drive starts new and a saved map
+is found again (GPS, or "I am here"). A jump (odom_jump_m / odom_jump_rad between two messages)
+does the same, after a short hold. A map being made by the operator (Make map) is left alone and
+only logged: the operator saves or discards it.
+
+SAVING THE MAP OF THIS DRIVE: /maps/save_map while no map is being made keeps the map of this drive
+as a saved map (the same files as Make map); the map of this drive goes on.
+
 STARTING AND STOPPING SLAM is never done in a service call: a ros2 launch takes
 seconds to stop, longer than the gateway waits (Stop showing went unanswered,
 2026-10-16). The services answer at once with what was asked; the Launches
@@ -57,7 +68,7 @@ import time
 
 import rclpy
 from geometry_msgs.msg import PoseWithCovarianceStamped
-from nav_msgs.msg import OccupancyGrid
+from nav_msgs.msg import OccupancyGrid, Odometry
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
@@ -72,6 +83,7 @@ from dagger_msgs.srv import MapName
 from .launches import Launches
 from .map_store import PICTURES, MapStore, grid_to_pgm, picture_from_array, save_grid
 from .map_tie import Tie, geo_yaml, to_latlon
+from .odom_watch import OdomWatch
 
 LIVE = "~live"                 # the map being made, as the gateway names its picture
 DRIVE = "~drive"               # the map of this drive (drive_map), as it is listed
@@ -98,6 +110,17 @@ class MapManager(Node):
         self.drive_on = False          # its shadow mapping runs
         self.drive_subs = []
         self.drive_info = None         # MapInfo of it, once SLAM has drawn something
+        self.drive_grid = None         # its latest /slam/map, to save it
+        self.saving_drive = False      # the save running is of the map of this drive
+        # Odometry watch: SLAM never draws across a loss or a jump of it.
+        self.declare_parameter("odom_topic", "/odometry/filtered")
+        self.declare_parameter("odom_lost_s", 2.0)
+        self.declare_parameter("odom_jump_m", 1.5)       # between two messages under 0.5 s apart
+        self.declare_parameter("odom_jump_rad", 0.5)     # between two messages under 0.2 s apart
+        self.odom = OdomWatch(float(self.get_parameter("odom_lost_s").value),
+                              float(self.get_parameter("odom_jump_m").value),
+                              float(self.get_parameter("odom_jump_rad").value))
+        self.slam_hold_until = 0.0     # monotonic s: no SLAM started before this (after a jump)
         self.store = MapStore(self.get_parameter("map_dir").value)
         self.latched = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
                                   durability=DurabilityPolicy.TRANSIENT_LOCAL,
@@ -129,6 +152,9 @@ class MapManager(Node):
         self.publish_status()
         self.create_timer(float(self.get_parameter("rescan_s").value), self.rescan)
         self.create_timer(0.5, self.after_save)
+        self.create_subscription(Odometry, self.get_parameter("odom_topic").value, self.on_odom,
+                                 qos_profile_sensor_data)
+        self.create_timer(0.5, self.watch_odom)
         self.get_logger().info(f"{len(self.store.maps)} maps in {self.store.folder}; "
                                f"shown: '{self.store.shown()}'")
 
@@ -161,15 +187,57 @@ class MapManager(Node):
         going stops first (the worker keeps the order)."""
         shown = self.store.shown()
         m = self.store.maps.get(shown)
-        wanted = shown if (m is not None and not self.mapping_on) else ""
-        drive = self.drive_enabled and not self.mapping_on and not wanted
+        held = self.odom.lost or time.monotonic() < self.slam_hold_until
+        wanted = shown if (m is not None and not self.mapping_on and not held) else ""
+        drive = self.drive_enabled and not self.mapping_on and not wanted and not held
+        changed = False
         if self.drive_on and not drive:
             self.drive_stop()
+            changed = True
         if wanted != self.loc_name:
             self.loc_name = wanted
             self.launches.localize(wanted)     # done on the worker; answered already
+            changed = True
         if drive and not self.drive_on:
             self.drive_start()
+            changed = True
+        return changed
+
+    # ---------------- odometry watch ----------------
+    def on_odom(self, m):
+        p, q = m.pose.pose.position, m.pose.pose.orientation
+        said = self.odom.step(time.monotonic(), p.x, p.y, yaw_of(q))
+        if said == "back":
+            self.get_logger().warn("odometry is back: SLAM starts again (a new map of this drive, "
+                                   "or finding the rover on the shown map again)")
+            self.slam_hold_until = time.monotonic() + 1.0     # let the new odometry settle first
+        elif said == "jump":
+            self.slam_off("odometry jumped", hold_s=1.0)
+
+    def watch_odom(self):
+        """Every 0.5 s: odometry silent -> SLAM off; a hold ended -> SLAM on again."""
+        now = time.monotonic()
+        if self.odom.check(now) == "lost":
+            self.slam_off(f"odometry silent for more than {self.odom.lost_s:g} s (restart or crash)")
+        elif not self.odom.lost and self.slam_hold_until and now >= self.slam_hold_until:
+            self.slam_hold_until = 0.0
+            if self.update_localization():
+                self.publish()
+
+    def slam_off(self, why, hold_s=0.0):
+        """Stop the SLAM that odometry places (the map of this drive, or finding the rover on the
+        shown map) before a bad odometry is drawn into it; it starts again after the hold."""
+        if hold_s:
+            self.slam_hold_until = time.monotonic() + hold_s
+        if self.mapping_on:
+            self.get_logger().error(f"{why}: the map being made may be wrong from here -- save or "
+                                    "discard it (left running)")
+            return
+        if not (self.drive_on or self.loc_name):
+            return
+        self.get_logger().warn(f"{why}: SLAM stopped so no wrong place is drawn into the map")
+        if self.update_localization():
+            self.publish()
 
     # ---------------- the map of this drive ----------------
     def drive_start(self):
@@ -191,7 +259,7 @@ class MapManager(Node):
             self.destroy_subscription(sub)
         self.drive_subs = []
         self.launches.map(False)
-        self.drive_on, self.drive_info, self.tie = False, None, None
+        self.drive_on, self.drive_info, self.drive_grid, self.tie = False, None, None, None
         self.remove_pictures(DRIVE)
         self.get_logger().info("the map of this drive: stopped (a saved map shown, or a map being made)")
 
@@ -209,6 +277,7 @@ class MapManager(Node):
         path = os.path.join(self.store.folder, PICTURES, f"{DRIVE}-{self.version}.png")
         picture_from_array(grid_to_pgm(g), path)
         self.remove_pictures(DRIVE, keep=os.path.basename(path))
+        self.drive_grid = g
         self.drive_info = self.info_of(DRIVE, g, path, self.tie.fit() if self.tie is not None else None)
         self.publish()
 
@@ -329,9 +398,11 @@ class MapManager(Node):
         self.publish_status()
 
     def on_save_map(self, req, res):
-        if not self.mapping_on or self.saving:
+        if self.saving:
             res.ok, res.error = False, "not mapping"
             return res
+        if not self.mapping_on:
+            return self.save_drive(req, res)
         if self.grid is None:
             res.ok, res.error = False, "nothing mapped"
             return res
@@ -343,6 +414,25 @@ class MapManager(Node):
         self.publish_status()
         grid, fit = self.grid, self.tie.fit()
         threading.Thread(target=self.save_worker, args=(name, grid, fit), daemon=True).start()
+        res.ok, res.error = True, ""
+        return res
+
+    def save_drive(self, req, res):
+        """Keep the map of this drive as a saved map (owner, 2026-11-18). It goes on."""
+        if not self.drive_on:
+            res.ok, res.error = False, "not mapping"
+            return res
+        if self.drive_grid is None:
+            res.ok, res.error = False, "nothing mapped"
+            return res
+        name = self.store.safe_name(req.name) or self.store.suggested_name()
+        if self.store.name_taken(name):
+            res.ok, res.error = False, "name taken"
+            return res
+        self.saving, self.saving_drive = True, True
+        grid, fit = self.drive_grid, self.tie.fit() if self.tie is not None else None
+        threading.Thread(target=self.save_worker, args=(name, grid, fit), daemon=True).start()
+        self.get_logger().info(f"saving the map of this drive as '{name}'")
         res.ok, res.error = True, ""
         return res
 
@@ -383,6 +473,11 @@ class MapManager(Node):
         except queue.Empty:
             return
         self.saving = False
+        if self.saving_drive:                  # the map of this drive: listed, and it goes on
+            self.saving_drive = False
+            self.store.scan()
+            self.publish()
+            return
         if ok:
             self.stop_mapping()
             self.store.scan()

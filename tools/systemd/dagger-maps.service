@@ -1,6 +1,8 @@
 [Unit]
 Description=Dagger: the operator's saved maps for the app (map manager, ~/dagger_maps)
-PartOf=dagger.target
+# Restarted with dagger-nav (owner, 2026-11-18): its odometry restarts from zero, and SLAM placed
+# by the old one would draw the walls twice. (The map manager also watches odometry itself.)
+PartOf=dagger.target dagger-nav.service
 After=dagger-clock.service
 Wants=dagger-clock.service
 
@@ -8,7 +10,7 @@ Wants=dagger-clock.service
 Type=simple
 User=nvidia
 Group=dagger
-# Reads map files only: no SLAM is started, nothing moves.
+# Maps and SLAM in its own shadow frame (shown map, the map of this drive): nothing moves.
 ExecStart=/home/jetson/ros2_ws/tools/systemd/dagger-ros-env.sh ros2 run dagger_bringup map_manager --ros-args -p drive_map:=true
 Restart=on-failure
 RestartSec=3

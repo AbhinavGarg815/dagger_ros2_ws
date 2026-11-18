@@ -1200,6 +1200,8 @@ class Gateway:
         if self.map_home is not None and self.map_home[0] == DRIVE and (ml is None or ml.localizing != DRIVE):
             self.map_home, self.map_trail = None, None
             self.log.warn("home was on the map of this drive, which is gone: no home now")
+        if self.map_trail is not None and self.map_trail.name == DRIVE and (ml is None or ml.localizing != DRIVE):
+            self.map_trail = None              # a new map of this drive has a new frame: the old track means nothing
         odom = self.node.odom_now()
         if odom is None:
             return

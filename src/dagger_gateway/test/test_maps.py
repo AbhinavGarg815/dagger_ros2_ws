@@ -130,7 +130,8 @@ def test_the_map_of_this_drive_is_listed_and_shown_only_while_in_use():
     drive = info("~drive", placed=False)
     msg = NS(maps=[drive, info("lane3fix")], shown="", localizing="~drive")
     out = map_list_pb(msg)
-    assert [m.name for m in out.maps] == ["lane3fix"] and out.shown == "", "GPS good: the GPS map, not this one"
+    assert [m.name for m in out.maps] == ["~drive", "lane3fix"] and out.shown == "", \
+        "GPS good: listed (it can be saved), not shown -- the GPS map is in use"
     out = map_list_pb(msg, drive_in_use=True)
     assert [m.name for m in out.maps] == ["~drive", "lane3fix"] and out.shown == "~drive"
     assert out.maps[0].drive_map and not out.maps[1].drive_map

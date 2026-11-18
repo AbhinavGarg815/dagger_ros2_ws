@@ -158,14 +158,12 @@ def mapping_pb(status):
 
 def map_list_pb(msg, drive_in_use=False):
     """dagger_msgs/MapList -> the contract's MapList (None: no list heard yet). The map of this
-    drive is listed, and shown, only while it is the map in use (drive_in_use: GPS not good
-    enough to drive on); it is never a saved map."""
+    drive is listed whenever the rover makes it (drive_map, so it can be saved: SaveMap), and shown
+    only while it is the map in use (drive_in_use: GPS not good enough to drive on)."""
     out = pb.MapList()
     if msg is None:
         return out
     for m in msg.maps:
-        if m.name == DRIVE and not drive_in_use:
-            continue
         out.maps.append(summary_pb(m))
     out.shown = msg.shown if any(m.name == msg.shown for m in msg.maps) else ""
     if drive_in_use and any(m.name == DRIVE for m in msg.maps):
