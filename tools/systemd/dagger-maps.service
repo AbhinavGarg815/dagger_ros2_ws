@@ -9,7 +9,7 @@ Type=simple
 User=nvidia
 Group=dagger
 # Reads map files only: no SLAM is started, nothing moves.
-ExecStart=/home/jetson/ros2_ws/tools/systemd/dagger-ros-env.sh ros2 run dagger_bringup map_manager
+ExecStart=/home/jetson/ros2_ws/tools/systemd/dagger-ros-env.sh ros2 run dagger_bringup map_manager --ros-args -p drive_map:=true
 Restart=on-failure
 RestartSec=3
 KillSignal=SIGINT
