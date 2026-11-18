@@ -54,6 +54,21 @@ def to_latlon(fit, x, y):
     return fit["lat0"] + n / ky, fit["lon0"] + e / kx
 
 
+def carry_fit(fit, old_pose, new_pose, extra_rms_m=0.5):
+    """A tie for a NEW map from the old map's tie (owner, 2026-11-18: indoors, a restarted map of this
+    drive has no GPS to tie it): the rover stood at old_pose = (x, y, yaw) on the old map and is at
+    new_pose on the new one, the same spot and heading on the Earth (it did not move while odometry
+    restarted). Returns a fit dict like Tie.fit(), datum at the rover; its rms is the old one plus
+    extra_rms_m (the restart's own error)."""
+    lat, lon = to_latlon(fit, old_pose[0], old_pose[1])
+    rot = fit["rot"] + old_pose[2] - new_pose[2]            # map yaw -> ENU yaw, kept for the rover
+    c, s = math.cos(rot), math.sin(rot)
+    x, y = new_pose[0], new_pose[1]
+    rms = float(fit.get("rms", 0.0)) + extra_rms_m
+    return {"lat0": lat, "lon0": lon, "rot": rot, "tx": -(c * x - s * y), "ty": -(s * x + c * y),
+            "rms": rms, "max": rms, "kept": 0, "carried": True}
+
+
 def geo_yaml(fit, made_from):
     """The <name>_geo.yaml text, in tools/slam_georef.py's format."""
     return (f"# slam_map -> local ENU at the datum:  p_enu = R(yaw) * p_map + t\n"

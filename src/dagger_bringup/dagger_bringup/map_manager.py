@@ -82,7 +82,7 @@ from dagger_msgs.srv import MapName
 
 from .launches import Launches
 from .map_store import PICTURES, MapStore, grid_to_pgm, picture_from_array, save_grid
-from .map_tie import Tie, geo_yaml, to_latlon
+from .map_tie import Tie, carry_fit, geo_yaml, to_latlon
 from .odom_watch import OdomWatch
 
 LIVE = "~live"                 # the map being made, as the gateway names its picture
@@ -121,6 +121,12 @@ class MapManager(Node):
                               float(self.get_parameter("odom_jump_m").value),
                               float(self.get_parameter("odom_jump_rad").value))
         self.slam_hold_until = 0.0     # monotonic s: no SLAM started before this (after a jump)
+        # The Earth tie carried across a restart of the map of this drive (indoors there is no GPS
+        # to tie the new one): (old fit, the rover's pose on the old map) when it stopped, then the
+        # new map's fit once its first pose is known.
+        self.slam_pose_last = None     # (x, y, yaw) of the latest /slam/pose
+        self.carry = None
+        self.carried_fit = None
         self.store = MapStore(self.get_parameter("map_dir").value)
         self.latched = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
                                   durability=DurabilityPolicy.TRANSIENT_LOCAL,
@@ -238,9 +244,13 @@ class MapManager(Node):
         self.get_logger().warn(f"{why}: SLAM stopped so no wrong place is drawn into the map")
         if self.update_localization():
             self.publish()
+        self.carry_ok = True               # the next map of this drive may take the old tie
 
     # ---------------- the map of this drive ----------------
     def drive_start(self):
+        if not getattr(self, "carry_ok", False):
+            self.carry = None                  # not after an odometry restart: nothing to carry
+        self.carry_ok = False
         self.drive_on, self.drive_info, self.version = True, None, 0
         self.tie = Tie()
         self.launches.map(True)
@@ -255,6 +265,11 @@ class MapManager(Node):
         self.get_logger().info("the map of this drive: mapping (no saved map shown)")
 
     def drive_stop(self):
+        # Keep where the rover was on the Earth, to tie the next map of this drive (carry_fit).
+        fit = self.tie.fit() if self.tie is not None else None
+        fit = fit or self.carried_fit
+        self.carry = (fit, self.slam_pose_last) if fit is not None and self.slam_pose_last is not None else None
+        self.carried_fit, self.slam_pose_last = None, None
         for sub in self.drive_subs:
             self.destroy_subscription(sub)
         self.drive_subs = []
@@ -278,7 +293,9 @@ class MapManager(Node):
         picture_from_array(grid_to_pgm(g), path)
         self.remove_pictures(DRIVE, keep=os.path.basename(path))
         self.drive_grid = g
-        self.drive_info = self.info_of(DRIVE, g, path, self.tie.fit() if self.tie is not None else None)
+        fit = self.tie.fit() if self.tie is not None else None
+        # GPS on the way ties it; until then, the tie carried over a restart (if any)
+        self.drive_info = self.info_of(DRIVE, g, path, fit or self.carried_fit)
         self.publish()
 
     def info_of(self, name, g, path, fit):
@@ -365,8 +382,15 @@ class MapManager(Node):
             self.tie.add_heading(stamp_s(m.header), yaw_of(m.orientation))
 
     def on_pose(self, m):
+        p = m.pose.pose
+        pose = (p.position.x, p.position.y, yaw_of(p.orientation))
+        if self.drive_on and self.carry is not None and self.carried_fit is None:
+            # the new map's first pose: the same spot on the Earth as the last one on the old map
+            self.carried_fit = carry_fit(self.carry[0], self.carry[1], pose)
+            self.get_logger().info(f"the map of this drive: its Earth tie carried over the restart "
+                                   f"(about {self.carried_fit['rms']:.1f} m)")
+        self.slam_pose_last = pose
         if self.tie is not None:
-            p = m.pose.pose
             self.tie.add_pose(stamp_s(m.header), p.position.x, p.position.y, yaw_of(p.orientation))
 
     def on_grid(self, g):
