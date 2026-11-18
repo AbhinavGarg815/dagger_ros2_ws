@@ -139,6 +139,9 @@ HEADING_HOLD_S = 10.0          # a GNSS heading dropout is bridged on odometry t
 MISSION_SETTLE_S = 1.0
 
 
+from .gps_watch import TurnExcuse  # noqa: E402
+
+
 class RosIO(Node):
 
     def __init__(self):
@@ -302,6 +305,9 @@ class RosIO(Node):
         # telemetry and readiness: one subscription per topic, shared by both
         self.seen = {t: Seen() for t, _, _ in TOPICS}
         self.gps_yaw_valid = Series(10.0)  # per gps1/raw: dual-antenna heading valid (Readiness.heading)
+        # ... or excused: lost while the rover turns, the gyros holding it (TurnExcuse, owner 2026-11-18)
+        self.gps_yaw_ok = Series(10.0)
+        self.turn_excuse = TurnExcuse()
         # The last valid GNSS heading and the odometry yaw at that moment: across a
         # short dropout the heading is carried on by how much the rover has turned since
         # (as the FCU's EKF does on its gyros) -- (deg, monotonic s, odom yaw rad).
@@ -362,6 +368,10 @@ class RosIO(Node):
             if topic == "/mavros/gpsstatus/gps1/raw":
                 valid = msg.yaw not in (0, 65535)
                 self.gps_yaw_valid.add(valid, now)
+                # the rover's yaw rate: fused odometry (the IMU is subscribed raw, undecoded)
+                od = self.fresh("/odometry/filtered", 0.5)
+                rate = od.twist.twist.angular.z if od is not None else 0.0
+                self.gps_yaw_ok.add(self.turn_excuse.step(now, valid, rate), now)
                 if valid:
                     yaw = self.odom_yaw()
                     if yaw is not None:

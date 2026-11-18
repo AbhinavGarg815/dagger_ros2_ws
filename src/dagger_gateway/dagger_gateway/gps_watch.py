@@ -30,6 +30,32 @@ class Hold:
         return now - self.since >= self.after_s
 
 
+class TurnExcuse:
+    """The dual-antenna GNSS heading lost while the rover turns (owner, 2026-11-18: every sharp, small
+    or in-place turn showed "direction not reliable"): the antennas drop the heading on a turn while
+    the autopilot's gyros hold it well over seconds. A sample with no heading is excused while the
+    rover turns (|yaw rate| >= rate_rad_s) and for after_s after, for at most max_s in a row -- longer
+    is a real loss and counts again. step() says whether the sample counts as having a heading."""
+
+    def __init__(self, rate_rad_s=0.15, after_s=3.0, max_s=20.0):
+        self.rate, self.after_s, self.max_s = rate_rad_s, after_s, max_s
+        self.turned_at = None          # monotonic s of the last turning sample
+        self.since = None              # monotonic s the current run of excused samples began
+
+    def step(self, now, valid, yaw_rate):
+        if abs(yaw_rate) >= self.rate:
+            self.turned_at = now
+        if valid:
+            self.since = None
+            return True
+        if self.turned_at is None or now - self.turned_at > self.after_s:
+            self.since = None
+            return False
+        if self.since is None:
+            self.since = now
+        return now - self.since <= self.max_s
+
+
 class GpsWatch:
 
     def __init__(self, lost_s=5.0, accuracy_m=3.0, back_s=10.0):

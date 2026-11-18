@@ -60,6 +60,23 @@ def test_the_autopilot_disagreeing_with_gps_for_5_s():
         "GPS lost: nothing to compare with"
 
 
+def test_a_heading_lost_while_turning_is_excused_for_a_while():
+    # Owner, 2026-11-18: every turn showed "direction not reliable"; the gyros hold it meanwhile.
+    from dagger_gateway.gps_watch import TurnExcuse
+    e = TurnExcuse(rate_rad_s=0.15, after_s=3.0, max_s=20.0)
+    assert e.step(0.0, True, 0.0), "a heading counts"
+    assert not e.step(0.2, False, 0.0), "lost while driving straight: not excused"
+    assert e.step(1.0, False, 0.6), "lost while pivoting: excused"
+    assert e.step(3.5, False, 0.0), "2.5 s after the turn: still excused"
+    assert not e.step(4.5, False, 0.0), "3.5 s after: counts again"
+    assert e.step(5.0, True, 0.0)
+    t = 10.0
+    for k in range(30):                            # a 30 s pivot with no heading
+        ok = e.step(t + k, False, 0.5)
+        assert ok == (k <= 20), f"{k} s into a long turn"
+    assert e.step(41.0, True, 0.5), "back: counts"
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

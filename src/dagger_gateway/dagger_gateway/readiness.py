@@ -160,16 +160,19 @@ class Readiness:
                 gps_heading_imu helper silent while GNSS has a heading (seen at a bad
                 boot, 2026-10-13: the EKF then gets no heading).
         The FCU estimator check (Q67: EK3 diverged with the heading valid 8 %) stays
-        in the position check."""
+        in the position check. A heading lost while the rover turns is excused (TurnExcuse,
+        owner 2026-11-18: every turn showed "not reliable") -- the helper check below still
+        judges the real samples."""
         io = self.io
-        v = io.gps_yaw_valid.values(now)
+        v = io.gps_yaw_ok.values(now)
         frac = sum(v) / len(v) if v else 0.0
-        gap = io.gps_yaw_valid.since_true(now)
+        gap = io.gps_yaw_ok.since_true(now)
+        raw_gap = io.gps_yaw_valid.since_true(now)
         values = {"valid_percent": round(100.0 * frac), "gap_s": round(min(gap, 999.0), 1)}
         raw = io.seen["/mavros/gpsstatus/gps1/raw"]
         if raw.rate(now) < 4.0 or raw.age(now) >= 2.0 or gap > HEADING_GAP_FAIL_S:
             return FAIL, values
-        if gap <= 1.0 and io.seen["/gps/heading_imu"].age(now) > HEADING_GAP_OK_S:
+        if raw_gap <= 1.0 and io.seen["/gps/heading_imu"].age(now) > HEADING_GAP_OK_S:
             return FAIL, values
         if gap > HEADING_GAP_OK_S or frac < HEADING_MIN_VALID:
             return WARN, values
